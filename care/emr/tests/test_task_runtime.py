@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from django.db import transaction
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from model_bakery import baker
 
 from care.emr.models.resource_category import (
@@ -316,11 +316,22 @@ class ReportRetryPortabilityTests(CareAPITestBase):
             )
 
 
-class TaskNameStabilityTests(TestCase):
+class CeleryRegistrationTests(SimpleTestCase):
     """
-    A worker draining a queue written by an older revision must still recognise
-    every task in it. Renaming a wrapper without pinning its name would strand
-    queued work as ``NotRegistered``.
+    What a Celery worker actually registers at startup.
+
+    Two failures this guards against, both silent until a task is dispatched:
+
+    *Missing* -- `autodiscover_tasks` imports `care.emr.tasks` and no deeper, so
+    a wrapper in a submodule the package does not import never reaches the
+    worker. This regressed during ADR-0003 and was caught only by inspecting a
+    running worker, because in this test process other imports had already
+    pulled the modules in. Hence the subprocess: it is the one way to observe
+    what a cold worker sees.
+
+    *Renamed* -- a worker draining a queue written by an older revision must
+    still recognise every name in it, so the set below is exact rather than a
+    subset.
     """
 
     EXPECTED = {
@@ -332,13 +343,29 @@ class TaskNameStabilityTests(TestCase):
         "care.emr.tasks.totp.send_totp_enabled_email",
     }
 
-    def test_celery_task_names_are_unchanged(self):
-        from config.celery_app import app
+    def test_a_cold_worker_registers_exactly_the_expected_task_names(self):
+        import json
+        import subprocess
+        import sys
 
-        # Exactly what a worker does at startup, so a wrapper in a module the
-        # tasks package forgets to import shows up here as a missing name.
-        app.loader.import_default_modules()
-        registered = {name for name in app.tasks if not name.startswith("celery.")}
+        program = (
+            "import django, os;"
+            "os.environ.setdefault("
+            "'DJANGO_SETTINGS_MODULE', 'config.settings.test');"
+            "django.setup();"
+            "from config.celery_app import app;"
+            "app.loader.import_default_modules();"
+            "import json;"
+            "print(json.dumps(sorted("
+            "n for n in app.tasks if not n.startswith('celery.'))))"
+        )
+        completed = subprocess.run(  # noqa: S603  # a literal program, no input
+            [sys.executable, "-c", program],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        registered = set(json.loads(completed.stdout.strip().splitlines()[-1]))
         self.assertEqual(registered, self.EXPECTED)
 
 

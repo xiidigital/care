@@ -1,11 +1,24 @@
 """
-Celery Beat registration for CARE's periodic operations.
+Celery task discovery and Beat registration.
 
-Retained for local Docker Compose and traditional deployments. The schedule
-still lives in code and still fires the same two operations, but it now fires
-them through thin wrappers: the operations themselves are ordinary functions
-that a Cloud Run Job or an operator can run through the equivalent management
-commands without a broker, a worker or a beat process.
+`autodiscover_tasks` imports each app's `tasks` module and goes no deeper, so
+for a package like this one only `__init__` runs. Every Celery wrapper in a
+submodule must therefore be imported here or the worker will not register it,
+and dispatching it fails with `NotRegistered` at runtime rather than at import.
+
+That is not hypothetical: it happened while implementing ADR-0003. The report
+and TOTP wrappers used to be registered by accident, because the viewsets that
+dispatched them imported the task functions directly and the worker happened to
+load those viewsets. Once the call sites moved to `enqueue_task`, nothing
+imported them and they silently vanished from the worker's registry. The
+imports below are what makes registration deterministic instead of incidental;
+`test_task_runtime.TaskNameStabilityTests` checks it in a fresh process.
+
+Beat registration is retained for local Docker Compose and traditional
+deployments. The schedule still lives in code and still fires the same two
+operations, but through thin wrappers: the operations themselves are ordinary
+functions that a Cloud Run Job or an operator runs through the equivalent
+management commands, with no broker, worker or beat process involved.
 
 The GCP profile does not run beat. ADR-0003 requires that the same operation is
 never scheduled by Beat and by Cloud Scheduler at once, so a deployment picks
@@ -21,11 +34,14 @@ from care.emr.tasks.cleanup_incomplete_file_uploads import (
     cleanup_incomplete_file_uploads_task,
 )
 
-# `autodiscover_tasks` imports this package and no deeper, so a wrapper in a
-# submodule this package does not import would never reach the worker. Imported
-# for its registration side effect; nothing here calls it.
-from care.emr.tasks.resource_category import (  # noqa: F401
+# Imported for their registration side effect; nothing here calls them.
+from care.emr.tasks.report_generation import generate_report_task
+from care.emr.tasks.resource_category import (
     summarise_monetary_components_task,
+)
+from care.emr.tasks.totp import (
+    send_totp_disabled_email_task,
+    send_totp_enabled_email_task,
 )
 
 
