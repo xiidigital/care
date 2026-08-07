@@ -1,4 +1,3 @@
-```markdown
 # ES-02: File Transport Modernization
 
 - **Status:** Draft
@@ -1177,4 +1176,3 @@ NOT READY TO MERGE
 Stop after ES-02.
 
 Do not begin ES-03.
-```
