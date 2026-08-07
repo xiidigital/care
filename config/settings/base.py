@@ -20,6 +20,12 @@ from config.storage import (
     build_object_storage,
     validate_storage_backend,
 )
+from config.tasks import (
+    CLOUD_TASKS_BACKEND,
+    validate_cloud_tasks_settings,
+    validate_process_role,
+    validate_task_backend,
+)
 from plug_config import manager
 
 from .config import *  # noqa F403
@@ -437,6 +443,58 @@ CELERY_TASK_TIME_LIMIT = 1800 * 5
 # https://docs.celeryq.dev/en/latest/userguide/configuration.html#task-soft-time-limit
 # TODO: set to whatever value is adequate in your circumstances
 CELERY_TASK_SOFT_TIME_LIMIT = 1800
+
+# Portable asynchronous execution (ADR-0003)
+# ------------------------------------------------------------------------------
+# The transport carrying asynchronous work is a configuration choice. Celery
+# remains the default so a local checkout, Docker Compose and every traditional
+# deployment keep behaving exactly as before.
+CARE_TASK_BACKEND = validate_task_backend(
+    env("CARE_TASK_BACKEND", default="celery").strip().lower()
+)
+
+# Selects startup command, exposed routes and logging metadata. It never alters
+# clinical behaviour.
+CARE_PROCESS_ROLE = validate_process_role(
+    env("CARE_PROCESS_ROLE", default="api").strip().lower()
+)
+
+# The private task-execution route is served only by the worker role, so the
+# public API never exposes it. Set explicitly to override.
+CARE_TASK_HANDLER_ENDPOINT_ENABLED = env.bool(
+    "CARE_TASK_HANDLER_ENDPOINT_ENABLED", default=CARE_PROCESS_ROLE == "task_worker"
+)
+
+# Task payloads carry identifiers, not records. The ceiling is a guard against
+# a caller quietly enqueueing a whole clinical object.
+CARE_TASK_MAX_PAYLOAD_BYTES = env.int("CARE_TASK_MAX_PAYLOAD_BYTES", default=10 * 1024)
+
+# Payload logging is prohibited in production: payloads reference clinical data.
+CARE_TASK_LOG_PAYLOAD = env.bool("CARE_TASK_LOG_PAYLOAD", default=False)
+
+# Cloud Tasks. Required only when that backend is selected; a Celery deployment
+# needs none of these and must not be made to supply them.
+GCP_PROJECT_ID = env("GCP_PROJECT_ID", default="")
+GCP_TASKS_PROJECT_ID = env("GCP_TASKS_PROJECT_ID", default=GCP_PROJECT_ID)
+GCP_TASKS_LOCATION = env("GCP_TASKS_LOCATION", default="")
+GCP_TASKS_QUEUE = env("GCP_TASKS_QUEUE", default="")
+GCP_WORKER_URL = env("GCP_WORKER_URL", default="")
+GCP_TASKS_SERVICE_ACCOUNT = env("GCP_TASKS_SERVICE_ACCOUNT", default="")
+# Usually the worker service origin; it must match what the worker's IAM policy
+# expects. Defaults to the worker URL so a correct deployment needs one value.
+GCP_TASKS_OIDC_AUDIENCE = env("GCP_TASKS_OIDC_AUDIENCE", default=GCP_WORKER_URL)
+
+if CARE_TASK_BACKEND == CLOUD_TASKS_BACKEND:
+    validate_cloud_tasks_settings(
+        {
+            "GCP_TASKS_PROJECT_ID": GCP_TASKS_PROJECT_ID,
+            "GCP_TASKS_LOCATION": GCP_TASKS_LOCATION,
+            "GCP_TASKS_QUEUE": GCP_TASKS_QUEUE,
+            "GCP_WORKER_URL": GCP_WORKER_URL,
+            "GCP_TASKS_SERVICE_ACCOUNT": GCP_TASKS_SERVICE_ACCOUNT,
+            "GCP_TASKS_OIDC_AUDIENCE": GCP_TASKS_OIDC_AUDIENCE,
+        }
+    )
 
 # Maintenance Mode
 # ------------------------------------------------------------------------------

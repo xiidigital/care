@@ -26,10 +26,10 @@ from care.emr.resources.report.report_upload.spec import (
     ReportUploadListSpec,
     ReportUploadRetrieveSpec,
 )
-from care.emr.tasks.report_generation import generate_report_task
 from care.emr.utils.file_download import file_object_response
 from care.security.authorization.base import AuthorizationController
 from care.utils.shortcuts import get_object_or_404
+from care.utils.tasks import enqueue_task
 
 logger = logging.getLogger(__name__)
 
@@ -160,12 +160,18 @@ class ReportUploadViewSet(EMRRetrieveMixin, EMRListMixin, EMRBaseViewSet):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        generate_report_task.delay(
-            template_id=template_id,
-            report_type=template.template_type,
-            associating_id=associating_id,
-            output_format=output_format,
-            user_id=request.user.id,
+        # Dispatched directly rather than on commit: this action writes nothing
+        # the handler reads. Every row it names -- the template, the associating
+        # object, the user -- was committed by an earlier request.
+        enqueue_task(
+            "generate_report",
+            {
+                "template_id": template_id,
+                "report_type": template.template_type,
+                "associating_id": associating_id,
+                "output_format": output_format,
+                "user_id": request.user.id,
+            },
         )
 
         return Response(
