@@ -1,9 +1,10 @@
 # ES-03: Async Runtime Modernization
 
-- **Status:** Draft
+- **Status:** Implemented, pending merge
 - **Related ADR:** ADR-0003: Configurable Asynchronous Execution
 - **Depends on:** completed ES-01 and ES-02
 - **Target branch:** `feature/async-runtime-modernization`
+- **Closeout:** see §48
 
 ---
 
@@ -1326,3 +1327,50 @@ NOT READY TO MERGE
 Stop after ES-03.
 
 Do not begin ES-04.
+
+---
+
+# 48. Pre-Merge Closeout
+
+Added 2026-08-07, after implementation and before merge. This section records
+the outcome of a documentation-only architectural audit. No application code,
+test or runtime behaviour was changed by the audit or by this section.
+
+## 48.1 Acceptance criteria
+
+**No acceptance criterion in §46 changed.** All were met by the implementation
+and remain met. The audit produced no new requirement on this phase.
+
+## 48.2 Findings
+
+Three findings are recorded in `docs/xii/architecture/inventory/unresolved-items.md`,
+Part B4. They are labelled with an `(ES-03)` suffix because Parts A and C of that
+document already use `A1`, `C1` and `C2` for unrelated items.
+
+| Finding | Subject | Classification |
+| --- | --- | --- |
+| **A1 (ES-03)** | The worker route has no application-layer authentication; security depends entirely on Cloud Run IAM validating the Cloud Tasks OIDC token | `ES-06 / ES-07 blocker` for production deployment — **not** an ES-03 implementation defect |
+| **C1 (ES-03)** | `transaction.on_commit` makes a `committed-but-not-enqueued` state possible, affecting TOTP notifications and the resource-category fan-out | deliberate behaviour change; remedy deferred to reliability work under ADR-0003 |
+| **C2 (ES-03)** | The task registry imports handlers lazily, so a broken registration surfaces at first dispatch rather than at startup | `small async-runtime hardening item` — not a merge blocker |
+
+A1 (ES-03) is consistent with, and does not amend, §19 of this specification:
+the endpoint was required to be "designed to be protected by Cloud Run IAM", and
+application-level checks were required not to "pretend to replace platform IAM".
+The finding converts that design intent into an explicit deployment obligation on
+the infrastructure phases.
+
+## 48.3 Findings deliberately not duplicated
+
+Two further observations from the same audit are already recorded elsewhere and
+were not repeated:
+
+- the Redis lock in `sync_permissions_roles`, and the LocMem/Dummy cache shim
+  that lets it succeed without locking — `cache-and-redis.md` §4.2 and ADR-0005;
+- Cloud Tasks queue retry policy, including max attempts and maximum retry
+  duration — `07-configuration-reference.md` §18.9 and `06-operations.md`.
+
+## 48.4 Nothing was fixed
+
+Per the closeout scope, none of the three findings was implemented, and E7
+remains untouched. Each is recorded with its evidence, its classification and,
+where a remedy exists, the options — without selecting one.

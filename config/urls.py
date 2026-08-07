@@ -16,6 +16,7 @@ from care.users.reset_password_views import (
     ResetPasswordConfirm,
     ResetPasswordRequestToken,
 )
+from care.utils.tasks.views import execute_task
 from config import api_router
 
 from .auth_views import (
@@ -106,6 +107,18 @@ if settings.DEBUG or not settings.IS_PRODUCTION:
             name="swagger-ui",
         ),
         path("redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
+    ]
+
+if settings.CARE_TASK_HANDLER_ENDPOINT_ENABLED:
+    # Served only by the task-worker role, so the public API never routes it.
+    # The path matches the GCP_WORKER_URL documented in the configuration
+    # reference; Cloud Run IAM is what authenticates callers.
+    urlpatterns += [
+        path(
+            "internal/tasks/execute/",
+            execute_task,
+            name="internal_task_execute",
+        )
     ]
 
 for plug in settings.PLUGIN_APPS:

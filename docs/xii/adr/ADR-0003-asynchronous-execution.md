@@ -127,6 +127,10 @@ transaction.on_commit(...)
 
 A task SHALL not observe state that was subsequently rolled back.
 
+This requirement has a cost, accepted deliberately. Dispatching after commit moves the failure boundary: a dispatch failure can leave durable state committed and the task never enqueued, where dispatching inside the transaction would have rolled the state back. The resulting `committed-but-not-enqueued` state is not self-correcting.
+
+Recorded as **C1 (ES-03)** in the unresolved-items inventory, with the affected cases. Remedies -- a transactional outbox, a durable execution record, a reconciliation job, or domain-specific recovery -- belong with the idempotency and reliability work this ADR defers. None is selected here.
+
 ## Celery profile
 
 Celery SHALL remain supported for:
@@ -159,6 +163,22 @@ The worker SHALL:
 - scale to zero when idle.
 
 Google Cloud Tasks is an implementation of the asynchronous execution contract, not a dependency of CARE business logic.
+
+### Worker authentication is a platform responsibility
+
+The worker route carries no application-layer authentication or authorization, and SHALL NOT acquire any. Platform IAM is the authentication boundary.
+
+Consequently:
+
+- the worker service SHALL NOT allow unauthenticated invocation;
+- Cloud Run IAM is a production security requirement, not an optional hardening measure;
+- the infrastructure phases SHALL enforce authenticated-only invocation in the deployment definition rather than by convention;
+- the Cloud Tasks invoker service account SHALL hold only `roles/run.invoker` on the worker service;
+- no application shared secret SHALL be added to compensate for absent IAM. A shared secret is weaker than IAM and would misrepresent the endpoint as self-protecting. If IAM is missing, the deployment is what must change.
+
+The application contributes only structural defences: the route is not registered outside the task-worker role, and only registered task names are executable.
+
+Recorded as **A1 (ES-03)** in the unresolved-items inventory, classified an ES-06/ES-07 deployment blocker rather than an ES-03 defect.
 
 ## Other providers
 
@@ -314,11 +334,48 @@ This ADR does not choose:
 
 ## Implementation Status
 
+Implemented in ES-03, 2026-08-07.
+
 - [x] Decision accepted.
-- [ ] Reusable task logic extracted.
-- [ ] Narrow dispatcher implemented.
-- [ ] Celery backend preserved.
-- [ ] Cloud Tasks backend implemented.
-- [ ] Private worker implemented.
-- [ ] Periodic work moved to explicit scheduler and jobs.
-- [ ] Initialization removed from Celery startup dependency.
+- [x] Reusable task logic extracted. Six operations are ordinary functions with
+      thin Celery wrappers; two never-dispatched tasks lost their decorators
+      entirely.
+- [x] Narrow dispatcher implemented. `care.utils.tasks.enqueue_task` and
+      `enqueue_task_on_commit`, selected by `CARE_TASK_BACKEND`.
+- [x] Celery backend preserved. Task names unchanged, Beat schedule unchanged,
+      local Compose unchanged.
+- [x] Cloud Tasks backend implemented, using the official client and
+      Application Default Credentials.
+- [x] Private worker implemented at `POST /internal/tasks/execute/`, routed only
+      under `CARE_PROCESS_ROLE=task_worker`.
+- [x] Periodic work exposed as management commands that need no worker or
+      scheduler. Beat registration retained for local use; **Cloud Scheduler and
+      Cloud Run Jobs themselves are ES-06/ES-07 infrastructure work.**
+- [x] Initialization removed from Celery startup dependency. `migrate`,
+      `sync_permissions_roles` and `sync_valueset` moved to
+      `scripts/initialize.sh`, which the beat entrypoints call for local
+      compatibility and a deploy job can run alone.
+
+Deliberately **not** done, and still open:
+
+- Task results are still not persisted, because no caller reads one. The Celery
+  result backend remains configured and unread (C4).
+- Report generation is still not idempotent under retry (B5). Retry is now
+  bounded by an explicit classification rather than by the storage provider,
+  which is what S2 required; durable de-duplication belongs with the
+  report-progress decision this ADR defers.
+- The `postgres` task backend named above is not implemented and is rejected as
+  a configuration value rather than silently accepted.
+
+A pre-merge architectural audit recorded three further findings in the
+unresolved-items inventory, Part B4. None is an ES-03 implementation defect and
+none blocks merging this phase:
+
+- **A1 (ES-03)** -- worker security depends entirely on Cloud Run IAM. An
+  **ES-06/ES-07 deployment blocker**: the worker service must not permit
+  unauthenticated invocation, and no application secret may be added instead.
+- **C1 (ES-03)** -- `transaction.on_commit` makes a `committed-but-not-enqueued`
+  state possible. Deliberate; the remedy is deferred reliability work.
+- **C2 (ES-03)** -- the task registry loads handlers lazily, so a broken
+  registration surfaces at first dispatch rather than at startup. A small
+  hardening item.

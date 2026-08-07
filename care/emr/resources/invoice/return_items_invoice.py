@@ -10,7 +10,7 @@ from care.emr.models.charge_item import ChargeItem
 from care.emr.models.invoice import Invoice
 from care.emr.models.supply_delivery import DeliveryOrder, SupplyDelivery
 from care.emr.resources.account.default_account import get_default_account
-from care.emr.resources.account.sync_items import rebalance_account_task
+from care.emr.resources.account.sync_items import rebalance_account
 from care.emr.resources.charge_item.apply_charge_item_definition import (
     apply_charge_item_definition,
 )
@@ -84,7 +84,7 @@ def generate_return_invoice(delivery_order: DeliveryOrder):
         invoice_obj.save()
         delivery_order.patient_invoice = invoice_obj
         delivery_order.save(update_fields=["patient_invoice", "modified_date"])
-    rebalance_account_task(invoice_obj.account.id)
+    rebalance_account(invoice_obj.account.id)
     return invoice_obj
 
 
@@ -116,7 +116,7 @@ def cancel_return_invoice(delivery_order: DeliveryOrder):
                         "modified_date",
                     ]
                 )
-            rebalance_account_task(delivery_order.patient_invoice.account.id)
+            rebalance_account(delivery_order.patient_invoice.account.id)
 
         supply_deliveries = SupplyDelivery.objects.filter(order=delivery_order)
         for supply_delivery in supply_deliveries:

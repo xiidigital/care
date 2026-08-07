@@ -16,6 +16,7 @@ from care.emr.reports.renderer.template_engine import TemplateEngine
 from care.emr.reports.report_type_registry import ReportTypeRegistry
 from care.emr.reports.report_type_utils import validate_associating_id
 from care.users.models import User
+from care.utils.tasks.exceptions import RetryableTaskError
 
 logger = logging.getLogger(__name__)
 LOCK_DURATION = 2 * 60
@@ -45,7 +46,7 @@ def generate_and_upload_report(  # noqa:PLR0915
     report_type: str,
     associating_id: str,
     output_format: str = "pdf",
-    **kwargs,
+    user_id: int | None = None,
 ) -> ReportUpload:
     context_class = DataPointRegistry.get(template.context)
     if not context_class:
@@ -67,7 +68,6 @@ def generate_and_upload_report(  # noqa:PLR0915
     context_key = context_class.context_key or template.context
     context = {context_key: context_class(context=associating_object)}
 
-    user_id = kwargs.get("user_id")
     user = None
     if user_id:
         try:
@@ -131,6 +131,14 @@ def generate_and_upload_report(  # noqa:PLR0915
         report_upload.save()
     except Exception as e:
         report_upload.delete()
-        raise e
+        # This is the storage-provider boundary, and the only place report
+        # generation can see a provider exception. Translating here is what
+        # makes retry portable: the caller decides whether to retry from
+        # CARE's own classification rather than from `botocore.ClientError`,
+        # which does not exist under GCS. Writing an object is I/O against an
+        # external service, so the failure is treated as transient; the bounded
+        # retry count keeps an over-classified permanent failure cheap.
+        msg = f"Storing report object failed for {report_upload.internal_name}"
+        raise RetryableTaskError(msg) from e
 
     return report_upload

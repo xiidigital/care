@@ -6,7 +6,6 @@ from django.db.models import Max
 from django.utils import timezone
 
 from care.emr.models import EMRBaseModel, Encounter
-from config.celery_app import app
 
 
 class FacilityLocation(EMRBaseModel):
@@ -156,10 +155,16 @@ class FacilityLocationEncounter(EMRBaseModel):
     end_datetime = models.DateTimeField(default=None, null=True, blank=True)
 
 
-@app.task
 def handle_cascade(base_location):
     """
-    Cascade changes to a location organization to all its children
+    Cascade changes to a location organization to all its children.
+
+    This carried an ``@app.task`` decorator before ADR-0003, but neither call
+    site ever dispatched it: ``cascade_changes`` above calls it directly and the
+    recursion below calls itself directly, so the whole subtree has always been
+    walked synchronously inside the triggering request. The decorator advertised
+    an asynchrony that did not exist and made a model module import the Celery
+    application; removing it changes no behaviour.
     """
 
     for child in FacilityLocation.objects.filter(parent_id=base_location):

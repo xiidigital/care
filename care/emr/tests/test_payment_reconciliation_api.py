@@ -216,9 +216,9 @@ class PaymentReconciliationAPITest(CareAPITestBase):
         payment_reconciliation = baker.make(
             "emr.PaymentReconciliation", facility=facility or self.facility, **data
         )
-        from care.emr.resources.account.sync_items import rebalance_account_task
+        from care.emr.resources.account.sync_items import rebalance_account
 
-        rebalance_account_task(payment_reconciliation.account_id)
+        rebalance_account(payment_reconciliation.account_id)
         return payment_reconciliation
 
     # Test cases for create payment reconciliation

@@ -1,4 +1,3 @@
-```markdown
 # ES-04: Cache Modernization
 
 - **Status:** Draft
@@ -1354,4 +1353,3 @@ NOT READY TO MERGE
 Stop after ES-04.
 
 Do not begin ES-05.
-```

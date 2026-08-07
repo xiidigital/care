@@ -1,28 +1,48 @@
-from botocore.exceptions import ClientError
+"""
+Report generation as a reusable operation plus a thin Celery wrapper.
+
+The operation below is an ordinary function. It can be called directly, invoked
+by the Celery wrapper, or invoked by the Cloud Tasks worker through the task
+registry, and it behaves identically in all three cases.
+
+Retry classification is provider-neutral. Before ADR-0003 this task declared
+``autoretry_for=(botocore.exceptions.ClientError,)``, which retried transient
+object-storage failures under S3 and silently retried nothing under Google
+Cloud Storage, where the same failures arrive as ``google.api_core`` exceptions
+(recorded as S2 in the unresolved-items inventory). The translation now happens
+where the storage write happens -- see ``report_utils.generate_and_upload_report``
+-- and this module names no provider at all.
+"""
+
 from celery import shared_task
 from celery.utils.log import get_task_logger
 
 from care.emr.models.report.template import Template
 from care.emr.reports import report_utils
-from care.utils.exceptions import CeleryTaskError
+from care.utils.tasks.exceptions import PermanentTaskError, RetryableTaskError
 
 logger = get_task_logger(__name__)
 
 
-@shared_task(
-    autoretry_for=(ClientError,), retry_kwargs={"max_retries": 3}, expires=10 * 60
-)
-def generate_report_task(
+def generate_report(
     template_id: str,
     report_type: str,
     associating_id: str,
     output_format: str = "pdf",
-    **kwargs,
-):
-    lock_key = f"{report_type}_{associating_id}"
+    user_id: int | None = None,
+) -> str:
+    """
+    Render a report from a template and store it. Returns the ``ReportUpload``
+    external id.
+
+    Raises :class:`RetryableTaskError` when the failure was transient -- in
+    practice an object-storage write -- and :class:`PermanentTaskError` when the
+    request itself cannot succeed, such as a template that does not exist.
+    """
+    lock_key = report_utils.get_lock_key(report_type, associating_id)
 
     logger.info(
-        "Starting report generation task - report_type: %s, "
+        "Starting report generation - report_type: %s, "
         "associating_id: %s, template_id: %s, output_format: %s",
         report_type,
         associating_id,
@@ -40,7 +60,7 @@ def generate_report_task(
         except Template.DoesNotExist as e:
             logger.error("Template not found: %s", template_id)
             msg = f"Template {template_id} does not exist"
-            raise CeleryTaskError(msg) from e
+            raise PermanentTaskError(msg) from e
 
         logger.debug("Updating lock for %s to 30%% progress", lock_key)
         report_utils.set_lock(lock_key, 30)
@@ -50,29 +70,51 @@ def generate_report_task(
             output_format=output_format,
             report_type=report_type,
             associating_id=associating_id,
-            **kwargs,
+            user_id=user_id,
         )
 
         if not report_upload:
             logger.error(
                 "Report generation failed - generate_and_upload_report returned None"
             )
-            raise CeleryTaskError("Unable to generate report")
+            raise PermanentTaskError("Unable to generate report")
 
         logger.info(
-            "Report generation task completed - external_id: %s",
+            "Report generation completed - external_id: %s",
             report_upload.external_id,
         )
         return str(report_upload.external_id)
 
-    except CeleryTaskError:
-        logger.exception("Celery task error in report generation for %s", lock_key)
+    except (PermanentTaskError, RetryableTaskError):
+        logger.exception("Report generation failed for %s", lock_key)
         raise
-    except Exception as e:
-        logger.exception(
-            "Unexpected error in report generation task for %s: %s", lock_key, e
-        )
-        raise e
+    except Exception:
+        logger.exception("Unexpected error in report generation for %s", lock_key)
+        raise
     finally:
+        # Always released, so a failed run does not block the next attempt for
+        # the configured lock duration.
         logger.debug("Clearing lock for %s", lock_key)
         report_utils.clear_lock(lock_key)
+
+
+@shared_task(
+    autoretry_for=(RetryableTaskError,),
+    retry_kwargs={"max_retries": 3},
+    expires=10 * 60,
+)
+def generate_report_task(
+    template_id: str,
+    report_type: str,
+    associating_id: str,
+    output_format: str = "pdf",
+    user_id: int | None = None,
+) -> str:
+    """Celery wrapper. The task name is unchanged from before ADR-0003."""
+    return generate_report(
+        template_id=template_id,
+        report_type=report_type,
+        associating_id=associating_id,
+        output_format=output_format,
+        user_id=user_id,
+    )

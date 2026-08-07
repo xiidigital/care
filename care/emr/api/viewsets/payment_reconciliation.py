@@ -22,7 +22,7 @@ from care.emr.models.account import Account
 from care.emr.models.invoice import Invoice
 from care.emr.models.location import FacilityLocation
 from care.emr.models.payment_reconciliation import PaymentReconciliation
-from care.emr.resources.account.sync_items import rebalance_account_task
+from care.emr.resources.account.sync_items import rebalance_account
 from care.emr.resources.payment_reconciliation.spec import (
     BasePaymentReconciliationSpec,
     PaymentReconciliationReadSpec,
@@ -92,7 +92,7 @@ class PaymentReconciliationViewSet(
     def perform_create(self, instance):
         instance.facility = self.get_facility_obj()
         super().perform_create(instance)
-        rebalance_account_task(instance.account.id)
+        rebalance_account(instance.account.id)
 
     def perform_update(self, instance):
         old_instance = self.get_object()
@@ -112,7 +112,7 @@ class PaymentReconciliationViewSet(
                     "Payment reconciliation is already cancelled or entered in error"
                 )
         super().perform_update(instance)
-        rebalance_account_task(instance.account.id)
+        rebalance_account(instance.account.id)
 
     def authorize_create(self, instance):
         facility = self.get_facility_obj()
@@ -175,7 +175,7 @@ class PaymentReconciliationViewSet(
         instance.status = request_data.reason
         instance.updated_by = self.request.user
         instance.save(update_fields=["status", "updated_by", "modified_date"])
-        rebalance_account_task(instance.account.id)
+        rebalance_account(instance.account.id)
         return Response(PaymentReconciliationReadSpec.serialize(instance).to_json())
 
     @extend_schema(
@@ -226,5 +226,5 @@ class PaymentReconciliationViewSet(
                 )
 
         for account_id in list(set(source_accounts)):
-            rebalance_account_task(account_id)
+            rebalance_account(account_id)
         return Response({}, status=status.HTTP_201_CREATED)

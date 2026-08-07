@@ -1,9 +1,9 @@
 ---
 title: Plugin Impact Inventory
 document: inventory/plugin-impact
-version: 0.2.0
+version: 0.3.0
 status: Draft
-phase: 1
+phase: 3
 source_repository: https://github.com/ohcnetwork/care
 source_branch: gcp
 source_commit: 6a2976dc2512c2c532fcc70628c5690fbbbe3f3d
@@ -265,3 +265,82 @@ criteria rather than attempting to block the import.
 
 **unknown** Which plugins, if any, import `S3FilesManager`. No plugin source is
 vendored here, so the shim is retained on the assumption that some do.
+
+---
+
+## 10. Task registration after ES-03
+
+Recorded 2026-08-07. Section 5 item 2 predicted that "a Cloud Tasks design that
+enumerates known tasks by hand will silently drop" plugin tasks. That is exactly
+what ES-03 implements, and the prediction holds. This section states what a
+plugin can and cannot do.
+
+### 10.1 Celery is unchanged for plugins
+
+**verified** `app.autodiscover_tasks()` (`config/celery_app.py:18`) still scans
+every app in `INSTALLED_APPS`. A plugin's `tasks.py` is still registered
+automatically, and a plugin still dispatches it however it did before -- ES-03
+removed no Celery capability.
+
+**verified** A plugin using `.delay()` on its own task continues to work under
+`CARE_TASK_BACKEND=celery`, which is the default.
+
+### 10.2 The core registry is closed
+
+**verified** `care/utils/tasks/registry.py` resolves a task name through an
+explicit dictionary populated by the modules named in `HANDLER_MODULES`, a
+constant of that module. There is no `eval`, no `import_string` from a payload
+and no scan of installed apps. `HANDLER_MODULES` currently lists exactly one
+module: `care.emr.tasks.handlers`.
+
+**inferred** Therefore a plugin task is **Celery-only**. Under
+`CARE_TASK_BACKEND=cloud_tasks`, a plugin calling `enqueue_task("its_task", ...)`
+receives `UnknownTaskError` at the call site -- which is at least a clear
+failure at dispatch rather than a silent drop or a stuck queue.
+
+### 10.3 How a plugin could register a handler
+
+**verified** The mechanism a future phase would use already exists and is one
+line. `register_task(name, handler=..., payload_model=..., celery_task=...)` is
+importable, and `HANDLER_MODULES` is an ordinary tuple. Making it settings-driven
+would let a plugin contribute handlers.
+
+**Not done in ES-03, deliberately.** ADR-0003 says not to invent a plugin SDK,
+and no plugin is bundled at this commit to validate a design against. Two
+questions have to be answered first, and neither is answerable from this
+repository:
+
+1. **Name collisions.** Task names are a flat namespace. Two plugins registering
+   `cleanup` would currently raise `ValueError` at import, failing startup. A
+   plugin-facing registry probably needs namespacing.
+2. **Trust.** Making `HANDLER_MODULES` configurable means an environment
+   variable naming importable modules. That is a much weaker property than the
+   current one -- today no configuration value can influence what is imported --
+   and it interacts with the `ADDITIONAL_PLUGS` build/deploy asymmetry in §2.2.
+
+### 10.4 The failure mode plugins should be warned about
+
+**verified** ES-03 hit it in core code. `autodiscover_tasks` imports an app's
+`tasks` module and **goes no deeper**, so for a `tasks/` *package* only
+`__init__.py` runs. Two CARE wrappers were registered purely as a side effect of
+viewsets importing them; when those imports went away, a live worker registered
+three of six task names and dispatching either missing one would have failed
+with `NotRegistered`.
+
+**Recommended plugin review criterion:** a plugin whose `tasks` is a package must
+import every wrapper in its `__init__.py`. Relying on an unrelated import is not
+registration, and the symptom appears only at dispatch time.
+
+### 10.5 Summary for a deployment
+
+| Scenario | Supported |
+| --- | --- |
+| Plugin Celery task, `CARE_TASK_BACKEND=celery` | yes, unchanged |
+| Plugin Celery task, `CARE_TASK_BACKEND=cloud_tasks` | **no** -- `UnknownTaskError` at dispatch |
+| Plugin calling core `enqueue_task` with a core task name | yes, both backends |
+| Plugin registering its own handler | not yet; see §10.3 |
+| Plugin contributing a Celery Beat schedule | yes, unchanged |
+| Plugin reaching the internal worker endpoint | no -- the route serves registered core names only |
+
+**unknown**, unchanged from §4: which plugins any deployment runs, and whether
+any of them define tasks at all. That has to be inventoried per deployment.

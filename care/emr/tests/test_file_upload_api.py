@@ -133,7 +133,7 @@ class FileUploadTestCase(CareAPITestBase):
         file_obj.files_manager.put_object(file_obj, ContentFile(self.file.getvalue()))
         self.assertTrue(file_obj.files_manager.exists(file_obj))
 
-        cleanup_incomplete_file_uploads.delay()
+        cleanup_incomplete_file_uploads()
 
         # Provider-neutral assertions: the object is gone, and opening it
         # raises the standard Django Storage error rather than a boto3 one.

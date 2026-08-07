@@ -1,14 +1,14 @@
 ---
 title: Runtime and Deployment Inventory
 document: inventory/runtime-and-deployment
-version: 0.2.0
+version: 0.3.0
 status: Draft
-phase: 0
+phase: 3
 source_repository: https://github.com/ohcnetwork/care
 source_branch: gcp
 source_commit: 6a2976dc2512c2c532fcc70628c5690fbbbe3f3d
 baseline_commit: 2fe40cd16
-reviewed: 2026-08-06
+reviewed: 2026-08-07
 ---
 
 # Runtime and Deployment Inventory
@@ -681,3 +681,133 @@ required or advised — `make teardown` (`Makefile:34-35`) and `make reset-db`
 7. **The Celery queue-length health check binds to Redis** (§5).
 8. **CI builds arm64 only** (§8); Cloud Run defaults to amd64.
 9. **`django-anymail[amazon-ses]`** (§9) ties email to SES.
+
+---
+
+## 13. Runtime changes in ES-03
+
+Recorded 2026-08-07. Section 12 listed nine facts constraining the Cloud Run
+design. This section records which of them ES-03 addressed and which it left.
+
+### 13.1 Migrations no longer belong to Celery Beat
+
+**verified** §2 recorded the single most important runtime fact: schema
+migration was a side effect of starting Celery Beat, and the API container never
+migrated. Removing beat removed migrations.
+
+**Resolved.** The sequence moved to `scripts/initialize.sh`:
+
+```bash
+python manage.py migrate --noinput
+python manage.py compilemessages -v 0
+python manage.py sync_permissions_roles
+python manage.py sync_valueset
+```
+
+**verified** Both `scripts/celery_beat.sh` and `scripts/celery-dev.sh` now call
+it rather than inlining the four commands, so local Compose keeps its existing
+startup ordering exactly -- `backend` still waits on `celery` for the schema.
+Confirmed by restarting the stack: all five services healthy, `migrate` reported
+`No migrations to apply`, `makemigrations --check` clean, and the two sync
+commands produced their expected row counts (115 permissions, 10 roles, 30
+value sets).
+
+**verified** The script is `0755` in the index and lands at `$APP_HOME` in the
+production image through `COPY --chmod=0755 ./scripts/*.sh`
+(`docker/prod.Dockerfile:59`), so a Cloud Run Job can invoke it directly.
+
+**What remains local-only, explicitly:** the beat entrypoints still run it.
+That is deliberate -- removing it would break upstream development for no
+benefit in this phase -- but nothing in the target runtime depends on it. The
+API and task-worker roles do not run it, and ADR-0003 requires that ordinary
+instance startup never migrate, because Cloud Run starts instances concurrently.
+
+### 13.2 A third process role exists
+
+**verified** `CARE_PROCESS_ROLE` accepts `api`, `task_worker`, `job` and
+`celery_worker`, defaulting to `api`. It selects route availability and logging
+metadata only.
+
+**verified** `CARE_TASK_HANDLER_ENDPOINT_ENABLED` defaults to true only for
+`task_worker`. `config/urls.py` registers `internal/tasks/execute/` only when it
+is set, so the public API service does not route the internal endpoint at all.
+Asserted both ways in `WorkerRouteSeparationTests`.
+
+**Not addressed:** the image still declares no `CMD` (§6), so each Cloud Run
+service must supply its own command. That is ES-06 work.
+
+### 13.3 Celery is unchanged
+
+**verified** Against a running worker after the change:
+
+```text
+care.emr.models.resource_category.summarise_monetary_components
+care.emr.tasks.cleanup_expired_token_slots.cleanup_expired_token_slots
+care.emr.tasks.cleanup_incomplete_file_uploads.cleanup_incomplete_file_uploads
+care.emr.tasks.report_generation.generate_report_task
+care.emr.tasks.totp.send_totp_disabled_email
+care.emr.tasks.totp.send_totp_enabled_email
+1 node online.
+```
+
+Six names, all identical to before. The two that disappeared -- `handle_cascade`
+and `rebalance_account_task` -- were never dispatched by anything.
+
+**verified** Beat cadence is unchanged: daily at midnight IST for token slots,
+every `FILE_UPLOAD_EXPIRY_HOURS` hours for uploads.
+
+### 13.4 Unchanged, and still constraining
+
+| # from §12 | Fact | Status after ES-03 |
+| --- | --- | --- |
+| 3 | The API blocks on Redis before serving | unchanged; C3 still open |
+| 4 | The prod image declares no `CMD` | unchanged; ES-06 |
+| 5 | `collectstatic` and `compilemessages` run per cold start | unchanged |
+| 6 | Celery timezone hardcoded to `Asia/Kolkata` | unchanged; C7 still open |
+| 7 | The Celery queue-length health check binds to Redis | unchanged; C5 still open. Under `CARE_TASK_BACKEND=cloud_tasks` there is no Redis queue, so `HEALTHY_DJANGO` would report unhealthy. ES-03 changed no health check. |
+| 8 | CI builds arm64 only | unchanged |
+| 9 | `django-anymail[amazon-ses]` ties email to SES | unchanged; C6 still open |
+
+### 13.5 Dependencies
+
+**verified** Added to `[packages]`:
+
+| Package | Version | Why |
+| --- | --- | --- |
+| `google-cloud-tasks` | `==2.24.0` | the Cloud Tasks dispatch backend |
+
+**verified** Three transitive additions came with it: `grpcio==1.83.0`,
+`grpcio-status==1.83.0`, `grpc-google-iam-v1==0.14.5`.
+
+**verified** No existing pin moved. A plain `pipenv lock` re-resolved the whole
+graph and moved 43 unrelated transitive versions, including `rpds-py` from
+`0.30.0` to `2026.6.3`; ES-03 §32 forbids unrelated upgrades, so that resolution
+was discarded and only the four new entries were grafted onto the existing
+lockfile. Validated with `pipenv install --deploy`, which verifies the lock
+against the `Pipfile` hash, then by rebuilding the image and running the suite.
+
+**verified** Nothing was removed. Celery, Redis clients and `boto3` all remain.
+
+### 13.6 Regression result
+
+**verified** Recorded on `feature/async-runtime-modernization` at `b8b7b934a`,
+same host and Docker versions as §11.1.
+
+| Run | Mode | Seed | Tests | Pass | Fail | Skip | Duration | Exit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | serial `--shuffle` | 4814652866 | 2106 | 2106 | 0 | 0 | 186.6 s | 0 |
+| 2 | `--parallel --shuffle` | 2339620662 | 2106 | 2106 | 0 | 0 | 37.0 s | 0 |
+| 3 | `--parallel --shuffle` | 6536861927 | 2106 | 2106 | 0 | 0 | 23.4 s | 0 |
+| 4 | `--parallel --shuffle` | 8675247865 | 2106 | 2106 | 0 | 0 | 24.3 s | 0 |
+
+**Serial is green**, which is the binding requirement.
+
+**verified** 2106 tests, of which **87 are new in ES-03**. The pre-ES-03 count on
+this branch point is therefore 2019, up from the Phase 0 baseline of 1912 through
+ES-01 and ES-02.
+
+**E7 did not fire in any of the three parallel runs.** That is worth stating
+carefully: E7 is intermittent and was observed at 5-in-6 during ES-01, so three
+clean runs is not evidence that it is fixed. Nothing in ES-03 touches the cache,
+the rate limiter or the favorites viewset, and the shared `KEY_PREFIX` that
+causes it is unchanged. It remains open.

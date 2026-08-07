@@ -17,8 +17,8 @@ from care.emr.resources.mfa.spec import (
     TOTPVerifyRequest,
     TOTPVerifyResponse,
 )
-from care.emr.tasks.totp import send_totp_disabled_email, send_totp_enabled_email
 from care.emr.utils.mfa import verify_password
+from care.utils.tasks import enqueue_task_on_commit
 
 
 class TOTPViewSet(EMRBaseViewSet):
@@ -99,7 +99,9 @@ class TOTPViewSet(EMRBaseViewSet):
             user.mfa_settings = mfa_settings
             user.save(update_fields=["mfa_settings"])
 
-            send_totp_enabled_email.delay(user.email, user.username)
+            # After commit: the notification asserts that TOTP is enabled, and
+            # the row saying so is written by this request.
+            enqueue_task_on_commit("send_totp_enabled_email", {"user_id": user.id})
 
             response_data = TOTPVerifyResponse(
                 backup_codes=backup_codes,
@@ -136,7 +138,7 @@ class TOTPViewSet(EMRBaseViewSet):
         user.totp_secret = None
         user.save(update_fields=["mfa_settings", "totp_secret"])
 
-        send_totp_disabled_email.delay(user.email, user.username)
+        enqueue_task_on_commit("send_totp_disabled_email", {"user_id": user.id})
 
         return Response(status=status.HTTP_200_OK)
 

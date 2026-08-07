@@ -1,11 +1,11 @@
 from datetime import datetime, timedelta
 
-from celery import shared_task
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.utils import timezone
 
 from care.emr.models.base import SlugBaseModel
+from care.utils.tasks import enqueue_task_on_commit
 
 
 class ResourceCategory(SlugBaseModel):
@@ -120,8 +120,27 @@ def merge_monetary_components(parent_components, child_components):
     return final_components
 
 
-@shared_task
 def summarise_monetary_components(category: ResourceCategory | int):
+    """
+    Recompute a category's calculated monetary components from its parent's, then
+    schedule the same work for each child.
+
+    The two callers of this function -- ``ResourceCategory.save`` above and the
+    ``set_monetary_components`` viewset action -- call it inline and always did,
+    despite it carrying a Celery decorator before ADR-0003. That is preserved:
+    the caller's own category is recomputed within the request, transactionally,
+    so a read immediately afterwards sees the new value.
+
+    Only the fan-out over children is asynchronous, which is also what it was
+    before. It is dispatched after commit because each child reads
+    ``category.parent.calculated_monetary_components``, the row this function
+    has just written: dispatching inside the open transaction would let a worker
+    read the old value, or a value that was subsequently rolled back.
+
+    ``category`` may be a model instance or a primary key because the inline
+    callers pass both. The task payload is always an integer id -- a model
+    instance is not JSON-serializable and could never have been queued.
+    """
     if isinstance(category, int):
         category = ResourceCategory.objects.get(id=category)
     if not category.parent:
@@ -137,4 +156,6 @@ def summarise_monetary_components(category: ResourceCategory | int):
     category.save(update_fields=["calculated_monetary_components"])
 
     for component in ResourceCategory.objects.filter(parent=category):
-        summarise_monetary_components.delay(component.id)
+        enqueue_task_on_commit(
+            "summarise_monetary_components", {"category_id": component.id}
+        )
