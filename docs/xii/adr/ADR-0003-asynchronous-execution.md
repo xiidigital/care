@@ -314,11 +314,35 @@ This ADR does not choose:
 
 ## Implementation Status
 
+Implemented in ES-03, 2026-08-07.
+
 - [x] Decision accepted.
-- [ ] Reusable task logic extracted.
-- [ ] Narrow dispatcher implemented.
-- [ ] Celery backend preserved.
-- [ ] Cloud Tasks backend implemented.
-- [ ] Private worker implemented.
-- [ ] Periodic work moved to explicit scheduler and jobs.
-- [ ] Initialization removed from Celery startup dependency.
+- [x] Reusable task logic extracted. Six operations are ordinary functions with
+      thin Celery wrappers; two never-dispatched tasks lost their decorators
+      entirely.
+- [x] Narrow dispatcher implemented. `care.utils.tasks.enqueue_task` and
+      `enqueue_task_on_commit`, selected by `CARE_TASK_BACKEND`.
+- [x] Celery backend preserved. Task names unchanged, Beat schedule unchanged,
+      local Compose unchanged.
+- [x] Cloud Tasks backend implemented, using the official client and
+      Application Default Credentials.
+- [x] Private worker implemented at `POST /internal/tasks/execute/`, routed only
+      under `CARE_PROCESS_ROLE=task_worker`.
+- [x] Periodic work exposed as management commands that need no worker or
+      scheduler. Beat registration retained for local use; **Cloud Scheduler and
+      Cloud Run Jobs themselves are ES-06/ES-07 infrastructure work.**
+- [x] Initialization removed from Celery startup dependency. `migrate`,
+      `sync_permissions_roles` and `sync_valueset` moved to
+      `scripts/initialize.sh`, which the beat entrypoints call for local
+      compatibility and a deploy job can run alone.
+
+Deliberately **not** done, and still open:
+
+- Task results are still not persisted, because no caller reads one. The Celery
+  result backend remains configured and unread (C4).
+- Report generation is still not idempotent under retry (B5). Retry is now
+  bounded by an explicit classification rather than by the storage provider,
+  which is what S2 required; durable de-duplication belongs with the
+  report-progress decision this ADR defers.
+- The `postgres` task backend named above is not implemented and is rejected as
+  a configuration value rather than silently accepted.

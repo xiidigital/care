@@ -398,17 +398,19 @@ The application SHALL not require a fixed production port.
 
 ## 7.2 `CARE_PROCESS_ROLE`
 
-Recommended.
+**Implemented in ES-03** (`config/tasks.py`).
 
 Supported values:
 
 ```text
-api
+api            (default)
 task_worker
-postgres_queue_worker
 job
 celery_worker
 ```
+
+`postgres_queue_worker` is **not** supported; the PostgreSQL queue backend does
+not exist. An unsupported value raises `ImproperlyConfigured` at startup.
 
 Example:
 
@@ -416,13 +418,10 @@ Example:
 CARE_PROCESS_ROLE=api
 ```
 
-The role MAY control:
-
-- startup command;
-- route availability;
-- health checks;
-- enabled integrations;
-- logging metadata.
+Today the role controls one thing: whether the internal task-execution route is
+registered, through the default of `CARE_TASK_HANDLER_ENDPOINT_ENABLED`. It is
+also the natural place to hang startup command selection, health-check
+selection and logging metadata as those arrive.
 
 It SHALL not alter clinical business behavior.
 
@@ -640,26 +639,30 @@ The application runtime SHALL not create tables automatically on every startup.
 
 ## 10.2 `CARE_RUN_SYNC_PERMISSIONS`
 
-Optional job control.
-
-Example:
-
-```text
-CARE_RUN_SYNC_PERMISSIONS=true
-```
-
 ## 10.3 `CARE_RUN_SYNC_VALUESETS`
 
-Optional job control.
+**Neither is implemented, and ES-03 chose a script over both.**
 
-Example:
+These were conceived as flags telling an initialization pipeline which commands
+to run. The pipeline is now a committed script instead, `scripts/initialize.sh`:
 
-```text
-CARE_RUN_SYNC_VALUESETS=true
+```bash
+python manage.py migrate --noinput
+python manage.py compilemessages -v 0
+python manage.py sync_permissions_roles
+python manage.py sync_valueset
 ```
 
-These variables belong to deployment or job orchestration rather than
-request-time application behavior.
+A Cloud Run Job runs it as its container command; the Celery Beat entrypoints
+call it for local compatibility. A deployment that wants one step alone runs
+that `manage.py` command directly, which is clearer than a boolean.
+
+Before ES-03 this sequence existed only inside the beat entrypoints, so a
+runtime without beat never migrated at all. See
+`inventory/runtime-and-deployment.md` §13.1.
+
+Ordinary API and worker startup does **not** run it. Several Cloud Run instances
+start concurrently, and ADR-0003 requires that instance startup never migrate.
 
 ---
 
@@ -1073,18 +1076,23 @@ unless media-range support is implemented and tested.
 
 ## 17.1 `CARE_TASK_BACKEND`
 
-Required.
+**Implemented in ES-03** (`config/tasks.py`, `config/settings/base.py`).
 
 Supported values:
 
 ```text
+celery       (default)
 cloud_tasks
-celery
-postgres
 ```
 
-The `postgres` value SHALL be accepted only if the PostgreSQL queue backend is
-implemented and approved.
+Default:
+
+```text
+CARE_TASK_BACKEND=celery
+```
+
+The default preserves the existing local and traditional behaviour, so no
+local configuration change is required.
 
 Recommended GCP value:
 
@@ -1092,41 +1100,46 @@ Recommended GCP value:
 CARE_TASK_BACKEND=cloud_tasks
 ```
 
-Local upstream-compatible value:
+`postgres` is **not** a supported value. Earlier revisions of this section listed
+it. The PostgreSQL queue backend is not implemented, and accepting the value
+would select a backend that cannot execute anything, so it raises
+`ImproperlyConfigured` at startup like any other unsupported value. The error
+names the value supplied and the values supported.
 
-```text
-CARE_TASK_BACKEND=celery
-```
+Only the selected backend's variables are required. Celery needs no `GCP_*`
+value; Cloud Tasks needs no broker.
 
 ## 17.2 `CARE_TASK_DEFAULT_DELAY_SECONDS`
 
-Optional.
+**Not implemented, and not needed.** No verified call site uses a delay. The
+dispatcher accepts a per-call `delay_seconds`, which the Celery backend maps to
+`countdown` and the Cloud Tasks backend to `schedule_time`; no call site passes
+one today. A global default would be configuration for a behaviour nothing uses.
+
+## 17.3 `CARE_TASK_PAYLOAD_VERSION`
+
+**Not a setting.** The envelope carries a `version` field, currently `1`, defined
+as a constant in `care/utils/tasks/envelope.py`. It describes the wire format
+rather than a deployment choice, so it is not configurable: a worker and its
+dispatcher must agree, and an environment variable could only make them disagree.
+The worker rejects a version it does not recognise with HTTP 400.
+
+## 17.4 `CARE_TASK_MAX_PAYLOAD_BYTES`
+
+**Implemented.**
 
 Default:
 
 ```text
-0
+CARE_TASK_MAX_PAYLOAD_BYTES=10240
 ```
 
-## 17.3 `CARE_TASK_PAYLOAD_VERSION`
+Measured against the JSON-encoded validated payload, at the call site, before
+anything is queued. Exceeding it raises `InvalidTaskPayloadError`.
 
-Optional.
-
-Recommended when task payload schemas become versioned.
-
-Example:
-
-```text
-CARE_TASK_PAYLOAD_VERSION=1
-```
-
-## 17.4 `CARE_TASK_MAX_PAYLOAD_BYTES`
-
-Recommended.
-
-Prevents oversized task payloads.
-
-Tasks SHOULD normally contain identifiers rather than clinical records.
+Task payloads carry identifiers, not records. The ceiling is a guard against a
+caller quietly enqueueing a whole clinical object; the schemas in
+`care/emr/tasks/handlers.py` are the real constraint.
 
 ---
 
@@ -1137,6 +1150,10 @@ Required when:
 ```text
 CARE_TASK_BACKEND=cloud_tasks
 ```
+
+**Implemented in ES-03.** All six below are validated together at startup when
+`cloud_tasks` is selected, and the error names every one that is missing. None
+is required under `celery`; each defaults to an empty string.
 
 ## 18.1 `GCP_TASKS_PROJECT_ID`
 
@@ -1196,7 +1213,8 @@ care-tasks-invoker@care-production.iam.gserviceaccount.com
 
 ## 18.6 `GCP_TASKS_OIDC_AUDIENCE`
 
-Recommended.
+Required, but defaults to `GCP_WORKER_URL`, so a correct deployment usually
+supplies one value rather than two.
 
 Often equal to the worker service origin.
 
@@ -1239,49 +1257,63 @@ documentation.
 
 ## 19.1 `CARE_TASK_HANDLER_ENDPOINT_ENABLED`
 
-Optional.
+**Implemented in ES-03.**
 
-Recommended values:
+Default:
 
 ```text
-API role: false
-task_worker role: true
+true  when CARE_PROCESS_ROLE=task_worker
+false otherwise
 ```
 
-This variable MAY prevent internal task routes from being exposed by the public
-API service.
+It does not merely reject requests: `config/urls.py` registers
+`internal/tasks/execute/` only when it is set, so the public API service does
+not route the endpoint at all and there is no public surface to protect.
+
+The path matches the one `GCP_WORKER_URL` should point at:
+
+```text
+POST /internal/tasks/execute/
+```
 
 ## 19.2 `CARE_TASK_ALLOWED_QUEUE_NAMES`
 
-Optional defense-in-depth configuration.
-
-The worker MAY validate expected Cloud Tasks queue headers.
-
-This SHALL not replace IAM.
+**Not implemented.** Cloud Run IAM is the authentication boundary, and the route
+is absent from the API role entirely. Validating a `X-CloudTasks-QueueName`
+header would add a check that any caller who reached the worker could satisfy,
+which reads as defence in depth without being any.
 
 ## 19.3 `CARE_TASK_LOG_PAYLOAD`
 
-Production-required value:
+**Implemented.**
+
+Production-required value, and the default:
 
 ```text
-false
+CARE_TASK_LOG_PAYLOAD=false
 ```
 
-Full task payload logging is prohibited.
+The worker logs the task name and outcome always, and the payload only when this
+is enabled. `InvalidTaskPayloadError` messages name fields and counts, never
+values, so a validation failure cannot become the route by which a payload
+reaches a log.
 
 ## 19.4 `CARE_TASK_HANDLER_TIMEOUT_SECONDS`
 
-Optional application-level timeout.
-
-It SHALL remain lower than the infrastructure request deadline when enforced.
+**Not implemented.** The Cloud Run request deadline bounds execution, and adding
+a second application-level timeout would need a decision about what to do with a
+half-finished report. Revisit if a handler is observed approaching the deadline.
 
 ## 19.5 `CARE_TASK_RETRYABLE_EXCEPTIONS`
 
-SHOULD be defined in code, not as arbitrary import paths from environment
-variables.
+**Not a setting, deliberately.** Retry classification is two application
+exceptions in code -- `RetryableTaskError` and `PermanentTaskError`, in
+`care/utils/tasks/exceptions.py`. Provider exceptions are translated at the
+operation boundary that raised them.
 
-Configuration MAY control categories, but SHALL not enable arbitrary code
-loading.
+An environment variable naming importable exception classes would reintroduce
+exactly the coupling ADR-0003 removed, and would let configuration load
+arbitrary code.
 
 ---
 
@@ -1317,21 +1349,18 @@ SHALL not be enabled in production unintentionally.
 
 ## 20.4 `CELERY_BEAT_ENABLED`
 
-Recommended explicit variable.
+**Not implemented, and not needed.** Beat is a separate process started by
+`scripts/celery_beat.sh` or by `celery worker -B`. The GCP profile does not run
+Celery Beat because it does not start that process, not because a variable
+disables it; a flag would be configuration that nothing reads.
 
-Local traditional value:
+The schedule itself is still registered in code
+(`care/emr/tasks/__init__.py`) on the `on_after_finalize` signal, but
+registration is inert without a beat process.
 
-```text
-true
-```
-
-GCP value:
-
-```text
-false
-```
-
-The GCP profile SHALL not run Celery Beat.
+ADR-0003 requires that the same operation is never scheduled by Beat and Cloud
+Scheduler at once. A deployment picks one; both invoke the same management
+commands.
 
 ## 20.5 `CELERY_WORKER_CONCURRENCY`
 
@@ -2413,21 +2442,35 @@ active worker.
 
 # 48. Test Profile
 
-Conceptual fast test configuration:
+**Corrected 2026-08-07 to match the implementation.** Earlier revisions proposed
+a `fake` task backend and a `filesystem` storage backend. Neither exists, and
+neither turned out to be necessary.
+
+The real test configuration is:
 
 ```text
-CARE_TASK_BACKEND=fake
-CARE_CACHE_BACKEND=dummy
-CARE_RATE_LIMIT_BACKEND=postgres
-CARE_TRANSIENT_STATE_BACKEND=postgres
-CARE_STORAGE_BACKEND=filesystem
+CARE_TASK_BACKEND=celery      (the default; with CELERY_TASK_ALWAYS_EAGER=True)
+CARE_STORAGE_BACKEND=s3       (the default, against the local MinIO)
 ```
 
-A `fake` task backend MAY exist only in test settings.
+`config/settings/test.py` sets `CELERY_TASK_ALWAYS_EAGER = True`, so a Celery
+dispatch executes inline. That is a better test double than a `fake` backend
+would be, because it exercises the real dispatch path.
 
-Production settings SHALL reject it.
+Cloud Tasks is tested by mocking the client and asserting the request CARE
+builds, so no test needs GCP credentials, a queue, or a network:
 
-Provider integration tests SHALL explicitly override the fake backends.
+```text
+care/utils/tests/test_task_dispatcher.py
+care/utils/tests/test_cloud_tasks_backend.py
+care/utils/tests/test_task_worker.py
+```
+
+Tests that need a specific storage provider use `override_settings(STORAGES=...)`
+rather than a settings-wide backend value.
+
+A `fake` backend would still be rejected by `validate_task_backend`, in test
+settings as in production. Nothing needs it.
 
 ---
 

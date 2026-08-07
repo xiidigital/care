@@ -1,13 +1,13 @@
 ---
 title: Task Call-Site Inventory
 document: inventory/task-call-sites
-version: 0.1.0
+version: 0.2.0
 status: Draft
-phase: 0
+phase: 3
 source_repository: https://github.com/ohcnetwork/care
 source_branch: gcp
 source_commit: 6a2976dc2512c2c532fcc70628c5690fbbbe3f3d
-reviewed: 2026-08-05
+reviewed: 2026-08-07
 ---
 
 # Task Call-Site Inventory
@@ -387,3 +387,169 @@ happens at **16** — four times as often.
 **inferred** The practical migration surface for Cloud Tasks is therefore much
 smaller than the count of `@shared_task` decorators suggests: 4 dispatch sites
 across 4 distinct tasks, plus 2 scheduled jobs.
+
+---
+
+## 7. State after ES-03
+
+Recorded 2026-08-07. Sections 1-6 describe the repository before ADR-0003 was
+implemented and are left intact as the Phase 0 record. This section supersedes
+them where they conflict.
+
+### 7.1 The inventory was re-verified first
+
+**verified** Re-running the searches from ES-03 §8 against the `gcp` branch at
+`b9404ca62` reproduced the Phase 0 counts exactly, with only line numbers moved:
+
+| Measure | Phase 0 | Re-verified | Change |
+| --- | --- | --- | --- |
+| Task definitions | 8 | 8 | none |
+| Async dispatch sites, non-test | 4 | 4 | none |
+| Synchronous calls to task-decorated functions, non-test | 16 | 16 | none |
+| `.apply_async(` / `send_task(` / `AsyncResult` | 0 | 0 | none |
+
+**verified** Line numbers that moved: `report_upload.py:147` to `:163`,
+`test_file_upload_api.py:177` to `:141`. No task was added, removed or
+redirected by ES-01 or ES-02.
+
+### 7.2 Task definitions after ES-03
+
+Every operation is now an ordinary function. Where a Celery representation is
+still wanted, a thin wrapper delegates to it.
+
+| Operation | Reusable callable | Celery wrapper | Registered task name |
+| --- | --- | --- | --- |
+| Report generation | `care/emr/tasks/report_generation.py::generate_report` | `generate_report_task` | `generate_report` |
+| TOTP enabled email | `care/emr/tasks/totp.py::send_totp_enabled_email` | `send_totp_enabled_email_task` | `send_totp_enabled_email` |
+| TOTP disabled email | `care/emr/tasks/totp.py::send_totp_disabled_email` | `send_totp_disabled_email_task` | `send_totp_disabled_email` |
+| Expired token-slot cleanup | `care/emr/tasks/cleanup_expired_token_slots.py::cleanup_expired_token_slots` | `cleanup_expired_token_slots_task` | `cleanup_expired_token_slots` |
+| Incomplete upload cleanup | `care/emr/tasks/cleanup_incomplete_file_uploads.py::cleanup_incomplete_file_uploads` | `cleanup_incomplete_file_uploads_task` | `cleanup_incomplete_file_uploads` |
+| Monetary summarisation | `care/emr/models/resource_category.py::summarise_monetary_components` | `care/emr/tasks/resource_category.py::summarise_monetary_components_task` | `summarise_monetary_components` |
+| Location cascade | `care/emr/models/location.py::handle_cascade` | **none** | **not registered** |
+| Account rebalance | `care/emr/resources/account/sync_items.py::rebalance_account` | **none** | **not registered** |
+
+**verified** The last two lost their decorators. Neither was ever dispatched --
+between them all fourteen call sites are direct calls -- so the decorators
+advertised an asynchrony that did not exist while forcing a model module and a
+resource module to import the Celery application. `rebalance_account_task` was
+renamed to `rebalance_account` at all twelve call sites plus one test.
+
+**verified** Celery task names are unchanged. Where a wrapper moved module the
+name is pinned explicitly, so `summarise_monetary_components` is still
+`care.emr.models.resource_category.summarise_monetary_components` on the wire.
+Asserted in `care/emr/tests/test_task_runtime.py::CeleryRegistrationTests`
+against a cold subprocess, and confirmed against a running worker.
+
+### 7.3 Payload schemas
+
+**verified** Defined in `care/emr/tasks/handlers.py` as pydantic models,
+validated on dispatch *and* again before a handler runs.
+
+| Task | Payload |
+| --- | --- |
+| `generate_report` | `template_id: UUID`, `report_type: str`, `associating_id: UUID`, `output_format: str = "pdf"`, `user_id: int or None` |
+| `send_totp_enabled_email` | `user_id: int` |
+| `send_totp_disabled_email` | `user_id: int` |
+| `summarise_monetary_components` | `category_id: int` |
+| `cleanup_expired_token_slots` | *(empty)* |
+| `cleanup_incomplete_file_uploads` | *(empty)* |
+
+**verified** UUIDs serialize as strings through `model_dump(mode="json")`, so a
+payload survives plain `json.dumps` -- which is what a Cloud Tasks body uses,
+rather than kombu's extended encoder.
+
+**verified change** The TOTP tasks previously took `(user_email, user_name)`.
+They now take `user_id` and reload the user, so no personal data travels in a
+queue and a task executed after a rename sends to the current address.
+
+**verified** `CARE_TASK_MAX_PAYLOAD_BYTES` (default 10 KiB) rejects an oversized
+payload at the call site.
+
+### 7.4 Dispatch-mechanism summary
+
+| Mechanism | Count | Sites |
+| --- | --- | --- |
+| `enqueue_task(` | 1 | `report_upload.py:166` |
+| `enqueue_task_on_commit(` | 3 | `totp.py:104`, `totp.py:141`, `resource_category.py:159` |
+| `.delay(` | 0 | -- |
+| `.apply_async(` | 1 | inside `CeleryTaskBackend` only |
+| `AsyncResult` | 0 | -- |
+| Synchronous calls to former task functions, non-test | 16 | unchanged |
+
+**verified** All four asynchronous sites are the same four as before. No
+synchronous call became asynchronous.
+
+**verified** Three of the four are now `transaction.on_commit`. `ATOMIC_REQUESTS`
+is enabled (`base.py:77`), so the previous inline `.delay()` could hand a worker
+a row the request had not committed. Report generation is the exception and
+dispatches directly: its handler reads only rows committed by earlier requests.
+
+### 7.5 Task results
+
+**verified** Still no `AsyncResult`, no `task.id` consumer and no `result.get()`
+anywhere. `enqueue_task` returns an external identifier for logging and
+correlation; no caller stores or inspects it.
+
+**verified** `CELERY_RESULT_BACKEND = CELERY_BROKER_URL` (`base.py:427`) is
+unchanged. It is still written and still never read. C4 in `unresolved-items.md`
+remains open -- dropping it is cheap, but it is Celery configuration and ES-03
+changes none.
+
+### 7.6 Idempotency findings
+
+Every backend may redeliver. Each migrated task was executed twice under test.
+
+| Task | Duplicate execution causes | Mechanism | Status |
+| --- | --- | --- | --- |
+| `cleanup_expired_token_slots` | nothing; the second run matches no rows | queryset filter | idempotent |
+| `cleanup_incomplete_file_uploads` | nothing; the storage delete tolerates a missing object and the rows are gone | existing state | idempotent |
+| `send_totp_enabled_email` | a duplicate email | none | **not idempotent, accepted** |
+| `send_totp_disabled_email` | a duplicate email | none | **not idempotent, accepted** |
+| `summarise_monetary_components` | recomputation to the same value | pure function of parent state | converges |
+| `generate_report` | an extra `ReportUpload` row and an extra stored object | none | **not idempotent, open (B5)** |
+
+**Duplicate emails are accepted rather than prevented.** Suppressing them needs
+an execution record, and ADR-0003 says to add one only where duplication is
+harmful. The change that does help is narrowing `autoretry_for` from
+`(Exception,)` -- which re-sent on any post-SMTP failure, B7 -- to transient
+connection errors only.
+
+**Report generation remains non-idempotent.** B5 is unchanged: each run creates
+a new row and a new object key. What ES-03 does change is that the retry is now
+bounded by an explicit classification rather than by whether the deployment
+happens to use S3. A durable fix belongs with the report-progress work ADR-0003
+defers. Recorded in `unresolved-items.md`.
+
+### 7.7 Periodic work
+
+**verified** Both cleanups are reachable three ways, all running the same
+function:
+
+```bash
+python manage.py cleanup_expired_token_slots
+python manage.py cleanup_incomplete_file_uploads
+```
+
+the Celery Beat schedule in `care/emr/tasks/__init__.py`, unchanged in cadence,
+and a direct call. Neither command needs a broker, a worker or a scheduler.
+
+**verified** The schedule still hardcodes `Asia/Kolkata` through
+`config/celery_app.py:16`. C7 remains open: Cloud Scheduler must state the
+timezone explicitly rather than inherit it.
+
+### 7.8 Registration is now explicit, and was briefly not
+
+**verified** `autodiscover_tasks()` imports `care.emr.tasks` and goes no deeper.
+During implementation the report and TOTP wrappers stopped being registered with
+the worker entirely: they had only ever been imported as a side effect of the
+viewsets that dispatched them, and those viewsets no longer import them. A live
+worker registered three of six names, and dispatching either missing task would
+have failed with `NotRegistered`.
+
+**Fixed** by importing every wrapper module in `care/emr/tasks/__init__.py`. The
+regression test now runs `import_default_modules()` in a subprocess, because
+in-process it passed against the broken code -- earlier tests had already
+imported the modules.
+
+**Worth carrying forward:** implicit registration through an unrelated import is
+exactly the failure mode a plugin task would hit. See `plugin-impact.md` §10.

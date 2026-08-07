@@ -1,14 +1,14 @@
 ---
 title: Unresolved Items
 document: inventory/unresolved-items
-version: 0.2.0
+version: 0.3.0
 status: Draft
-phase: 0
+phase: 3
 source_repository: https://github.com/ohcnetwork/care
 source_branch: gcp
 source_commit: 6a2976dc2512c2c532fcc70628c5690fbbbe3f3d
 baseline_commit: 2fe40cd16
-reviewed: 2026-08-06
+reviewed: 2026-08-07
 ---
 
 # Unresolved Items
@@ -282,7 +282,9 @@ Verified under `gcs`: persistence resolves to `GoogleCloudStorage` and
 **Consequence:** IS-02 is no longer a prerequisite for a GCS deployment. Only S2
 below stands between the `gcs` profile and production use.
 
-### S2. Report generation does not retry under GCS
+### S2. Report generation does not retry under GCS — RESOLVED in ES-03
+
+**Superseded by Part B3 below.** The record of the original finding follows.
 
 **verified** `care/emr/tasks/report_generation.py:13` uses
 `autoretry_for=(ClientError,)`. Under `s3` this still works, because
@@ -518,3 +520,116 @@ during `pipenv install` at `docker/dev.Dockerfile:22`.
 (`docker builder prune --filter type=exec.cachemount`). The rebuild succeeded and
 it has not recurred. **inferred** transient corruption, not a repository defect —
 recorded only so the same symptom is recognised quickly if it reappears.
+
+---
+
+## Part B3 — Task-runtime issues after ES-03
+
+Recorded 2026-08-07. Full detail in `task-call-sites.md` §7.
+
+### S2. Report generation does not retry under GCS — RESOLVED (2026-08-07)
+
+**Was:** `care/emr/tasks/report_generation.py:13` declared
+`autoretry_for=(ClientError,)`. Under `s3` django-storages raises `botocore`
+errors from inside `Storage.save`, so the retry fired. Under `gcs` the same
+failures arrive as `google.api_core.exceptions.*` and no retry occurred at all.
+
+**Resolved** by classifying at the operation boundary rather than by exception
+type. `report_utils.generate_and_upload_report` catches any failure of the
+object write, deletes the orphan row as before, and re-raises
+`RetryableTaskError`. The task declares `autoretry_for=(RetryableTaskError,)`
+and imports no provider library; a permanent failure such as a missing template
+raises `PermanentTaskError` and is not retried.
+
+**verified** `care/emr/tests/test_task_runtime.py::ReportRetryPortabilityTests`
+asserts the same classification under an S3 and a GCS `STORAGES` configuration,
+simulating each provider's transient write failure without importing either
+library, and parses the task module's AST to prove it imports no `botocore`,
+`boto3` or `google.*` name.
+
+**Consequence:** the last provider-specific reference in any storage consumer is
+gone. Nothing now stands between the `gcs` profile and production use at the
+application level.
+
+**Deliberately narrow:** the classification treats *any* object-write failure as
+transient. That over-classifies a genuinely permanent failure such as a
+permissions error, which will now be retried three times before failing. The
+bounded retry count makes that cheap, and the alternative -- enumerating
+provider error codes -- is exactly the coupling S2 was about.
+
+### S5. Report generation is still not idempotent under retry
+
+**Unchanged from B5.** Each run creates a new `ReportUpload` row and a new object
+key, so three retries can leave three rows and three stored objects.
+
+**What changed:** the retry is now bounded by an explicit classification rather
+than by whether the deployment happens to use S3 -- which means under `gcs` the
+duplication is newly *possible*, where previously no retry happened at all.
+
+**Not fixed, and why.** ADR-0003 says to add an execution record only where
+duplication is harmful, and ES-03 §25 forbids moving report progress to a new
+cache or model architecture. A durable fix needs a decision on
+`CARE_REPORT_PROGRESS_BACKEND` (configuration reference §32), which is deferred.
+**Decision needed** before the GCS profile carries real report volume.
+
+### S6. TOTP emails duplicate on redelivery
+
+**verified** No de-duplication exists, and at-least-once delivery means a
+redelivered task re-sends.
+
+**Partly mitigated.** `autoretry_for` narrowed from `(Exception,)` -- which
+re-sent after any post-SMTP failure, B7 -- to transient connection errors only.
+
+**Accepted rather than fixed.** A duplicate notification is visible but not
+destructive, and suppressing it requires the same execution-record machinery as
+S5.
+
+### S7. `cleanup_incomplete_file_uploads` can loop forever
+
+**verified, pre-existing, found while reading the code for ES-03.** The loop at
+`care/emr/tasks/cleanup_incomplete_file_uploads.py` re-fetches the same page
+until the queryset is empty, but only appends a row to `ids_to_delete` when
+`file.internal_name` is truthy. A matching row with an empty `internal_name` is
+never deleted and never stops matching, so the loop does not terminate.
+
+**inferred** It has presumably never fired because `internal_name` is set at
+creation. It becomes reachable if a row is ever created without one.
+
+**Not fixed.** ES-03 §7 excludes redesigning unrelated domain services and the
+operation's semantics were preserved deliberately. It matters more now than it
+did: as a Cloud Run Job this is an unbounded hang rather than a stuck beat
+schedule. Related to B4, which is the same loop aborting on one storage error.
+
+### S8. `CARE_TASK_BACKEND=cloud_tasks` is verified at contract level only
+
+**verified** Every Cloud Tasks assertion mocks the client. The request CARE
+builds is checked field by field -- queue parent, worker URL, POST, JSON body,
+envelope shape, OIDC service account and audience, schedule time, task name --
+but no request has been made to Google.
+
+**unknown** Whether a real queue accepts them, and whether Cloud Run IAM rejects
+an unauthenticated caller as designed. Both require deployed infrastructure and
+belong to ES-06/ES-07.
+
+### S9. The Celery queue-length health check is wrong under Cloud Tasks
+
+**Unchanged from C5, restated because ES-03 makes it concrete.**
+`config/settings/base.py` still constructs `DjangoCeleryQueueLengthHealthCheck`
+with `broker=REDIS_URL` unconditionally. Under `CARE_TASK_BACKEND=cloud_tasks`
+there is no Redis queue to measure, so the health endpoint reports unhealthy in
+the target runtime.
+
+**Not fixed.** ES-03 §44 forbids changing Redis behaviour, and health checks are
+scoped to the cache and runtime-profile work. **Decision needed** before the
+first GCP deployment, or the readiness probe fails on a correctly configured
+service.
+
+### S10. Plugin tasks are Celery-only
+
+**verified** The core registry is a closed, explicit mapping. A plugin task is
+registered with Celery by `autodiscover_tasks` as before, but is not executable
+through Cloud Tasks; `enqueue_task` raises `UnknownTaskError` at the call site.
+
+**unknown** Whether any deployed plugin defines a task at all. See
+`plugin-impact.md` §10 for what a future registration mechanism would have to
+settle first -- namespacing and the trust boundary around importable modules.
