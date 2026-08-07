@@ -21,6 +21,13 @@ from care.emr.tasks.cleanup_incomplete_file_uploads import (
     cleanup_incomplete_file_uploads_task,
 )
 
+# `autodiscover_tasks` imports this package and no deeper, so a wrapper in a
+# submodule this package does not import would never reach the worker. Imported
+# for its registration side effect; nothing here calls it.
+from care.emr.tasks.resource_category import (  # noqa: F401
+    summarise_monetary_components_task,
+)
+
 
 @current_app.on_after_finalize.connect
 def setup_periodic_tasks(sender: Celery, **kwargs):
