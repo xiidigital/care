@@ -19,8 +19,8 @@ from django.urls import reverse
 from PIL import Image
 
 from care.emr.models.file_upload import FileUpload
-from care.emr.utils.file_manager import get_storage_name
-from care.utils.tests.base import CareAPITestBase
+from care.emr.utils.file_manager import FilesManager, get_storage_name
+from care.utils.tests.base import CareAPITestBase, response_content
 
 
 def jpeg_bytes(size=(800, 800)) -> bytes:
@@ -39,7 +39,14 @@ class MultipartUploadTestBase(CareAPITestBase):
         self.url = reverse("files-upload-file")
         self.client.force_authenticate(user=self.user)
 
-    def upload(self, *, content=None, filename="scan.jpg", content_type="image/jpeg", **overrides):
+    def upload(
+        self,
+        *,
+        content=None,
+        filename="scan.jpg",
+        content_type="image/jpeg",
+        **overrides,
+    ):
         body = {
             "file": SimpleUploadedFile(
                 filename,
@@ -96,7 +103,7 @@ class SuccessfulUploadTests(MultipartUploadTestBase):
         response = self.upload()
         download = self.client.get(response.data["download_url"])
         self.assertEqual(download.status_code, 200)
-        self.assertEqual(b"".join(download.streaming_content), self.payload_bytes)
+        self.assertEqual(response_content(download), self.payload_bytes)
 
     def test_response_is_provider_neutral(self):
         response = self.upload()
@@ -253,7 +260,7 @@ class UploadHandlerTests(MultipartUploadTestBase):
         response = self.upload()
         self.assertEqual(response.status_code, 200, response.data)
         download = self.client.get(response.data["download_url"])
-        self.assertEqual(b"".join(download.streaming_content), self.payload_bytes)
+        self.assertEqual(response_content(download), self.payload_bytes)
 
 
 class FailureConsistencyTests(MultipartUploadTestBase):
@@ -277,9 +284,13 @@ class FailureConsistencyTests(MultipartUploadTestBase):
             self.upload()
         self.assertFalse(FileUpload.objects.exists())
 
-    def test_database_failure_after_save_reports_failure(self):
+    def test_database_failure_rolls_the_row_back(self):
         # The completion save fails after the object is written. The row is
         # rolled back; the orphan object is the pre-existing B8 gap.
+        #
+        # The failure is *not* translated into "failed to upload to storage":
+        # storage succeeded. It propagates as a server error, because a database
+        # outage is not something the client can fix by changing its request.
         original_save = FileUpload.save
         completion_save = 2  # first save creates the row, second completes it
         calls = {"n": 0}
@@ -291,18 +302,29 @@ class FailureConsistencyTests(MultipartUploadTestBase):
                 raise OSError(msg)
             return original_save(self, *args, **kwargs)
 
-        with patch.object(FileUpload, "save", failing_save):
-            response = self.upload()
-        self.assertEqual(response.status_code, 400, response.data)
+        with patch.object(FileUpload, "save", failing_save), self.assertRaises(OSError):
+            self.upload()
         self.assertFalse(FileUpload.objects.exists())
 
-    def test_incomplete_rows_remain_cleanable(self):
-        # cleanup_incomplete_file_uploads keys off upload_completed=False, which
-        # the multipart path still sets before the object is written.
+    def test_multipart_upload_leaves_no_incomplete_row(self):
+        # cleanup_incomplete_file_uploads keys off upload_completed=False. The
+        # multipart path writes the object and sets the flag in one request, so
+        # a successful upload leaves nothing for the sweeper to collect.
         response = self.upload()
         file_obj = FileUpload.objects.get(external_id=response.data["id"])
         self.assertTrue(file_obj.upload_completed)
         self.assertTrue(file_obj.files_manager.exists(file_obj))
+
+    def test_storage_failure_is_reported_as_a_storage_failure(self):
+        # The other half of the split: a storage error keeps its own message and
+        # is still a 400, as before.
+        with patch.object(
+            FilesManager, "put_object", side_effect=OSError("bucket down")
+        ):
+            response = self.upload()
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("storage", str(response.data).lower())
+        self.assertFalse(FileUpload.objects.exists())
 
 
 IN_MEMORY = "django.core.files.storage.InMemoryStorage"
@@ -331,7 +353,9 @@ class ProviderNeutralTransportTests(MultipartUploadTestBase):
         file_obj = FileUpload.objects.get(external_id=response.data["id"])
         self.assertEqual(file_obj.files_manager.storage_alias, "patient")
         self.assertTrue(file_obj.files_manager.exists(file_obj))
-        self.assertEqual(file_obj.files_manager.file_contents(file_obj), self.payload_bytes)
+        self.assertEqual(
+            file_obj.files_manager.file_contents(file_obj), self.payload_bytes
+        )
 
     @override_settings(
         STORAGES={
@@ -345,7 +369,7 @@ class ProviderNeutralTransportTests(MultipartUploadTestBase):
         response = self.upload()
         download = self.client.get(response.data["download_url"])
         self.assertEqual(download.status_code, 200)
-        self.assertEqual(b"".join(download.streaming_content), self.payload_bytes)
+        self.assertEqual(response_content(download), self.payload_bytes)
 
     def test_transport_modules_do_not_branch_on_the_configured_provider(self):
         # Inspect the AST rather than the text: these modules legitimately

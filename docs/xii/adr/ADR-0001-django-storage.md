@@ -78,7 +78,7 @@ The default local development profile SHALL continue using MinIO.
 
 MinIO SHALL be accessed through:
 
-```
+```text
 storages.backends.s3.S3Storage
 ```
 
@@ -132,7 +132,7 @@ Storage provider selection SHALL be configuration-driven.
 
 A setting similar to:
 
-```
+```text
 CARE_STORAGE_BACKEND
 ```
 
@@ -145,7 +145,7 @@ Initial supported values are expected to include:
 
 The default SHALL remain:
 
-```
+```text
 s3
 ```
 
@@ -177,22 +177,32 @@ for ordinary persistence.
 
 # File transport
 
-This ADR applies only to object persistence.
+This ADR is about object persistence. It does not define the HTTP transport
+layer, which is ADR-0002's subject.
 
-It does not define the HTTP transport layer.
+**Revised 2026-08-07.** As originally written this section said the upload and
+download APIs would remain unchanged until a later transport phase. That did not
+survive contact with the decision itself: presigned URLs are provider-specific
+by construction, so leaving them in place would have left a provider seam in the
+one place this ADR set out to remove it, and would have kept every bucket
+public. The IS-01 completion pass therefore removed them.
 
-Current upload and download APIs remain unchanged until the corresponding
-transport modernization phase.
+Removed by IS-01:
 
-Future work will replace:
-
-- base64 uploads;
 - browser presigned uploads;
 - browser presigned downloads;
+- the unsigned bucket URLs serving cover images and avatars.
 
-with streamed Django-managed transfers.
+Objects are now read back through CARE, which authorizes each request and
+streams the bytes through Django Storage. Every bucket can be private.
 
-That work is intentionally outside the scope of this ADR.
+Left to ADR-0002, and since delivered by ES-02:
+
+- **base64 uploads.** `POST /api/v1/files/upload-file/` accepted a base64 body
+  and buffered the decoded file in memory. Replacing it with
+  `multipart/form-data` was a transport-performance change that did not affect
+  provider portability, which is why it belonged to ADR-0002 rather than here.
+  It is now multipart; no base64 upload path remains.
 
 ---
 
@@ -310,8 +320,8 @@ specifications.
 - Runtime Inventory
 - Storage Inventory
 - IS-01 Storage Modernization
-- Future ADR: File Transport Modernization
-- Future ADR: Async Task Runtime
+- ADR-0002: Server-Mediated File Transport
+- ADR-0003: Configurable Asynchronous Execution
 - Future ADR: Cache and Distributed Locks
 
 ---
@@ -320,7 +330,7 @@ specifications.
 
 - [x] Decision accepted.
 - [x] IS-01 completed. *(2026-08-07)*
-- [ ] IS-02 completed.
+- [x] IS-02 completed. *(2026-08-07)* *Delivered as ES-02 under ADR-0002.*
 - [x] Legacy storage removed. *`S3FilesManager` survives only as a deprecated
   plugin shim delegating to Django Storage; `care/utils/csp/` is deleted.*
 - [x] Legacy signed URL flows removed. *No application code generates a
@@ -338,9 +348,16 @@ specifications.
   gone, along with the unsigned bucket URLs that served cover images and
   avatars. Every bucket can now be private.
 
-## Remaining for IS-02
+## What IS-02 delivered
 
-The base64 upload transport at `POST /api/v1/files/upload-file/` is retained and
-still buffers the decoded file in memory. IS-02 replaces it with
-`multipart/form-data` and Django upload handlers. That is transport
-performance, not provider portability, and does not affect this decision.
+The base64 upload transport at `POST /api/v1/files/upload-file/` has been
+replaced with `multipart/form-data` and Django upload handlers, under ADR-0002.
+That was transport performance, not provider portability, so it did not affect
+this decision — the persistence seam established here is unchanged, and the
+multipart path hands its `UploadedFile` to the same `Storage.save()`.
+
+One item outside both specs remains open: `care/emr/tasks/report_generation.py`
+retries on `botocore`'s `ClientError`, which cannot fire under `gcs`. It
+constructs no client and performs no storage operation, so it is not a breach of
+this decision, but it does mean report generation is not yet production-ready on
+GCS. See `02-target-runtime.md` §11 and `unresolved-items.md` S2.

@@ -36,8 +36,8 @@ the same target document:
 
 | Line (before correction) | Text |
 | --- | --- |
-| 1933 | `docs/gcp/02-target-runtime.md` |
-| 1945 | `docs/xii/gcp/02-target-runtime.md` |
+| 1933 | `docs/xii/architecture/02-target-runtime.md` |
+| 1945 | `docs/xii/architecture/02-target-runtime.md` |
 
 **Corrected** in this phase — both now read `docs/xii/architecture/02-target-runtime.md`.
 
@@ -181,13 +181,16 @@ from the database, so the next run retries them — self-healing but non-progres
 **verified** `care/emr/tasks/report_generation.py:12-14` declares
 `autoretry_for=(ClientError,)` with `max_retries: 3`.
 
-**verified** `care/emr/reports/report_utils.py:102, 104-121` creates a **new**
+**verified** `care/emr/reports/report_utils.py:103, 105-122` creates a **new**
 `ReportUpload` row and a new object key on every invocation.
 
-**Impact (inferred):** each retry produces an additional row and stored object.
-The failure path deletes the row only when `put_object` itself raises
-(`report_utils.py:129-131`); a crash between the row save (`:121`) and the
-`put_object` (`:124`) leaves an orphan.
+**Impact (inferred):** each *successful* invocation produces an additional row
+and stored object. A retry is narrower: the failure path deletes the row when
+`put_object` raises (`report_utils.py:132-134`), so a retry does not accumulate
+rows. It can accumulate objects — a write ambiguous enough to raise after the
+bytes landed is not cleaned up, and the retry writes another under a fresh key.
+A crash between the row save (`:122`) and the `put_object` (`:127`) leaves an
+orphan row.
 
 ### B6. `expires` and `max_retries` interact badly
 
@@ -280,7 +283,10 @@ Verified under `gcs`: persistence resolves to `GoogleCloudStorage` and
 `download_url` is still `/api/v1/files/{id}/download/`.
 
 **Consequence:** IS-02 is no longer a prerequisite for a GCS deployment. Only S2
-below stands between the `gcs` profile and production use.
+below stands between the `gcs` profile and production use — and until S2 is
+closed, *report generation* SHALL NOT be described as production-ready under
+`gcs`, even though the rest of the file surface is. See
+`02-target-runtime.md` §11.
 
 ### S2. Report generation does not retry under GCS
 
@@ -289,9 +295,15 @@ below stands between the `gcs` profile and production use.
 django-storages raises `botocore` errors from inside `Storage.save`. Under `gcs`
 the failures are `google.api_core.exceptions.*` and no retry occurs.
 
+**Impact (verified):** it does not degrade to "retries less often" — it degrades
+to **no retry at all**, silently. The task carries a retry policy that cannot
+fire, so the first transient upload failure fails the report, and nothing in the
+logs distinguishes that from a policy that fired and exhausted itself.
+
 **Not changed** — both ES-01 §31 and the completion pass explicitly forbid
 modifying Celery, and widening `autoretry_for` alters retry semantics beyond the
-storage seam.
+storage seam. `02-target-runtime.md` §11 records the two acceptable resolutions
+and forbids claiming GCS report generation is production-ready until one lands.
 
 **Now the only item blocking the GCS profile**, and the last provider-specific
 reference in any storage consumer. **Decision needed:** a provider-neutral retry
@@ -341,9 +353,17 @@ cover `sync_permissions_roles` and `sync_valueset`, which run in the same script
 (`care/utils/file_uploads/cover_image.py:49-51`); read via unsigned concatenated
 URLs (`care/facility/models/facility.py:207-212`, `care/users/models.py:202-207`).
 
-**Decision needed.** GCS uniform bucket-level access rejects per-object ACLs. If
-these become private, both URL builders need Django routes, and `FACILITY_CDN`
-(`config/settings/base.py:673`) needs a new meaning.
+**RESOLVED by IS-01 — they stay publicly *readable*, but the bucket does not.**
+No object carries an ACL any more. The bytes are served by CARE through two
+anonymous routes, `facility-cover-image-asset` and `user-profile-picture-asset`
+(`care/emr/api/viewsets/file_assets.py`), so who can see a cover image is
+unchanged while the bucket becomes private and GCS uniform bucket-level access
+is satisfied.
+
+Both URL builders now `reverse()` to those routes. `FACILITY_CDN` and
+`BUCKET_HAS_FINE_ACL` were deleted rather than redefined: with CARE serving the
+bytes, a CDN belongs in front of CARE, which the long-lived `Cache-Control` on
+those responses allows.
 
 ### C3. Is the API allowed to start without Redis?
 
@@ -411,11 +431,18 @@ either way.
 
 ### C10. Base64 upload endpoint is missing from the OpenAPI schema
 
-**verified** `care/emr/api/viewsets/file_upload.py:213` has no `@extend_schema`;
-its body fields are read straight from `request.data`.
+**RESOLVED by ES-02.** The base64 endpoint no longer exists. Its replacement at
+`care/emr/api/viewsets/file_upload.py:294` carries an explicit
+`@extend_schema` declaring `request={"multipart/form-data":
+FileUploadMultipartSerializer}` and `responses={200: FileUploadRetrieveSpec}`,
+so the upload body is now part of the generated schema and discoverable by
+schema-generated clients.
 
-**inferred** Schema-generated clients cannot discover it. Whether it is
-public API or an internal affordance is **unknown**.
+Deferring the annotation until the body changed was the right order: annotating
+a base64 field that was about to be deleted would have been wasted work, and the
+schema now describes a contract that will not immediately move.
+
+Both halves of the file contract are annotated — `download` was already.
 
 ---
 

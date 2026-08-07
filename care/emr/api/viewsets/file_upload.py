@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from rest_framework import filters as rest_framework_filters
 from rest_framework import serializers
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
@@ -136,8 +136,13 @@ class FileUploadMultipartSerializer(serializers.Serializer):
 
     Declares the transport contract and the binary field. The metadata fields
     are carried through to `FileUploadCreateSpec`, which remains the
-    authoritative validator for the logical file type, category and filename —
-    this serializer does not restate those rules.
+    authoritative validator for the logical file type, category and filename.
+
+    `file_type` and `file_category` are `ChoiceField`s here as well, so the
+    choices appear in the generated schema and a bad value is rejected before
+    the file is read. That duplicates the spec's enums deliberately: both are
+    generated from the same `FileTypeChoices` / `FileCategoryChoices`, so adding
+    a member updates both. No rule is restated by hand.
     """
 
     file = BinaryFileField(
@@ -229,6 +234,9 @@ class FileUploadViewSet(
         # get_object() -> get_queryset(), which runs file_authorizer(..., "read")
         # for every detail action.
         obj = self.get_object()
+        if not obj.upload_completed:
+            msg = "File upload is not complete"
+            raise NotFound(msg)
         return file_object_response(obj)
 
     @extend_schema(responses={200: FileUploadListSpec})
@@ -334,15 +342,20 @@ class FileUploadViewSet(
             self.authorize_create(file_upload)
             file_upload.save()
 
+            # Only the storage write is translated into "failed to upload to
+            # storage". The save below is deliberately outside the block: a
+            # database failure there is not a storage failure, and reporting it
+            # as one sends whoever reads the log to the wrong system.
             try:
                 # The UploadedFile is handed straight to Django Storage; it is
                 # not read into memory first.
                 file_upload.files_manager.put_object(file_upload, uploaded_file)
-                file_upload.upload_completed = True
-                file_upload.updated_by = request.user
-                file_upload.save(skip_internal_name=True)
             except Exception as e:
                 error_msg = "Failed to upload file to storage"
                 raise ValidationError(error_msg) from e
+
+            file_upload.upload_completed = True
+            file_upload.updated_by = request.user
+            file_upload.save(skip_internal_name=True)
 
         return Response(FileUploadRetrieveSpec.serialize(file_upload).to_json())
