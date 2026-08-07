@@ -1,7 +1,7 @@
 ---
 title: Unresolved Items
 document: inventory/unresolved-items
-version: 0.3.0
+version: 0.4.0
 status: Draft
 phase: 3
 source_repository: https://github.com/ohcnetwork/care
@@ -633,3 +633,241 @@ through Cloud Tasks; `enqueue_task` raises `UnknownTaskError` at the call site.
 **unknown** Whether any deployed plugin defines a task at all. See
 `plugin-impact.md` §10 for what a future registration mechanism would have to
 settle first -- namespacing and the trust boundary around importable modules.
+
+---
+
+## Part B4 — ES-03 pre-merge architectural findings
+
+Recorded 2026-08-07 by a documentation-only audit performed after ES-03 was
+implemented and before it was merged. No application code, test or runtime
+behaviour was changed by that audit or by this section.
+
+**Identifier note.** These three findings are named `A1`, `C1` and `C2` in the
+ES-03 closeout. Parts A and C of this document already use those labels for
+unrelated items -- Part A `A1` is a document-path inconsistency, Part C `C1` and
+`C2` are open questions about migrations and cover images. To keep both sets
+searchable, the findings below are written as **A1 (ES-03)**, **C1 (ES-03)** and
+**C2 (ES-03)**, and are referred to that way everywhere else.
+
+Two findings from the same audit are **deliberately not recorded here**, because
+they already exist:
+
+- the `sync_permissions_roles` Redis lock and the LocMem/Dummy shim that makes
+  it silently succeed -- see `cache-and-redis.md` §4.2 and ADR-0005, whose
+  implementation checklist already carries "LocMem false-lock behavior removed";
+- Cloud Tasks queue retry policy, including max attempts and maximum retry
+  duration -- see `07-configuration-reference.md` §18.9 and `06-operations.md`.
+
+---
+
+### A1 (ES-03). Cloud Tasks worker security depends on platform IAM
+
+**Classification:** `ES-06 / ES-07 blocker` for production deployment.
+**Not an ES-03 implementation defect.**
+
+**verified** The internal worker route
+
+```text
+POST /internal/tasks/execute/
+```
+
+has **no application-layer authentication and no application-layer
+authorization**. `care/utils/tasks/views.py` is a plain Django function view
+carrying only `@csrf_exempt` and `@require_POST`. Because it is not a DRF view,
+`REST_FRAMEWORK["DEFAULT_AUTHENTICATION_CLASSES"]` and
+`["DEFAULT_PERMISSION_CLASSES"]` -- which protect every CARE viewset -- do not
+apply to it. `AuthenticationMiddleware` runs and resolves `request.user` to
+`AnonymousUser`; the view never reads it. No authentication backend is reached.
+
+**verified by probe**, worker role, Django test client:
+
+```text
+no credentials at all      -> 204   (task executed)
+garbage bearer token       -> 204   (token ignored entirely)
+GET                        -> 405
+```
+
+**This is intentional.** ADR-0003 requires the worker to "require platform IAM
+authentication", and ES-03 §19 requires that application-level checks "SHALL not
+pretend to replace platform IAM". The route is registered only when
+`CARE_TASK_HANDLER_ENDPOINT_ENABLED` is true, which defaults to true only for
+
+```text
+CARE_PROCESS_ROLE=task_worker
+```
+
+so the public API service does not route it at all. Verified both ways:
+`NoReverseMatch` under the `api` role, resolvable under `task_worker`.
+
+The target GCP architecture relies on **Cloud Run IAM validating the Cloud Tasks
+OIDC token before the request reaches Django**. The dispatcher attaches an OIDC
+token for `GCP_TASKS_SERVICE_ACCOUNT` with audience `GCP_TASKS_OIDC_AUDIENCE`;
+nothing in CARE verifies that token, and nothing in CARE should.
+
+#### Requirements this places on ES-06 / ES-07
+
+1. **The worker service MUST NOT allow unauthenticated invocation.** Deployed
+   with unauthenticated invocation permitted, the endpoint executes any
+   registered task for any caller -- including `cleanup_expired_token_slots`,
+   which hard-deletes rows.
+2. **Cloud Run IAM is a production security requirement, not an optional
+   hardening measure.** It is the only authentication in the path. There is no
+   second layer to fall back on, by design.
+3. **ES-06 / ES-07 MUST enforce authenticated-only invocation** in the
+   infrastructure definition, not by convention or runbook. The guarantee
+   currently exists only as prose in ADR-0003 and in this document.
+4. **The Cloud Tasks invoker service account MUST hold only the permission it
+   needs**: `roles/run.invoker` on the worker service, and nothing broader. It
+   is an invoker identity, not an application identity.
+5. **No application shared secret SHALL be added to compensate for missing
+   IAM.** A shared secret would have to be provisioned, injected, rotated and
+   compared in application code, and would be strictly weaker than IAM while
+   creating the impression that the endpoint is self-protecting. If IAM is
+   absent the correct response is to fix the deployment, not the application.
+
+#### What ES-03 does contribute
+
+Two structural defences, neither cryptographic and neither a substitute for IAM:
+
+- **Route absence.** The API role does not register the URL.
+- **A closed registry.** Only six server-defined task names are executable. No
+  import path, dotted callable or arbitrary payload resolves to code.
+
+---
+
+### C1 (ES-03). `transaction.on_commit` changes failure semantics
+
+**Classification:** deliberate behaviour change introduced by ES-03. Recorded,
+not fixed in this phase.
+
+**verified** Before ES-03, asynchronous dispatch happened inside the request
+transaction:
+
+```text
+database transaction
+    ↓
+Celery .delay()
+    ↓
+broker failure
+    ↓
+request fails and transaction rolls back
+```
+
+After ES-03, three of the four dispatch sites use `enqueue_task_on_commit`:
+
+```text
+database transaction commits
+    ↓
+on_commit callback runs
+    ↓
+async dispatch fails
+    ↓
+request may fail after durable state has already committed
+```
+
+**verified by probe** -- an exception raised in an `on_commit` callback
+propagates to the caller *after* the transaction has committed:
+
+```text
+db work done | dispatch registered | raised AFTER commit: backend down
+```
+
+**Why the change was made.** `ATOMIC_REQUESTS` is enabled
+(`config/settings/base.py`). Dispatching inside the transaction allows a worker
+-- under Cloud Tasks, a separate service reaching the database directly -- to
+observe rows the request has not committed, or rows it is about to roll back.
+ADR-0003 requires that a task never observe state that was subsequently rolled
+back. `on_commit` is what satisfies that requirement.
+
+**The cost.** The failure mode moves rather than disappearing. Instead of a
+clean rollback, a dispatch failure can now leave a:
+
+```text
+committed-but-not-enqueued
+```
+
+state: the durable change is persisted, the task was never queued, and the
+client receives an error for a request that partly succeeded.
+
+#### Currently affected cases
+
+| Call site | Committed state | Work that may be lost |
+| --- | --- | --- |
+| `care/emr/api/viewsets/totp.py` | the user's `mfa_settings` change | the TOTP enabled/disabled notification email |
+| `care/emr/models/resource_category.py` | the parent category's recalculated components | the fan-out recomputing each child category |
+
+Neither is self-correcting today. The TOTP notification is simply not sent. A
+child category keeps stale `calculated_monetary_components` until the next edit
+to its parent triggers the fan-out again.
+
+Report generation is **not** affected: it dispatches directly rather than on
+commit, because its handler reads only rows committed by earlier requests, and a
+dispatch failure there leaves no database change behind.
+
+#### Not fixed in this phase
+
+A durable fix requires a mechanism this phase deliberately does not choose.
+Future reliability work may require one of:
+
+- a transactional outbox;
+- a durable execution record;
+- a retry or reconciliation job;
+- a domain-specific recovery mechanism.
+
+**No option is selected here.** Each has a materially different cost, and the
+choice interacts with the report-progress and task-state decisions ADR-0003
+defers.
+
+**Where this belongs.** This is idempotency and reliability work under ADR-0003,
+alongside S5 and S6. It is **not** a cache concern (ADR-0004) and **not** a
+locking concern (ADR-0005); no cache or lock behaviour is involved, and no
+change to either would address it.
+
+---
+
+### C2 (ES-03). Task registry loads lazily
+
+**Classification:** `small async-runtime hardening item`. **Not a merge
+blocker.**
+
+**verified** The explicit task registry imports its handler modules lazily, on
+first lookup. `care/utils/tasks/registry.py::load_registry` imports the modules
+named in `HANDLER_MODULES` -- currently `care.emr.tasks.handlers` -- the first
+time `get_task` or `registered_task_names` is called.
+
+**verified by probe**, after full `django.setup()` *and* importing `config.urls`
+so that every viewset is loaded:
+
+```text
+handlers imported at startup?          False
+registry imported at startup?          True
+handlers imported after first lookup?  True
+```
+
+Registration is deterministic once triggered -- ordered, idempotent and
+thread-safe -- but it is deferred.
+
+#### Consequences
+
+- A syntax error or import failure in handler registration **may not fail
+  application startup**.
+- The failure surfaces instead at **first dispatch** on the API side, or at the
+  **first worker invocation** on the worker side, as a runtime error rather than
+  a boot error.
+- This is **weaker than the fail-fast behaviour used for configuration
+  validation**, where an invalid `CARE_TASK_BACKEND`, an invalid
+  `CARE_PROCESS_ROLE` or incomplete Cloud Tasks settings raise
+  `ImproperlyConfigured` during settings import and prevent the process from
+  starting at all.
+
+#### Preferred future improvement
+
+Validate or load the registry during appropriate worker startup, or through a
+Django system check, so that a broken registration is caught before traffic
+reaches the process -- **without exposing the internal task route on the API
+role**. That constraint is the reason the obvious fix is not simply importing
+the handlers from `config/urls.py`.
+
+**Not implemented now.** The lazy import is what keeps `care.utils` from
+importing `care.emr` models at module-import time, and undoing it carelessly
+would reintroduce a dependency on Django app-loading order.
