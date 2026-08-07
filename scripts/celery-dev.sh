@@ -6,10 +6,9 @@ set -euo pipefail
 ./scripts/wait_for_db.sh
 ./scripts/wait_for_redis.sh
 
-python manage.py migrate --noinput
-python manage.py compilemessages -v 0
-python manage.py sync_permissions_roles
-python manage.py sync_valueset
+# Local compatibility only. The target runtime runs this as a separate deploy
+# job; see scripts/initialize.sh.
+./scripts/initialize.sh
 
 watchmedo \
     auto-restart --directory=./ --pattern=*.py --recursive -- \
