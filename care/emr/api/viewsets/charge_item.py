@@ -33,7 +33,7 @@ from care.emr.registries.system_questionnaire.system_questionnaire import (
 )
 from care.emr.resources.account.default_account import get_default_account
 from care.emr.resources.account.spec import AccountStatusOptions
-from care.emr.resources.account.sync_items import rebalance_account_task
+from care.emr.resources.account.sync_items import rebalance_account
 from care.emr.resources.charge_item.apply_charge_item_definition import (
     apply_charge_item_definition,
 )
@@ -453,7 +453,7 @@ class ChargeItemViewSet(
                 )
 
         for account_id in list(set(source_accounts)):
-            rebalance_account_task(account_id)
+            rebalance_account(account_id)
         return Response({}, status=status.HTTP_201_CREATED)
 
 

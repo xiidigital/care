@@ -26,7 +26,7 @@ from care.emr.models.account import Account
 from care.emr.models.charge_item import ChargeItem
 from care.emr.models.invoice import Invoice
 from care.emr.models.payment_reconciliation import PaymentReconciliation
-from care.emr.resources.account.sync_items import rebalance_account_task
+from care.emr.resources.account.sync_items import rebalance_account
 from care.emr.resources.charge_item.spec import ChargeItemStatusOptions
 from care.emr.resources.invoice.default_expression_evaluator import (
     evaluate_invoice_identifier_default_expression,
@@ -157,7 +157,7 @@ class InvoiceViewSet(
             )
             sync_invoice_items(instance)
             instance.save()
-        rebalance_account_task(instance.account.id)
+        rebalance_account(instance.account.id)
 
         return instance
 
@@ -221,7 +221,7 @@ class InvoiceViewSet(
                         paid_on=care_now(),
                     )
             super().perform_update(instance)
-            rebalance_account_task(instance.account.id)
+            rebalance_account(instance.account.id)
         return instance
 
     def check_invoice_in_draft(self, instance):
@@ -254,7 +254,7 @@ class InvoiceViewSet(
                     status=ChargeItemStatusOptions.billed.value,
                     paid_invoice=invoice,
                 )
-        rebalance_account_task(invoice.account.id)
+        rebalance_account(invoice.account.id)
         return Response(InvoiceRetrieveSpec.serialize(invoice).to_json())
 
     @extend_schema(
@@ -284,7 +284,7 @@ class InvoiceViewSet(
                     charge_item.save()
             except ValueError as e:
                 raise ValidationError("Charge item not found in invoice") from e
-        rebalance_account_task(invoice.account.id)
+        rebalance_account(invoice.account.id)
         return Response(InvoiceRetrieveSpec.serialize(invoice).to_json())
 
     @action(methods=["POST"], detail=True)
@@ -305,7 +305,7 @@ class InvoiceViewSet(
                 charge_items.update(
                     status=ChargeItemStatusOptions.billed.value, paid_invoice=invoice
                 )
-        rebalance_account_task(invoice.account.id)
+        rebalance_account(invoice.account.id)
         return Response(InvoiceRetrieveSpec.serialize(invoice).to_json())
 
     @action(methods=["POST"], detail=True)

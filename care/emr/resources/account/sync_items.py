@@ -11,7 +11,6 @@ from care.emr.resources.payment_reconciliation.spec import (
 )
 from care.utils.rounding.rounding import care_round
 from care.utils.time_util import care_now
-from config.celery_app import app
 
 
 def calculate_payment_reconciliation_summary(payment_reconciliations):
@@ -78,8 +77,17 @@ def sync_account_items(account: Account):
         account.calculated_at = care_now()
 
 
-@app.task()
-def rebalance_account_task(account_id):
+def rebalance_account(account_id):
+    """
+    Recalculate an account's balances from its charge items and payments.
+
+    Every one of the twelve call sites invokes this inline, inside the request
+    transaction, and none ever dispatched it -- the ``@app.task()`` decorator it
+    carried before ADR-0003 was aspirational. It stays synchronous deliberately:
+    these are financial balances, and making them eventually consistent would
+    expose intermediate totals to reads that happen between the write and the
+    recalculation.
+    """
     account = Account.objects.get(id=account_id)
     sync_account_items(account)
     account.save()
