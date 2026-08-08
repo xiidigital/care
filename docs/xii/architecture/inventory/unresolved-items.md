@@ -524,18 +524,44 @@ trips) alter how work is distributed across the 16 workers and widen the window
 in which a concurrent `cache.clear()` can land. The isolated reproduction above
 shows the defect does not need those tests to be present at all.
 
-**Not fixed.** ES-01 §31 explicitly excludes fixing rate limiting, and the
-favorites half is equally out of scope. Upstream CI runs the same
-`--parallel --shuffle` combination (`.github/workflows/reusable-test.yml:77`), so
-it can occur there too. **unknown** whether it is known upstream.
+**RESOLVED by ES-04 (2026-08-09).** Two corrections to the analysis above, then
+the fix.
 
-**Recommended fix, for whoever owns it:** give each parallel worker its own cache
-namespace, e.g. derive `KEY_PREFIX` from the worker's database suffix in
-`config/settings/test.py`. That removes the whole class rather than the six
-symptoms.
+**Correction 1 — the mechanism is `FLUSHDB`, not key collision.** `django_redis`
+implements `clear()` as `client.flushdb()`, which empties the entire Redis
+database and ignores `KEY_PREFIX` entirely. So a `cache.clear()` in one worker
+was never merely colliding with another worker's keys; it was deleting all of
+them. This also means the recommended fix above — deriving `KEY_PREFIX` from the
+worker's database suffix — **would not have worked**. `FLUSHDB` does not look at
+keys.
 
-**inferred, separate concern:** a globally-keyed rate limit is not only a test
-problem — it means the limit is shared across all callers rather than per client.
+**Correction 2 — the rate limit is not globally keyed.** The "separate concern"
+noted above is not a defect. `django_ratelimit._make_cache_key` builds its key
+from `[group, rate, key_value, window]`, and CARE's `ratelimit()` puts the caller
+dimension into the *group* (`_group = group + f"-{key}"`) before applying the
+constant key function. `reset-request-alice` and `reset-request-bob` therefore
+occupy different buckets. The constant key function is redundant, not incorrect,
+and no production change was made — altering the key shape would reset every live
+limiter for no correctness gain. Demonstrated in
+`care/utils/tests/test_ratelimit_semantics.py`.
+
+**Fix.** `config/settings/test.py` now uses LocMem for the `default` cache. Each
+parallel worker is a separate process with its own cache, so a `clear()` cannot
+reach across workers and no key can collide — the defect class is removed by
+construction rather than mitigated. The two aliases that must stay on Redis
+(`locks`, `recent_views`) are namespaced per worker with a `KEY_FUNCTION`; this
+matters because several lock keys are constants (`PatientCreateLock` has no
+per-object component) and workers would otherwise contend for one lock.
+
+Redis and PostgreSQL cache behaviour is not left untested: it moved to
+`care/utils/tests/test_cache_backends.py`, which selects each backend explicitly.
+Those Redis tests use their own Redis database precisely because they exercise
+`clear()`.
+
+**verified** Before: the three cache-touching modules failed 4 runs out of 4.
+After: 4 out of 4 green, and the full parallel suite is 6 for 6 at 2240 tests.
+Production cache key semantics are unchanged — the worker-scoped key function is
+configured only in test settings.
 
 ### E8. Transient wheel corruption in the BuildKit pip cache
 
@@ -898,3 +924,103 @@ the handlers from `config/urls.py`.
 **Not implemented now.** The lazy import is what keeps `care.utils` from
 importing `care.emr` models at module-import time, and undoing it carelessly
 would reintroduce a dependency on Django app-loading order.
+
+---
+
+## Part B5 — Cache issues after ES-04
+
+Recorded 2026-08-09. Full detail in `cache-and-redis.md` §0.
+
+ES-04 made the cache backend configurable and removed the backend-specific
+operations from provider-neutral consumers. It deliberately did **not** solve
+locking. These are what it left open, stated so the next phase does not have to
+rediscover them.
+
+### K1 (ES-04). Distributed locking still requires Redis
+
+**verified** `care/utils/lock.py` reads a dedicated `locks` cache alias that is
+always Redis, independent of `CARE_CACHE_BACKEND`. The mechanism is unchanged
+Redis `SET ... NX EX`; ES-04 only moved which alias it uses.
+
+**verified** Two properties were established, and only two:
+
+- unsupported lock semantics now fail loudly. `LocMemCache`, `DummyCache` and
+  `DatabaseCache` all raise `TypeError` on `nx`, and the shim that returned
+  `True` unconditionally is deleted;
+- selecting a non-Redis cache cannot silently move locking onto a backend that
+  cannot lock.
+
+**verified** With Redis stopped and `CARE_CACHE_BACKEND=postgres`, ordinary
+caching works and `Lock` raises `ConnectionError`.
+
+**Consequence:** CARE is not Redis-free, and must not be described as such. ~25
+call sites across billing, scheduling, inventory and
+`sync_permissions_roles` depend on this. **ADR-0005 / ES-05 owns the
+replacement.** A correct PostgreSQL lock needs a real conditional insert
+(`INSERT ... ON CONFLICT DO NOTHING` or `pg_try_advisory_lock`) plus an explicit
+expiry column and a sweeper, since PostgreSQL has no native TTL.
+
+### K2 (ES-04). Recent views still require Redis
+
+**verified** `care/emr/utils/recent_views.py` keeps a bounded MRU list per user
+and valueset using `LPUSH`, `LTRIM` and `LREM` on a dedicated `recent_views`
+alias. It was moved out of `care/emr/models/valueset.py`, where a module-level
+`django_redis` import made the whole models package depend on Redis, and it now
+raises `ImproperlyConfigured` naming the feature when the alias is not
+Redis-backed.
+
+**Not migrated, on purpose.** Django's cache API has no list primitives.
+Emulating one by reading a JSON blob, editing it and writing it back loses the
+atomicity `LPUSH`/`LTRIM` provide: two concurrent views would silently drop
+entries.
+
+**Preferred future fix:** an explicit PostgreSQL model keyed by user and
+valueset with a timestamp. `LPUSH` + `LTRIM` becomes an insert plus a delete of
+rows beyond rank 20, `LREM` by code becomes a delete by code. That is a schema
+addition and was out of scope for a cache phase.
+
+### K3 (ES-04). The JWT denylist still fails open
+
+**verified** `config/authentication.py:21` checks every authenticated request
+against the cache. Under the Redis profile `IGNORE_EXCEPTIONS` is `True`, so a
+Redis outage makes `cache.get` return `None`, which reads as "not invalidated" —
+revoked tokens are accepted.
+
+**Unchanged by ES-04, and stated rather than fixed.** ADR-0004 requires cache
+failure semantics to be explicit, and this one now is: it is a *performance*
+default applied to a *correctness-sensitive* consumer. Fixing it properly means
+deciding whether token revocation belongs in the cache at all, which is a
+security-model decision, not a cache-portability one. Previously recorded as §4
+of this document; re-stated here because ES-04 is where the failure policy was
+supposed to be pinned down.
+
+**inferred** Under `CARE_CACHE_BACKEND=postgres` the exposure changes shape
+rather than disappearing: `DatabaseCache` has no `IGNORE_EXCEPTIONS`, so a
+database outage raises instead of failing open — but a database outage also
+stops the request for other reasons.
+
+### K4 (ES-04). DatabaseCache `incr` is not atomic
+
+**verified** `django_ratelimit` counts with `add()` then `incr()`.
+`DatabaseCache.incr` performs a `SELECT` then an `UPDATE` inside a transaction
+rather than a single atomic statement, so concurrent requests can overshoot a
+limit. Redis `INCR` does not have this problem.
+
+**Not addressed.** ES-04 §17 explicitly says to record this rather than
+implement an unsafe approximation. It matters most for the MFA limits at
+`care/emr/utils/mfa.py:37, 43`; for password-reset throttling at `10/h` the
+overshoot is unlikely to be material.
+
+**Note** `django_ratelimit.E003`, the system check that warns when the cache
+backend is unsuitable for rate limiting, is silenced in test settings only.
+
+### K5 (ES-04). Dummy cache is not rejected in production
+
+**verified** `CARE_CACHE_BACKEND=dummy` is accepted by any settings module.
+ES-04 §10.4 says production use "SHOULD be rejected or loudly warned"; the
+health check reports it as intentionally disabled, which is a report rather than
+a warning at startup.
+
+**inferred, low severity.** Selecting it is deliberate and its effects are
+immediate and obvious. Recorded because the ES wording asked for it and the
+weaker option was taken.

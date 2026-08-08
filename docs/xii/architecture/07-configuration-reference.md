@@ -619,21 +619,26 @@ unnecessarily.
 
 ## 10.1 `CARE_CREATE_CACHE_TABLE`
 
-Optional deployment-pipeline variable.
+**Not implemented, and ES-04 chose not to add it.**
 
-Example:
+It was conceived as a flag telling the initialization pipeline whether to run
+`createcachetable`. A flag would have to be kept in agreement with
+`CARE_CACHE_BACKEND` by hand, and the failure mode is quiet: set `postgres`
+without setting the flag and the service starts, then errors on first cache
+read.
 
-```text
-CARE_CREATE_CACHE_TABLE=true
-```
+`scripts/initialize.sh` calls the command unconditionally instead. With no
+table-name argument it walks `settings.CACHES` and acts only on `DatabaseCache`
+aliases, so it creates the table under `postgres` and does nothing under
+`redis`, `locmem` or `dummy`. The condition lives in the cache configuration,
+which is where the backend is already decided, and there is nothing to keep in
+sync.
 
-It indicates whether the initialization pipeline should run:
+It is idempotent, and instantiating the Redis-backed aliases opens no
+connection, so a PostgreSQL-cache deployment can initialize with no broker
+running.
 
-```bash
-python manage.py createcachetable
-```
-
-The application runtime SHALL not create tables automatically on every startup.
+The application runtime still creates no tables on startup.
 
 ## 10.2 `CARE_RUN_SYNC_PERMISSIONS`
 
@@ -646,6 +651,7 @@ to run. The pipeline is now a committed script instead, `scripts/initialize.sh`:
 
 ```bash
 python manage.py migrate --noinput
+python manage.py createcachetable      # no-op unless the postgres cache is selected
 python manage.py compilemessages -v 0
 python manage.py sync_permissions_roles
 python manage.py sync_valueset
@@ -1432,18 +1438,29 @@ The implementation SHOULD prefer one authoritative switch.
 
 # 22. Cache Backend Selection
 
+**Corrected 2026-08-09 to match the ES-04 implementation.** Sections 22 to 25
+proposed a larger set of variables than was built. What exists is marked
+implemented; the rest is marked not implemented and says why, so nobody
+configures a variable that is read by nothing.
+
 ## 22.1 `CARE_CACHE_BACKEND`
 
-Required.
+**Implemented.** Built and validated in `config/caches.py`.
+
+Optional, not required. It defaults to `redis`, so an unconfigured checkout
+behaves exactly as it did upstream.
 
 Supported values:
 
 ```text
 postgres
-locmem
 redis
+locmem
 dummy
 ```
+
+Any other value raises `ImproperlyConfigured` at settings import, naming the
+value given and listing the four supported ones.
 
 Recommended low-cost GCP value:
 
@@ -1451,25 +1468,33 @@ Recommended low-cost GCP value:
 CARE_CACHE_BACKEND=postgres
 ```
 
-Local compatibility value:
+Local compatibility value, and the default:
 
 ```text
 CARE_CACHE_BACKEND=redis
 ```
 
-Test value:
+The test profile does not read this variable. `config/settings/test.py` sets
+LocMem directly, because each parallel worker needs its own cache — see §48 and
+`inventory/unresolved-items.md` E7. Backend-specific behaviour is covered by
+`care/utils/tests/test_cache_backends.py`, which selects each backend
+explicitly.
+
+## 22.2 What this variable does *not* select
+
+**Implemented, and important.** `CARE_CACHE_BACKEND` selects the `default` cache
+only. Two other aliases exist and are always Redis:
 
 ```text
-CARE_CACHE_BACKEND=dummy
+locks          care/utils/lock.py            SET ... NX
+recent_views   care/emr/utils/recent_views.py  LPUSH / LTRIM / LREM
 ```
 
-or:
-
-```text
-CARE_CACHE_BACKEND=locmem
-```
-
-depending on test behavior.
+Both use Redis commands with no portable equivalent, both read `REDIS_URL`
+rather than `REDIS_CACHE_URL`, and both set `IGNORE_EXCEPTIONS` to false so a
+failure cannot read as success. Selecting `postgres` therefore makes Redis
+optional **for ordinary caching**, not for CARE as a whole. ADR-0005 / ES-05
+owns replacing the lock.
 
 ---
 
@@ -1483,7 +1508,7 @@ CARE_CACHE_BACKEND=postgres
 
 ## 23.1 `CARE_CACHE_TABLE`
 
-Recommended.
+**Implemented.** Optional.
 
 Default:
 
@@ -1493,11 +1518,11 @@ care_cache
 
 ## 23.2 `CARE_CACHE_TIMEOUT`
 
-Optional.
+**Implemented.** Optional. Default `300`.
 
-Defines the default Django cache timeout.
-
-Example:
+This is the *default* entry lifetime only. Call sites whose data has its own
+lifetime pass an explicit TTL and are unaffected by it — report progress uses
+120 s, the FHIR lookup cache 10 s. Raising this does not extend those.
 
 ```text
 CARE_CACHE_TIMEOUT=300
@@ -1505,48 +1530,55 @@ CARE_CACHE_TIMEOUT=300
 
 ## 23.3 `CARE_CACHE_MAX_ENTRIES`
 
-Optional.
-
-Example:
-
-```text
-CARE_CACHE_MAX_ENTRIES=10000
-```
-
-The final value SHALL be based on measured usage.
+**Not implemented.** Django's `DatabaseCache` accepts `MAX_ENTRIES` and
+`CULL_FREQUENCY` through `OPTIONS`, but no measured usage exists to set them
+from, and a wrong cull threshold degrades hit rate silently. Django's defaults
+(300 entries, cull 1/3) apply. Add it when there is data, not before.
 
 ## 23.4 `CARE_CACHE_CULL_FREQUENCY`
 
-Optional.
-
-Example:
-
-```text
-CARE_CACHE_CULL_FREQUENCY=3
-```
+**Not implemented.** See §23.3.
 
 ## 23.5 `CARE_CACHE_KEY_PREFIX`
 
-Recommended.
+**Implemented.** Optional.
 
-Example:
+Default:
 
 ```text
-care:prod
+care
 ```
 
-This helps separate environments or logical uses.
+A value such as `care:prod` separates environments sharing one backend. It must
+not embed a provider name, host, bucket or cloud project — those are deployment
+facts, and putting them in a key makes the key change when infrastructure does.
 
 ## 23.6 `CARE_CACHE_VERSION`
 
-Optional Django cache version value.
+**Not implemented.** Django's cache `VERSION` is available as a key-invalidation
+lever, but nothing in CARE needs to bump it: invalidation is explicit and
+key-scoped since `delete_pattern` was removed.
 
 ## 23.7 Table creation
 
-The application SHALL fail clearly or report unhealthy configuration when the
-selected database cache table does not exist.
+**Implemented.**
 
-It SHALL not create the table during ordinary request startup.
+The table is created by `scripts/initialize.sh`, which runs
+`python manage.py createcachetable` directly after `migrate`. The command is
+called unconditionally: with no table-name argument it walks `settings.CACHES`
+and acts only on `DatabaseCache` aliases, so it creates the table under
+`postgres` and does nothing under `redis`, `locmem` or `dummy`. The condition
+therefore lives in the cache configuration rather than being duplicated in
+shell, where it could drift.
+
+Nothing creates the table during request startup. Several Cloud Run instances
+start concurrently and must not race.
+
+A missing table is reported by name. The cache health check returns 500 with
+`cache table 'care_cache' does not exist; run
+\`python manage.py createcachetable\``, and a read raises `ProgrammingError`
+rather than reading as a cache miss — a silent fallback would make a skipped
+initialization step look merely like slowness.
 
 ---
 
@@ -1554,27 +1586,37 @@ It SHALL not create the table during ordinary request startup.
 
 ## 24.1 `CARE_CACHE_LOCATION`
 
-Optional.
-
-Example:
-
-```text
-care-local-cache
-```
+**Not implemented.** The LocMem `LOCATION` is derived from
+`CARE_CACHE_KEY_PREFIX`, so two deployments with different prefixes already get
+separate stores and there is nothing a separate variable would add.
 
 ## 24.2 `CARE_CACHE_MAX_ENTRIES`
 
-Optional.
+**Not implemented.** See §23.3.
 
-LocMem remains process-local and ephemeral.
+## 24.3 What LocMem is and is not
 
-The configuration SHALL not imply cross-instance consistency.
+**Implemented as documented behaviour.** LocMem is process-local and ephemeral.
+It is:
+
+```text
+not shared across processes
+not shared across Cloud Run instances
+not suitable for global rate limits
+not suitable for distributed locks
+not suitable for cross-instance report progress
+```
+
+It is appropriate for process-local performance values, regenerated schema data,
+and tests. The cache health check reports `shared: false` under LocMem and runs
+no round trip, so a passing health check cannot be mistaken for evidence that
+the cache is shared.
 
 ---
 
 # 25. Redis Cache Configuration
 
-Required when:
+Used when:
 
 ```text
 CARE_CACHE_BACKEND=redis
@@ -1582,53 +1624,70 @@ CARE_CACHE_BACKEND=redis
 
 ## 25.1 `REDIS_CACHE_URL`
 
-Required secret.
+**Implemented.** Optional, with a documented fallback.
 
-Example:
+Resolution order (ES-04 §24):
+
+```text
+REDIS_CACHE_URL
+    ↓
+legacy REDIS_URL
+    ↓
+ImproperlyConfigured
+```
+
+The fallback is what keeps the existing local Docker Compose profile working
+without anyone adding a new variable. `REDIS_URL` is retained because Celery and
+the `locks` / `recent_views` aliases read it.
+
+Provider-neutral by design: Upstash, Memorystore or a local container are all
+selected by URL. There is no `USE_UPSTASH` or `USE_MEMORYSTORE` switch.
 
 ```text
 rediss://default:<password>@<host>:6379/0
 ```
 
+The URL is never logged, and the error raised when neither variable is set does
+not echo it — these routinely carry a password.
+
 ## 25.2 `REDIS_CACHE_PREFIX`
 
-Recommended.
-
-Example:
-
-```text
-care:prod:cache
-```
+**Not implemented.** Use `CARE_CACHE_KEY_PREFIX` (§23.5), which applies to every
+backend. A Redis-specific prefix variable would make the key depend on which
+backend was selected, which is the coupling ADR-0004 removes.
 
 ## 25.3 `REDIS_CACHE_TIMEOUT`
 
-Optional.
+**Not implemented.** Use `CARE_CACHE_TIMEOUT` (§23.2), for the same reason.
 
 ## 25.4 `REDIS_CACHE_SOCKET_TIMEOUT`
 
-Recommended.
+**Not implemented.** No timeout is configured, so `redis-py` defaults apply.
+Worth revisiting before running against a managed Redis over the public
+internet, where a hung connection is likelier than against a local container.
 
 ## 25.5 `REDIS_CACHE_CONNECT_TIMEOUT`
 
-Recommended.
+**Not implemented.** See §25.4.
 
 ## 25.6 `REDIS_CACHE_IGNORE_EXCEPTIONS`
 
-Default SHOULD depend on cache purpose.
+**Not implemented as a variable; the behaviour it describes is.** The value is
+set per responsibility in code rather than per deployment, because it is a
+correctness property of each consumer and not an operational preference:
 
-For performance-only cache:
+| Alias | `IGNORE_EXCEPTIONS` | Why |
+| --- | --- | --- |
+| `default` | `true` | Performance cache degrades to a miss on a Redis outage. |
+| `locks` | `false` | A swallowed exception would turn a failed acquisition into an apparent success. |
+| `recent_views` | `false` | A swallowed exception would silently drop writes. |
 
-```text
-true
-```
-
-may be acceptable.
-
-For correctness-sensitive state:
-
-```text
-false
-```
+**Known consequence, recorded rather than fixed.** The JWT denylist at
+`config/authentication.py:21` reads the `default` cache, so under a Redis outage
+`cache.get` returns `None`, which reads as "not invalidated" and revoked tokens
+are accepted. That is a security property inheriting a performance default.
+Tracked as K3 in `inventory/unresolved-items.md`; resolving it means deciding
+whether revocation belongs in a cache at all.
 
 or a dedicated non-cache backend is preferred.
 

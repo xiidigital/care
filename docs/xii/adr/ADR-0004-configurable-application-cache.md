@@ -219,10 +219,45 @@ This ADR does not define:
 
 ## Implementation Status
 
+Delivered by ES-04 on `feature/cache-modernization`, 2026-08-09.
+
 - [x] Decision accepted.
-- [ ] Cache responsibilities classified.
-- [ ] PostgreSQL cache implemented.
-- [ ] Redis cache retained as optional.
-- [ ] LocMem use restricted.
-- [ ] Backend-specific operations removed from generic consumers.
-- [ ] Report progress assigned to an appropriate backend.
+- [x] Cache responsibilities classified.
+- [x] PostgreSQL cache implemented.
+- [x] Redis cache retained as optional.
+- [x] LocMem use restricted.
+- [x] Backend-specific operations removed from generic consumers.
+- [x] Report progress assigned to an appropriate backend.
+
+### What that means concretely
+
+`CARE_CACHE_BACKEND` selects `postgres`, `redis`, `locmem` or `dummy`, built and
+validated in `config/caches.py`. Only the selected backend's variables are
+required, so a PostgreSQL-cache deployment needs no Redis URL. The default
+remains `redis` so an unconfigured checkout behaves as it did upstream.
+
+`delete_pattern` and `get_redis_connection` no longer appear in any
+provider-neutral cache consumer. Model-cache invalidation deletes explicit keys
+from a registry the `@cacheable` decorator fills; the recent-views list, which
+needs Redis list commands with no portable equivalent, moved to
+`care/emr/utils/recent_views.py` and reads its own alias.
+
+Report progress is **shared cache**, not a model: it is a percentage whose loss
+costs a duplicate render, while the durable artefacts are written independently.
+It was also renamed off its misleading `set_lock`/`clear_lock` names.
+
+### Locking, deliberately unfinished
+
+The LocMem shim that accepted `nx` and always returned success is gone.
+`LocMemCache`, `DummyCache` and `DatabaseCache` now all raise `TypeError` when
+handed `nx`, so unsupported lock semantics fail loudly instead of silently.
+
+Locking itself was **not** replaced -- ADR-0005 and ES-05 own that. It moved to a
+dedicated Redis-backed `locks` alias so that selecting a non-Redis cache cannot
+be mistaken for a working lock. Verified end to end: with Redis stopped and
+`CARE_CACHE_BACKEND=postgres`, ordinary caching works and `Lock` raises
+`ConnectionError` rather than succeeding.
+
+Consequently CARE is **not** Redis-free. Redis remains required for distributed
+locking, recent views, and the Celery profile. ADR-0004's claim -- that Redis is
+optional *for ordinary caching* -- holds.

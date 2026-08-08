@@ -811,3 +811,73 @@ carefully: E7 is intermittent and was observed at 5-in-6 during ES-01, so three
 clean runs is not evidence that it is fixed. Nothing in ES-03 touches the cache,
 the rate limiter or the favorites viewset, and the shared `KEY_PREFIX` that
 causes it is unchanged. It remains open.
+
+---
+
+## 14. Runtime changes in ES-04
+
+Recorded 2026-08-09 on `feature/cache-modernization`.
+
+### 14.1 Cache became a runtime choice
+
+`CARE_CACHE_BACKEND` selects `postgres`, `redis`, `locmem` or `dummy`, defaulting
+to `redis` so an unconfigured checkout is unchanged. Only the selected backend's
+variables are validated: a PostgreSQL-cache deployment needs no Redis URL.
+
+Two aliases are **not** selected by it and remain Redis in every profile —
+`locks` (needs `SET ... NX`) and `recent_views` (needs list commands). They read
+`REDIS_URL` rather than `REDIS_CACHE_URL`, and both set `IGNORE_EXCEPTIONS` to
+false so a failure cannot be read as success.
+
+**verified end to end.** With Redis stopped and `CARE_CACHE_BACKEND=postgres`, a
+cache round trip succeeds and cache health reports 200; acquiring a lock raises
+`ConnectionError`. Redis is optional for ordinary caching and required for those
+two responsibilities — the runtime says so rather than degrading quietly.
+
+### 14.2 Initialization gained a step
+
+`scripts/initialize.sh` now runs `createcachetable` directly after `migrate`. It
+is called unconditionally and is inherently conditional: with no table-name
+argument the command acts only on `DatabaseCache` aliases, so it does nothing
+unless the postgres cache is selected. It opens no Redis connection, so a
+PostgreSQL-cache environment initializes with no broker running.
+
+**verified** `bash -x scripts/initialize.sh` runs all five steps and exits 0.
+Under `redis` the cache table is not created; under `postgres` it is.
+
+### 14.3 E7 is resolved
+
+The root cause was not the rate-limit key. All 16 `--parallel` workers shared one
+Redis database, and `django_redis`'s `clear()` is `FLUSHDB`, which empties the
+database and ignores `KEY_PREFIX`. The test profile now uses LocMem for the
+`default` cache — each worker is its own process — and the two Redis-only aliases
+are namespaced per worker with a `KEY_FUNCTION`.
+
+The §11 note above should be read with this correction: the shared `KEY_PREFIX`
+was not merely unchanged, it was **inert**. It sat inside `OPTIONS`, and
+`BaseCache` reads `KEY_PREFIX` from the top level.
+
+### 14.4 Baseline command results
+
+Local Docker Compose, restarted clean, initialization run, `--keepdb`.
+
+| # | Command | Seed | Tests | Passed | Failed | Errors | Duration |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `--shuffle` (serial) | 4565933570 | 2240 | 2240 | 0 | 0 | 156.1 s |
+| 2 | `--parallel --shuffle` | 9051344208 | 2240 | 2240 | 0 | 0 | 43.1 s |
+| 3 | `--parallel --shuffle` | 5340382458 | 2240 | 2240 | 0 | 0 | 35.1 s |
+| 4 | `--parallel --shuffle` | 9388364516 | 2240 | 2240 | 0 | 0 | 38.2 s |
+| 5 | `--parallel --shuffle` | 7326946839 | 2240 | 2240 | 0 | 0 | 34.3 s |
+| 6 | `--parallel --shuffle` | 5534949877 | 2240 | 2240 | 0 | 0 | 30.5 s |
+| 7 | `--parallel --shuffle` | 5139346334 | 2240 | 2240 | 0 | 0 | 30.2 s |
+
+Parallel worker count: 16. Skipped: 0.
+
+**verified** 2240 tests, of which **130 are new in ES-04**, from 2110 at the
+ES-03 merge point.
+
+**Six parallel runs, six green.** ES-01 measured E7 at 1 green in 6 on the same
+command, and the three cache-touching modules alone failed 4 of 4 immediately
+before the fix and passed 4 of 4 immediately after. Unlike the ES-03 note above,
+this is evidence: the defect was reproduced on demand, the mechanism was
+identified, and the reproduction no longer fires.

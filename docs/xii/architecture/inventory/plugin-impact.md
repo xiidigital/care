@@ -344,3 +344,49 @@ registration, and the symptom appears only at dispatch time.
 
 **unknown**, unchanged from §4: which plugins any deployment runs, and whether
 any of them define tasks at all. That has to be inventoried per deployment.
+
+---
+
+## 11. Cache impact after ES-04
+
+Recorded 2026-08-09. ES-04 §26 asked for plugin cache assumptions to be
+reviewed and classified.
+
+**verified** `plug_config.py` declares `plugs = []`. No plugin is enabled in this
+fork, and `plugs/manager.py` and `plugs/plug.py` contain no cache or Redis
+reference of any kind — a grep for `cache` and `redis` across `plugs/` and
+`plug_config.py` returns nothing. The loader is provider-neutral.
+
+So the classification ES-04 asked for is, for this repository:
+
+| Class | Plugins |
+| --- | --- |
+| provider-neutral | the plugin loader itself |
+| Redis-required | none enabled |
+| unknown | any plugin a downstream deployment adds |
+
+**inferred** For a plugin added later, the rule follows from what it imports,
+and no new SDK was introduced to mediate it:
+
+- a plugin using `django.core.cache` inherits `CARE_CACHE_BACKEND` automatically
+  and stays portable, provided it restricts itself to the portable API;
+- a plugin importing `django_redis`, calling `get_redis_connection`, or using
+  `delete_pattern` is **Redis-required**, and will fail under
+  `CARE_CACHE_BACKEND=postgres`, `locmem` or `dummy`;
+- a plugin calling `cache.set(..., nx=True)` on the `default` cache now raises
+  `TypeError` under every non-Redis backend rather than silently not locking.
+  That change is deliberate and is the safer failure: before ES-04 the shim
+  returned `True` and the plugin would have believed it held a lock.
+
+**verified** The import boundary is enforced by a test rather than by convention.
+`care/utils/tests/test_cache_config.py::DirectRedisBoundaryTests` walks `care/`
+and `config/` and fails on any `django_redis` import outside a named allowlist.
+It deliberately does **not** scan `plugs/`, because plugins are third-party code
+and ES-04 §32 says not to prohibit those imports globally while unresolved
+responsibilities still legitimately use them.
+
+**Not changed:** plugin Celery behaviour, and no generic plugin cache SDK was
+introduced. Both were explicitly out of scope.
+
+**unknown**, unchanged from §4: which plugins any given deployment runs. A
+deployment adding one has to check it against the three rules above itself.

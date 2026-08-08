@@ -607,16 +607,29 @@ For a new environment:
 9. run required synchronization commands;
 10. verify database health.
 
-Expected commands include:
+**Implemented as a committed script.** Steps 7 to 9 are `scripts/initialize.sh`,
+run as a Cloud Run Job or by an operator:
 
 ```bash
 python manage.py migrate --noinput
-python manage.py createcachetable
+python manage.py createcachetable      # no-op unless the postgres cache is selected
+python manage.py compilemessages -v 0
 python manage.py sync_permissions_roles
 python manage.py sync_valueset
 ```
 
-`createcachetable` SHALL run only when the database cache backend is selected.
+`createcachetable` runs only when the database cache backend is selected, but it
+is **called unconditionally** and enforces that itself: with no table-name
+argument it walks `settings.CACHES` and acts only on `DatabaseCache` aliases. So
+it creates `care_cache` under `CARE_CACHE_BACKEND=postgres` and does nothing
+under `redis`, `locmem` or `dummy`. There is no flag to keep in agreement with
+the backend.
+
+It is idempotent, so re-running initialization is safe, and it opens no Redis
+connection — a PostgreSQL-cache environment initializes with no broker running.
+
+Ordinary API and worker startup runs none of this. Several Cloud Run instances
+start concurrently and must not race to migrate or to create a cache table.
 
 ---
 
@@ -780,6 +793,55 @@ Operators SHALL monitor:
 The cache table contains disposable cache values.
 
 Deleting all cache rows SHOULD not destroy durable CARE state.
+
+## 31.1 Cache health
+
+**Implemented.** `/health/` reports the cache according to the selected backend,
+so the check matches what the deployment actually depends on:
+
+| `CARE_CACHE_BACKEND` | What is checked | Reported |
+| --- | --- | --- |
+| `postgres` | cache table exists, then a set/get round trip | 200, with the table name |
+| `redis` | set/get round trip | 200 |
+| `locmem` | nothing external | 200, `shared: false` |
+| `dummy` | nothing | 200, `caching: disabled` |
+
+Two properties matter operationally:
+
+- **no Redis call is made when Redis cache is not selected.** Before ADR-0004 a
+  single probe ran against whatever `default` was, so the endpoint effectively
+  reported Redis health regardless of configuration;
+- **a missing cache table is named.** The check returns 500 with
+  `cache table 'care_cache' does not exist; run \`python manage.py
+  createcachetable\`` rather than a generic failure, which is otherwise
+  indistinguishable from the database being down.
+
+Under `redis`, `IGNORE_EXCEPTIONS` is true on the `default` cache, so an outage
+presents as a wrong value rather than an exception. The check compares the value
+it wrote, so a dead Redis reports unhealthy rather than healthy.
+
+`dummy` reporting 200 is deliberate: running without a cache is a configuration
+choice, and a probe expecting a value back would report a permanently broken
+service.
+
+Celery queue-length health is a separate check and is unchanged. The ES-03
+finding that it is meaningless under Cloud Tasks remains open.
+
+## 31.2 Redis is still required for two things
+
+**Implemented, and stated so it is not misread.** Selecting `postgres` makes
+Redis optional **for ordinary caching only**. Two aliases are always Redis:
+
+```text
+locks          distributed locking   ADR-0005 / ES-05
+recent_views   bounded MRU lists     needs LPUSH / LTRIM / LREM
+```
+
+Verified by stopping Redis with `CARE_CACHE_BACKEND=postgres`: cache reads and
+writes succeed and cache health reports 200, while acquiring a lock raises
+`ConnectionError`. That is the intended behaviour — it fails loudly rather than
+appearing to lock. A deployment that needs the endpoints behind those two
+features still needs Redis.
 
 ---
 

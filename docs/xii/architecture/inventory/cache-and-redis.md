@@ -14,9 +14,82 @@ reviewed: 2026-08-05
 
 Every cache and Redis use in the repository, classified by role, with a
 backend-suitability assessment grounded in the semantics each site actually
-requires. No cache or Redis code was modified in this phase.
+requires.
 
 Evidence labels: **verified** / **inferred** / **unknown**.
+
+---
+
+## 0. Status after ES-04 (2026-08-09)
+
+Sections 1 to 7 below are the **Phase 0 inventory, preserved as written**. They
+describe the repository before ES-04 and are the baseline the work was planned
+against. This section records what changed and which findings no longer hold.
+
+**verified** The inventory was re-verified against the code before any change.
+Every call site listed in sections 4.1 to 4.11 still existed and was classified
+as recorded, with one exception corrected in 4.8 below. Line numbers had drifted
+by a few lines in `config/settings/base.py` after ES-02 and ES-03.
+
+### Blockers, dispositions
+
+The three hard couplings in section 1 are resolved or isolated:
+
+| # | Coupling | Disposition |
+| --- | --- | --- |
+| A | `cache.set(..., nx=True)` | **Isolated.** Moved to a dedicated Redis-backed `locks` alias. The false-lock shim is deleted and LocMem, Dummy and DatabaseCache now all raise `TypeError` on `nx`. Not replaced -- ADR-0005 / ES-05. |
+| B | `cache.delete_pattern(...)` | **Removed.** Replaced by explicit key deletion via a registry the `@cacheable` decorator fills. |
+| C | `get_redis_connection("default")` | **Isolated.** Moved out of the models package to `care/emr/utils/recent_views.py` and onto its own `recent_views` alias. Still Redis-only; a PostgreSQL model for it is an unresolved item. |
+
+Blockers 4 and 5 from section 7: the Redis-broker health check is untouched and
+remains an ES-03 concern (§21 of ES-04 keeps Celery health separate); the test
+suite no longer points at Redis for its `default` cache.
+
+### Correction to 4.8 -- rate limiting is *not* globally keyed
+
+**verified, corrects an earlier claim.** Section 4.8 and the E7 record state that
+`config/ratelimit.py:9` returning the constant `"ratelimit"` makes the counter
+global. That conclusion is wrong.
+
+`django_ratelimit._make_cache_key` builds its key from
+`[group, rate, key_value, window]` -- the **group** is part of the key. CARE's
+`ratelimit()` puts the caller dimension into the group
+(`_group = group + f"-{key}"`) and only then applies the constant key function.
+So `reset-request-alice` and `reset-request-bob` occupy different buckets. The
+constant key function is redundant, not incorrect.
+
+No production change was made. Changing the key shape would reset every live
+limiter for no correctness gain. Covered by
+`care/utils/tests/test_ratelimit_semantics.py`.
+
+### E7 root cause
+
+**verified** Not the rate-limit key. `config/settings/test.py` pointed all 16
+`--parallel` workers at one Redis database, and `django_redis`'s `clear()` is
+`FLUSHDB`, which empties the whole database and ignores `KEY_PREFIX`. The
+`cache.clear()` calls in two setUp methods therefore destroyed cache state other
+workers were asserting on.
+
+The `KEY_PREFIX = "test_"` that was present would not have helped even against
+ordinary key collisions: it sat inside `OPTIONS`, and `BaseCache` reads
+`KEY_PREFIX` from the top level, so it was never applied.
+
+**verified** Reproduced 4 runs out of 4 before the change; 4 out of 4 green
+after. Full parallel suite: 6 runs, 6 green, 2240 tests.
+
+### Current cache surface
+
+| Alias | Backend | Selected by | Responsibility |
+| --- | --- | --- | --- |
+| `default` | postgres / redis / locmem / dummy | `CARE_CACHE_BACKEND` | ADR-0004 cache |
+| `locks` | Redis, always | not configurable | distributed locking (ES-05) |
+| `recent_views` | Redis, always | not configurable | bounded MRU list |
+| `swagger_cache` | LocMem | not configurable | schema cache, unchanged |
+
+**verified** Redis is optional for ordinary caching and required for the other
+two. Verified by stopping Redis with `CARE_CACHE_BACKEND=postgres`: a cache
+round trip succeeds and cache health reports 200, while `Lock` raises
+`ConnectionError` rather than silently succeeding.
 
 ---
 
