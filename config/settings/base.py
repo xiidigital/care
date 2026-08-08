@@ -12,9 +12,20 @@ from django.utils.translation import gettext_lazy as _
 from healthy_django.healthcheck.celery_queue_length import (
     DjangoCeleryQueueLengthHealthCheck,
 )
-from healthy_django.healthcheck.django_cache import DjangoCacheHealthCheck
 from healthy_django.healthcheck.django_database import DjangoDatabaseHealthCheck
 
+from config.caches import (
+    DEFAULT_CACHE_KEY_PREFIX,
+    DEFAULT_CACHE_TABLE,
+    DEFAULT_CACHE_TIMEOUT,
+    LOCK_CACHE_ALIAS,
+    RECENT_VIEWS_CACHE_ALIAS,
+    REDIS_CACHE_BACKEND,
+    build_default_cache,
+    build_redis_only_cache,
+    validate_cache_backend,
+)
+from config.health import CacheHealthCheck
 from config.storage import (
     AWS_ROLE_BASED_BUCKET_PROVIDER,
     build_object_storage,
@@ -84,25 +95,56 @@ DATABASES["default"]["ATOMIC_REQUESTS"] = True
 DATABASES["default"]["CONN_MAX_AGE"] = env.int("CONN_MAX_AGE", default=0)
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# timeout for setnx lock
+# timeout for the distributed lock in care/utils/lock.py (ADR-0005 / ES-05)
 LOCK_TIMEOUT = env.int("LOCK_TIMEOUT", default=32)
 
+# Read by Celery and by the distributed lock. Kept under its historical name so
+# the local Docker Compose profile keeps working unchanged (ES-04 section 24).
 REDIS_URL = env("REDIS_URL", default="redis://localhost:6379")
 
 # CACHES
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#caches
+#
+# ADR-0004: the cache backend is a configuration choice. `redis` remains the
+# default so an unconfigured checkout behaves exactly as it did upstream; the
+# GCP profile selects `postgres` and needs no Redis for ordinary caching.
+CARE_CACHE_BACKEND = validate_cache_backend(
+    env("CARE_CACHE_BACKEND", default=REDIS_CACHE_BACKEND).strip().lower()
+)
+
+# Table name for the PostgreSQL cache. Created by an explicit
+# `createcachetable` step, never on startup -- see scripts/initialize.sh.
+CARE_CACHE_TABLE = env("CARE_CACHE_TABLE", default=DEFAULT_CACHE_TABLE)
+
+# Namespace for every generic cache key. Provider names, hosts, buckets and
+# project ids must not appear here (ES-04 section 11).
+CARE_CACHE_KEY_PREFIX = env("CARE_CACHE_KEY_PREFIX", default=DEFAULT_CACHE_KEY_PREFIX)
+
+# Default entry lifetime only. Call sites with their own lifetime pass an
+# explicit TTL and are unaffected (ES-04 section 12).
+CARE_CACHE_TIMEOUT = env.int("CARE_CACHE_TIMEOUT", default=DEFAULT_CACHE_TIMEOUT)
+
+# Redis cache URL, provider-neutral. Falls back to the legacy REDIS_URL.
+REDIS_CACHE_URL = env("REDIS_CACHE_URL", default="")
+
 CACHES = {
-    "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": REDIS_URL,
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
-            # Mimicing memcache behavior.
-            # http://niwinz.github.io/django-redis/latest/#_memcached_exceptions_behavior
-            "IGNORE_EXCEPTIONS": True,
-        },
-    },
+    "default": build_default_cache(
+        CARE_CACHE_BACKEND,
+        redis_url=REDIS_CACHE_URL,
+        legacy_redis_url=REDIS_URL,
+        table=CARE_CACHE_TABLE,
+        key_prefix=CARE_CACHE_KEY_PREFIX,
+        timeout=CARE_CACHE_TIMEOUT,
+    ),
+    # Neither of these is cache, and neither is selected by CARE_CACHE_BACKEND.
+    # Both still require Redis; see config/caches.py for why.
+    LOCK_CACHE_ALIAS: build_redis_only_cache(
+        REDIS_URL, responsibility=LOCK_CACHE_ALIAS
+    ),
+    RECENT_VIEWS_CACHE_ALIAS: build_redis_only_cache(
+        REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS
+    ),
     "swagger_cache": {  # In-memory cache (only for Swagger)
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         "LOCATION": "swagger-schema-cache",
@@ -516,7 +558,15 @@ HEALTHY_DJANGO = [
     DjangoDatabaseHealthCheck(
         "Database", slug="main_database", connection_name="default"
     ),
-    DjangoCacheHealthCheck("Cache", slug="main_cache", connection_name="default"),
+    # Probes whatever CARE_CACHE_BACKEND actually selected. Under `locmem` and
+    # `dummy` there is no external dependency to reach, and under `postgres` a
+    # missing cache table is reported by name rather than as a generic failure.
+    CacheHealthCheck(
+        "Cache",
+        slug="main_cache",
+        connection_name="default",
+        backend=CARE_CACHE_BACKEND,
+    ),
     DjangoCeleryQueueLengthHealthCheck(
         "Celery Queue Length",
         slug="celery_queue_length",
