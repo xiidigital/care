@@ -5,11 +5,8 @@ from django.urls import reverse
 from model_bakery import baker
 
 from care.emr.fhir.resources.code_concept import MinimalCodeConcept
-from care.emr.models.valueset import (
-    RecentViewsManager,
-    UserValueSetPreference,
-    ValueSet,
-)
+from care.emr.models.valueset import UserValueSetPreference, ValueSet
+from care.emr.utils.recent_views import RecentViewsManager
 from care.utils.tests.base import CareAPITestBase
 
 

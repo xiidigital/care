@@ -9,13 +9,10 @@ from rest_framework.response import Response
 
 from care.emr.api.viewsets.base import EMRModelViewSet
 from care.emr.fhir.resources.code_concept import CodeConceptResource, MinimalCodeConcept
-from care.emr.models.valueset import (
-    RecentViewsManager,
-    UserValueSetPreference,
-    ValueSet,
-)
+from care.emr.models.valueset import UserValueSetPreference, ValueSet
 from care.emr.resources.common.coding import Coding
 from care.emr.resources.valueset.spec import ValueSetReadSpec, ValueSetSpec
+from care.emr.utils.recent_views import RecentViewsManager
 
 
 class ExpandRequest(BaseModel):
