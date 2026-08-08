@@ -16,6 +16,20 @@
 set -eo pipefail
 
 python manage.py migrate --noinput
+
+# ADR-0004: the PostgreSQL cache table is created explicitly, here, and never on
+# application startup -- several Cloud Run instances start at once, and the API
+# must not be racing to create its own cache table.
+#
+# Called unconditionally on purpose. With no table name argument the command
+# walks settings.CACHES and acts only on DatabaseCache aliases, so it creates
+# the table when CARE_CACHE_BACKEND=postgres and does nothing under redis,
+# locmem or dummy. That keeps the condition in one place -- the cache
+# configuration itself -- instead of duplicating the backend name here where it
+# could drift. It is idempotent, and it opens no Redis connection, so a
+# PostgreSQL-cache deployment can initialize with no broker running.
+python manage.py createcachetable
+
 python manage.py compilemessages -v 0
 python manage.py sync_permissions_roles
 python manage.py sync_valueset
