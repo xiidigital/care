@@ -19,26 +19,57 @@ from care.users.models import User
 from care.utils.tasks.exceptions import RetryableTaskError
 
 logger = logging.getLogger(__name__)
-LOCK_DURATION = 2 * 60
+
+#: How long a progress value survives without an update. Generous enough to
+#: outlast a slow render, short enough that an abandoned run stops blocking the
+#: next attempt. Unrelated to ``settings.LOCK_TIMEOUT``.
+PROGRESS_TIMEOUT = 2 * 60
 
 
-def get_lock_key(report_type: str, associating_id: str) -> str:
+def get_progress_key(report_type: str, associating_id: str) -> str:
     return f"{report_type}_{associating_id}"
 
 
-def set_lock(key: str, progress: int, timeout: int = LOCK_DURATION) -> None:
-    cache_key = f"report_generation_lock:{key}"
-    cache.set(cache_key, progress, timeout)
+def _progress_cache_key(key: str) -> str:
+    return f"report_generation_progress:{key}"
+
+
+def set_progress(key: str, progress: int, timeout: int = PROGRESS_TIMEOUT) -> None:
+    """
+    Publish generation progress for ``key``.
+
+    ADR-0004 required this to be classified. It is **shared cache**, not a lock
+    and not durable state (ES-04 section 16): the value is a percentage written
+    by the worker and read by the API purely to render "already in progress".
+    Losing it costs a duplicate render, never data -- the report itself is a
+    ``ReportUpload`` row plus an object in storage, both written independently
+    of this value.
+
+    It must be *shared*, because the writer and the reader are different
+    processes and, under Cloud Run, different containers. That rules out LocMem
+    but is satisfied by the PostgreSQL and Redis cache profiles alike.
+
+    Until ES-04 these functions were named ``set_lock``/``clear_lock``. They
+    never passed ``nx``, so they never excluded anything: two concurrent
+    requests can still both pass the 409 check. The names promised mutual
+    exclusion the code did not implement, which is exactly what ADR-0004
+    forbids progress values from doing.
+    """
+    cache.set(_progress_cache_key(key), progress, timeout)
 
 
 def get_progress(key: str) -> int | None:
-    cache_key = f"report_generation_lock:{key}"
-    return cache.get(cache_key)
+    """
+    Return the published progress, or ``None`` if there is none.
+
+    Cache failure reads as "no generation in progress" and costs at worst a
+    duplicate render, so this fails open by design (ES-04 section 20).
+    """
+    return cache.get(_progress_cache_key(key))
 
 
-def clear_lock(key: str) -> None:
-    cache_key = f"report_generation_lock:{key}"
-    cache.delete(cache_key)
+def clear_progress(key: str) -> None:
+    cache.delete(_progress_cache_key(key))
 
 
 def generate_and_upload_report(  # noqa:PLR0915

@@ -137,12 +137,14 @@ class ReportUploadViewSet(EMRRetrieveMixin, EMRListMixin, EMRBaseViewSet):
         if template.status != "active":
             raise ValidationError("Template is not active")
 
-        lock_key = f"{template.template_type}_{associating_id}"
+        progress_key = report_utils.get_progress_key(
+            template.template_type, associating_id
+        )
 
         if request_data.force:
-            report_utils.clear_lock(lock_key)
+            report_utils.clear_progress(progress_key)
 
-        current_progress = report_utils.get_progress(lock_key)
+        current_progress = report_utils.get_progress(progress_key)
 
         if request_data.status_check:
             if current_progress:

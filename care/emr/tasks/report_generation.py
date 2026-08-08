@@ -39,7 +39,7 @@ def generate_report(
     practice an object-storage write -- and :class:`PermanentTaskError` when the
     request itself cannot succeed, such as a template that does not exist.
     """
-    lock_key = report_utils.get_lock_key(report_type, associating_id)
+    progress_key = report_utils.get_progress_key(report_type, associating_id)
 
     logger.info(
         "Starting report generation - report_type: %s, "
@@ -51,8 +51,8 @@ def generate_report(
     )
 
     try:
-        logger.debug("Setting initial lock for %s at 10%% progress", lock_key)
-        report_utils.set_lock(lock_key, 10)
+        logger.debug("Publishing initial progress for %s at 10%%", progress_key)
+        report_utils.set_progress(progress_key, 10)
 
         try:
             logger.debug("Fetching template with external_id: %s", template_id)
@@ -62,8 +62,8 @@ def generate_report(
             msg = f"Template {template_id} does not exist"
             raise PermanentTaskError(msg) from e
 
-        logger.debug("Updating lock for %s to 30%% progress", lock_key)
-        report_utils.set_lock(lock_key, 30)
+        logger.debug("Updating progress for %s to 30%%", progress_key)
+        report_utils.set_progress(progress_key, 30)
 
         report_upload = report_utils.generate_and_upload_report(
             template=template,
@@ -86,16 +86,16 @@ def generate_report(
         return str(report_upload.external_id)
 
     except (PermanentTaskError, RetryableTaskError):
-        logger.exception("Report generation failed for %s", lock_key)
+        logger.exception("Report generation failed for %s", progress_key)
         raise
     except Exception:
-        logger.exception("Unexpected error in report generation for %s", lock_key)
+        logger.exception("Unexpected error in report generation for %s", progress_key)
         raise
     finally:
-        # Always released, so a failed run does not block the next attempt for
-        # the configured lock duration.
-        logger.debug("Clearing lock for %s", lock_key)
-        report_utils.clear_lock(lock_key)
+        # Always cleared, so a failed run does not keep reporting progress
+        # and blocking the next attempt until the timeout expires.
+        logger.debug("Clearing progress for %s", progress_key)
+        report_utils.clear_progress(progress_key)
 
 
 @shared_task(
