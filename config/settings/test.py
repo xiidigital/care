@@ -4,9 +4,14 @@ import json
 from authlib.jose import JsonWebKey
 
 from care.utils.jwks.generate_jwk import get_jwks_from_file
+from config.caches import (
+    LOCK_CACHE_ALIAS,
+    RECENT_VIEWS_CACHE_ALIAS,
+    build_redis_only_cache,
+)
 
 from .base import *  # noqa
-from .base import BASE_DIR, TEMPLATES, env
+from .base import BASE_DIR, REDIS_URL, TEMPLATES, env
 
 # GENERAL
 # ------------------------------------------------------------------------------
@@ -39,18 +44,45 @@ EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 
 DATABASES = {"default": env.db("DATABASE_URL", default="postgres:///care-test")}
 
-# test in peace
+# Cache isolation for the test suite -- this is the E7 fix.
+#
+# E7 was a defect *class*, not a flaky test: every one of the 16 `--parallel`
+# workers pointed at the same Redis database, and `cache.clear()` in the setUp
+# of test_reset_password_api and test_valueset_api calls `flushdb()` in
+# django_redis, which wipes the entire database and ignores KEY_PREFIX. One
+# worker's clear destroyed cache state the other 15 were mid-assertion on,
+# producing `200 != 429` in the rate-limit tests and missing favorites entries.
+# (The old KEY_PREFIX above would not have helped even against ordinary key
+# collisions: it sat inside OPTIONS, and BaseCache reads KEY_PREFIX from the
+# top level, so it was never applied.)
+#
+# LocMem removes the class rather than the six symptoms: each worker is a
+# separate process with its own cache, so `clear()` cannot reach across workers
+# and no key can collide. It is also what ES-04 section 9 nominates for tests.
+# Redis and PostgreSQL cache semantics are not left untested -- they have
+# dedicated coverage in care/utils/tests/test_cache_backends.py, which selects
+# each backend explicitly.
 CACHES = {
     "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": REDIS_URL,  # noqa F405
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
-            # Mimicing memcache behavior.
-            # http://niwinz.github.io/django-redis/latest/#_memcached_exceptions_behavior
-            "IGNORE_EXCEPTIONS": True,
-            "KEY_PREFIX": "test_",
-        },
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "care-test",
+        "KEY_PREFIX": "care-test",
+    },
+    # These two must stay on Redis even in tests: they use Redis commands with
+    # no portable equivalent, so a LocMem stand-in would test nothing. They are
+    # namespaced per worker instead, which is what stops parallel workers
+    # contending for the constant lock keys such as PatientCreateLock.
+    LOCK_CACHE_ALIAS: {
+        **build_redis_only_cache(REDIS_URL, responsibility=LOCK_CACHE_ALIAS),
+        "KEY_FUNCTION": "config.caches.worker_scoped_key",
+    },
+    RECENT_VIEWS_CACHE_ALIAS: {
+        **build_redis_only_cache(REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS),
+        "KEY_FUNCTION": "config.caches.worker_scoped_key",
+    },
+    "swagger_cache": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "swagger-schema-cache",
     },
 }
 
