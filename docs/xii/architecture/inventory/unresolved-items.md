@@ -1024,3 +1024,18 @@ a warning at startup.
 **inferred, low severity.** Selecting it is deliberate and its effects are
 immediate and obvious. Recorded because the ES wording asked for it and the
 weaker option was taken.
+
+### K6 — JWT denylist is coupled to the default performance cache
+
+**Status:** Open  
+**Origin:** ES-04 cache architecture audit  
+**Category:** Security / cache responsibility boundary
+
+`config/authentication.py` uses the default Django cache alias for JWT denylist
+lookups.
+
+The default cache is intentionally configured as a performance cache and may
+use failure-tolerant semantics such as:
+
+```text
+IGNORE_EXCEPTIONS = true
