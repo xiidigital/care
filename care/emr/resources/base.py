@@ -1,4 +1,5 @@
 import datetime
+from collections import defaultdict
 from typing import Annotated, Any, Union
 
 import phonenumbers
@@ -202,19 +203,23 @@ def model_string(model: models.Model) -> str:
     return f"{model._meta.app_label}.{model.__name__}"  # noqa: SLF001
 
 
-def model_cache_key(
-    db_model_name, model_name: str | None = None, pk: int | None = None
-) -> str:
+def model_cache_key(db_model_name: str, model_name: str, pk: int | str) -> str:
     """Generate a cache key for model data.
 
     This function creates a standardized cache key format using database model name,
-    model name and pk. The format is "db_model_name:pk:model_name" where pk and
-    model_name are replaced with '*' if not provided.
+    model name and pk.
+
+    Every component is required. Until ES-04 the last two defaulted to ``'*'`` so
+    the key could be handed to ``django_redis``'s ``delete_pattern``; that is not
+    part of Django's portable cache API and has been replaced by explicit key
+    enumeration in :func:`delete_model_cache`. Keeping the wildcard defaults
+    would only invite pattern-shaped thinking back in -- and ``pk or '*'``
+    quietly turned a legitimate pk of ``0`` into a wildcard.
 
     Args:
         db_model_name: Name of the database model in format "app_label.ModelName".
-        model_name (str | None): Optional name of the model. Defaults to None.
-        pk (int | None): Optional model ID. Defaults to None.
+        model_name: Name of the resource class.
+        pk: Model id or external id.
 
     Returns:
         str: Formatted cache key string in the format "db_model_name:id:model_name"
@@ -222,11 +227,9 @@ def model_cache_key(
     Examples:
         >>> model_cache_key("emr.Patient", "BasicInfo", 123)
         'serializers_cache:emr.Patient:123:BasicInfo'
-        >>> model_cache_key("emr.Doctor")
-        'serializers_cache:emr.Doctor:*:*'
     """
 
-    return f"serializers_cache:{db_model_name}:{pk or '*'}:{model_name or '*'}"
+    return f"serializers_cache:{db_model_name}:{pk}:{model_name}"
 
 
 def model_from_cache(model: EMRResource, quiet=True, **kwargs) -> dict[str, Any] | None:
@@ -275,6 +278,13 @@ def model_from_cache(model: EMRResource, quiet=True, **kwargs) -> dict[str, Any]
     return dict(data)
 
 
+#: Maps ``"app_label.ModelName"`` to the resource classes registered as cacheable
+#: for it. A single database model may back several resource specs, each cached
+#: under its own key, so this is what lets :func:`delete_model_cache` enumerate
+#: the exact keys to drop instead of matching a pattern (ES-04 section 14).
+_CACHEABLE_RESOURCES: dict[str, set[str]] = defaultdict(set)
+
+
 # TODO: add param for manually adding dependencies for cache invalidation
 def cacheable(_model: EMRResource = None, use_base_manager=False) -> EMRResource:
     """
@@ -289,6 +299,8 @@ def cacheable(_model: EMRResource = None, use_base_manager=False) -> EMRResource
             raise ValueError("Model must have a __model__ attribute")
 
         db_model: models.Model = model.__model__
+
+        _CACHEABLE_RESOURCES[model_string(db_model)].add(model.__name__)
 
         post_save.connect(
             delete_model_cache,
@@ -308,8 +320,24 @@ def cacheable(_model: EMRResource = None, use_base_manager=False) -> EMRResource
 def delete_model_cache(sender, instance, **kwargs) -> None:
     """
     Signal handler to delete the cache for a model instance when it is saved or deleted.
+
+    Writes are cached under both ``id`` and ``external_id`` (``model_from_cache``
+    accepts either), so both are invalidated for every resource registered
+    against this database model.
     """
     sender_model_string = model_string(sender)
-    cache.delete_pattern(model_cache_key(sender_model_string, pk=instance.id))
+    resource_names = _CACHEABLE_RESOURCES.get(sender_model_string)
+    if not resource_names:
+        return
+
+    identifiers = [instance.id]
     if external_id := getattr(instance, "external_id", None):
-        cache.delete_pattern(model_cache_key(sender_model_string, pk=external_id))
+        identifiers.append(external_id)
+
+    cache.delete_many(
+        [
+            model_cache_key(sender_model_string, resource_name, identifier)
+            for resource_name in resource_names
+            for identifier in identifiers
+        ]
+    )
