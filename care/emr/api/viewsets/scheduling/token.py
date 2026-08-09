@@ -72,7 +72,7 @@ class TokenViewSet(EMRModelViewSet):
             raise ValidationError("Sub Queue and Queue are not in the same facility")
         if instance.sub_queue and instance.sub_queue.resource != queue.resource:
             raise ValidationError("Sub Queue and Queue are not in the same resource")
-        with Lock(f"booking:token:{queue.id}"), transaction.atomic():
+        with transaction.atomic(), Lock(f"booking:token:{queue.id}"):
             instance.number = (
                 Token.objects.filter(queue=queue, category=instance.category).count()
                 + 1

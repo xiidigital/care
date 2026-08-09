@@ -167,11 +167,11 @@ class ScheduleViewSet(EMRModelViewSet):
                 availability_obj.save()
 
     def perform_update(self, instance):
-        with Lock(f"booking:resource:{instance.resource.id}"):
+        with transaction.atomic(), Lock(f"booking:resource:{instance.resource.id}"):
             super().perform_update(instance)
 
     def perform_destroy(self, instance):
-        with Lock(f"booking:resource:{instance.resource.id}"), transaction.atomic():
+        with transaction.atomic(), Lock(f"booking:resource:{instance.resource.id}"):
             # Check if there are any tokens allocated for this schedule in the future
             availabilities = instance.availability_set.all()
             availability_ids = list(availabilities.values_list("id"))
@@ -332,7 +332,7 @@ class AvailabilityViewSet(EMRCreateMixin, EMRDestroyMixin, EMRBaseViewSet):
         super().perform_create(instance)
 
     def perform_destroy(self, instance):
-        with Lock(f"booking:resource:{instance.schedule.resource.id}"):
+        with transaction.atomic(), Lock(f"booking:resource:{instance.schedule.resource.id}"):
             has_future_bookings = TokenSlot.objects.filter(
                 availability_id=instance.id,
                 start_datetime__gt=timezone.now(),

@@ -326,7 +326,7 @@ class TokenBookingViewSet(
         if not category:
             raise ValidationError("Category not found")
         note = request_data.note
-        with Lock(f"booking:token:{queue.id}"), transaction.atomic():
+        with transaction.atomic(), Lock(f"booking:token:{queue.id}"):
             number = Token.objects.filter(queue=queue, category=category).count() + 1
             token = Token.objects.create(
                 facility=booking.token_slot.resource.facility,

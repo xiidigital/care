@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework.exceptions import ValidationError
 
 from care.emr.locks.billing import InvoiceLock
@@ -11,7 +12,7 @@ def handle_charge_item_cancel(charge_item):
     # Rebalance the invoice
     if not charge_item.paid_invoice:
         return
-    with InvoiceLock(charge_item.paid_invoice):
+    with transaction.atomic(), InvoiceLock(charge_item.paid_invoice):
         if (
             charge_item.paid_invoice
             and charge_item.paid_invoice.status != InvoiceStatusOptions.draft.value

@@ -16,12 +16,8 @@ Two separate concerns live here, and keeping them apart is the point:
     The provider-neutral cache described by ADR-0004. Consumers reach it through
     ``django.core.cache`` and may use only the portable Django cache API.
 
-``locks``
-    Distributed locking, which is *not* cache. ADR-0005 and ES-05 own it. It is
-    given its own alias so that selecting a non-Redis ``default`` cache cannot
-    silently disable mutual exclusion -- the failure mode ES-04 section 19 exists
-    to eliminate. Until ES-05 replaces it, locking still requires Redis, and the
-    application fails loudly rather than pretending to lock.
+Distributed locking is not configured here: ES-05 uses PostgreSQL
+transaction-scoped advisory locks directly.
 """
 
 from django.core.exceptions import ImproperlyConfigured
@@ -44,11 +40,8 @@ SUPPORTED_CACHE_BACKENDS = (
 #: is listed here so the remaining Redis dependencies can be enumerated rather
 #: than discovered at runtime.
 #:
-#: ``locks``
-#:     ``care.utils.lock`` -- needs ``SET ... NX``. ADR-0005 / ES-05.
 #: ``recent_views``
 #:     ``care.emr.utils.recent_views`` -- needs ``LPUSH``/``LTRIM``/``LREM``.
-LOCK_CACHE_ALIAS = "locks"
 RECENT_VIEWS_CACHE_ALIAS = "recent_views"
 
 DEFAULT_CACHE_TABLE = "care_cache"

@@ -178,7 +178,7 @@ class InvoiceViewSet(
             raise PermissionDenied("Cannot write invoice")
 
     def perform_update(self, instance):
-        with InvoiceLock(instance):
+        with transaction.atomic(), InvoiceLock(instance):
             old_invoice = Invoice.objects.get(id=instance.id)
             if old_invoice.status != instance.status:
                 if instance.status in INVOICE_CANCELLED_STATUS:
@@ -235,7 +235,7 @@ class InvoiceViewSet(
     @action(methods=["POST"], detail=True)
     def attach_items_to_invoice(self, request, *args, **kwargs):
         invoice = self.get_object()
-        with AccountLock(invoice.account):
+        with transaction.atomic(), AccountLock(invoice.account):
             self.authorize_update({}, invoice)
             self.check_invoice_in_draft(invoice)
             request_params = AttachChargeItemToInvoiceRequest(**request.data)
@@ -263,7 +263,7 @@ class InvoiceViewSet(
     @action(methods=["POST"], detail=True)
     def remove_item_from_invoice(self, request, *args, **kwargs):
         invoice = self.get_object()
-        with AccountLock(invoice.account):
+        with transaction.atomic(), AccountLock(invoice.account):
             self.authorize_update({}, invoice)
             self.check_invoice_in_draft(invoice)
             request_params = RemoveChargeItemFromInvoiceRequest(**request.data)
@@ -290,7 +290,7 @@ class InvoiceViewSet(
     @action(methods=["POST"], detail=True)
     def attach_account_to_invoice(self, request, *args, **kwargs):
         invoice = self.get_object()
-        with AccountLock(invoice.account):
+        with transaction.atomic(), AccountLock(invoice.account):
             self.authorize_update({}, invoice)
             self.check_invoice_in_draft(invoice)
             with transaction.atomic():
@@ -311,7 +311,7 @@ class InvoiceViewSet(
     @action(methods=["POST"], detail=True)
     def cancel_invoice(self, request, *args, **kwargs):
         invoice = self.get_object()
-        with AccountLock(invoice.account):
+        with transaction.atomic(), AccountLock(invoice.account):
             if invoice.created_date >= care_now() - timedelta(
                 minutes=settings.INVOICE_FREE_CANCEL_PERIOD_MINUTES
             ):

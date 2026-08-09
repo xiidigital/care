@@ -18,7 +18,6 @@ from config.caches import (
     DEFAULT_CACHE_KEY_PREFIX,
     DEFAULT_CACHE_TABLE,
     DEFAULT_CACHE_TIMEOUT,
-    LOCK_CACHE_ALIAS,
     RECENT_VIEWS_CACHE_ALIAS,
     REDIS_CACHE_BACKEND,
     build_default_cache,
@@ -95,10 +94,12 @@ DATABASES["default"]["ATOMIC_REQUESTS"] = True
 DATABASES["default"]["CONN_MAX_AGE"] = env.int("CONN_MAX_AGE", default=0)
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# timeout for the distributed lock in care/utils/lock.py (ADR-0005 / ES-05)
+# Retained as compatibility metadata for lock consumers that expose a timeout
+# parameter. PostgreSQL transaction-scoped advisory locks do not use a lease;
+# their lifetime is the enclosing transaction (ADR-0005 / ES-05).
 LOCK_TIMEOUT = env.int("LOCK_TIMEOUT", default=32)
 
-# Read by Celery and by the distributed lock. Kept under its historical name so
+# Read by Celery and Redis-specific features. Kept under its historical name so
 # the local Docker Compose profile keeps working unchanged (ES-04 section 24).
 REDIS_URL = env("REDIS_URL", default="redis://localhost:6379")
 
@@ -139,9 +140,6 @@ CACHES = {
     ),
     # Neither of these is cache, and neither is selected by CARE_CACHE_BACKEND.
     # Both still require Redis; see config/caches.py for why.
-    LOCK_CACHE_ALIAS: build_redis_only_cache(
-        REDIS_URL, responsibility=LOCK_CACHE_ALIAS
-    ),
     RECENT_VIEWS_CACHE_ALIAS: build_redis_only_cache(
         REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS
     ),

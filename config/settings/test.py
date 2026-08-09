@@ -5,7 +5,6 @@ from authlib.jose import JsonWebKey
 
 from care.utils.jwks.generate_jwk import get_jwks_from_file
 from config.caches import (
-    LOCK_CACHE_ALIAS,
     RECENT_VIEWS_CACHE_ALIAS,
     build_redis_only_cache,
 )
@@ -72,10 +71,6 @@ CACHES = {
     # no portable equivalent, so a LocMem stand-in would test nothing. They are
     # namespaced per worker instead, which is what stops parallel workers
     # contending for the constant lock keys such as PatientCreateLock.
-    LOCK_CACHE_ALIAS: {
-        **build_redis_only_cache(REDIS_URL, responsibility=LOCK_CACHE_ALIAS),
-        "KEY_FUNCTION": "config.caches.worker_scoped_key",
-    },
     RECENT_VIEWS_CACHE_ALIAS: {
         **build_redis_only_cache(REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS),
         "KEY_FUNCTION": "config.caches.worker_scoped_key",

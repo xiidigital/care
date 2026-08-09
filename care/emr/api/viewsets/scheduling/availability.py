@@ -124,7 +124,7 @@ def convert_availability_and_exceptions_to_slots(availabilities, exceptions, day
 
 
 def lock_create_appointment(token_slot, patient, created_by, note):
-    with Lock(f"booking:resource:{token_slot.resource.id}"), transaction.atomic():
+    with transaction.atomic(), Lock(f"booking:resource:{token_slot.resource.id}"):
         if token_slot.end_datetime < timezone.now():
             raise ValidationError("Slot is already past")
         if token_slot.allocated >= token_slot.availability.tokens_per_slot:

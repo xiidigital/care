@@ -14,7 +14,6 @@ from django.test import SimpleTestCase
 
 from config.caches import (
     DUMMY_CACHE_BACKEND,
-    LOCK_CACHE_ALIAS,
     LOCMEM_CACHE_BACKEND,
     POSTGRES_CACHE_BACKEND,
     RECENT_VIEWS_CACHE_ALIAS,
@@ -152,32 +151,24 @@ class RedisUrlPrecedenceTests(SimpleTestCase):
 
 class RedisOnlyAliasTests(SimpleTestCase):
     """
-    Locking and recent views are not cache and are not selected by
-    CARE_CACHE_BACKEND (ES-04 sections 15 and 19).
+    Recent views is not cache and is not selected by CARE_CACHE_BACKEND.
     """
 
-    def test_lock_alias_is_redis_regardless_of_cache_backend(self):
-        config = build_redis_only_cache(REDIS_URL, responsibility=LOCK_CACHE_ALIAS)
+    def test_recent_views_alias_is_redis_regardless_of_cache_backend(self):
+        config = build_redis_only_cache(REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS)
         self.assertEqual(config["BACKEND"], "django_redis.cache.RedisCache")
 
-    def test_lock_alias_does_not_swallow_exceptions(self):
+    def test_recent_views_alias_does_not_swallow_exceptions(self):
         # A swallowed error would turn a failed acquisition into an apparent
         # success -- the exact silent failure ES-04 section 19 forbids.
-        config = build_redis_only_cache(REDIS_URL, responsibility=LOCK_CACHE_ALIAS)
+        config = build_redis_only_cache(REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS)
         self.assertFalse(config["OPTIONS"]["IGNORE_EXCEPTIONS"])
-
-    def test_aliases_do_not_share_a_key_namespace(self):
-        lock = build_redis_only_cache(REDIS_URL, responsibility=LOCK_CACHE_ALIAS)
-        views = build_redis_only_cache(
-            REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS
-        )
-        self.assertNotEqual(lock["KEY_PREFIX"], views["KEY_PREFIX"])
 
     def test_missing_redis_url_fails_loudly(self):
         # ES-04 section 25: the application fails clearly if a selected
         # responsibility still requires Redis.
         with self.assertRaises(ImproperlyConfigured) as ctx:
-            build_redis_only_cache(None, responsibility=LOCK_CACHE_ALIAS)
+            build_redis_only_cache(None, responsibility=RECENT_VIEWS_CACHE_ALIAS)
         self.assertIn("REDIS_URL", str(ctx.exception))
 
 
@@ -198,7 +189,7 @@ class DirectRedisBoundaryTests(SimpleTestCase):
     ES-04 section 32: ordinary cache consumers must not reach for Redis.
 
     Deliberately an allowlist rather than a blanket ban. Responsibilities that
-    genuinely still need Redis -- locking until ES-05, the recent-views list --
+    genuinely still need Redis -- the recent-views list --
     are permitted and named, so this test documents the remaining surface
     instead of pretending it is empty.
     """

@@ -119,15 +119,8 @@ class PatientViewSet(EMRModelViewSet):
 
     def perform_create(self, instance):
         identifiers = instance._identifiers  # noqa: SLF001
-        lock = PatientCreateLock()
         try:
-            lock.acquire()
-        except ObjectLocked as e:
-            raise ValidationError(
-                "Patient creation failed, try again after a while"
-            ) from e
-        try:
-            with transaction.atomic():
+            with transaction.atomic(), PatientCreateLock():
                 super().perform_create(instance)
                 for identifier in identifiers:
                     config = get_object_or_404(
@@ -153,10 +146,10 @@ class PatientViewSet(EMRModelViewSet):
                     instance._tags,  # noqa: SLF001
                     self.request.user,
                 )
-            transaction.on_commit(lock.release)
-        except Exception:
-            lock.release()
-            raise
+        except ObjectLocked as e:
+            raise ValidationError(
+                "Patient creation failed, try again after a while"
+            ) from e
 
     def perform_update(self, instance):
         identifiers = instance._identifiers  # noqa: SLF001

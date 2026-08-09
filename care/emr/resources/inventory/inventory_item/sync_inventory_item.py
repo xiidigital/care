@@ -3,6 +3,7 @@ Inventory Item needs to be synced to track the current availability
 The current availability can change based on the dispense and delivery in the system
 """
 
+from django.db import transaction
 from django.db.models import Sum
 
 from care.emr.locks.inventory import InventoryLock
@@ -29,7 +30,7 @@ def sync_inventory_item(location=None, product=None, inventory_item=None):
     if inventory_item:
         product = inventory_item.product
         location = inventory_item.location
-    with InventoryLock(product, location):
+    with transaction.atomic(), InventoryLock(product, location):
         current_location = location
         inventory_item = InventoryItem.objects.filter(
             product=product, location=location

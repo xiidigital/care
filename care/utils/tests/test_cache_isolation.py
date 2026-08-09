@@ -30,7 +30,6 @@ from django.core.cache import caches
 from django.test import SimpleTestCase, override_settings
 
 from config.caches import (
-    LOCK_CACHE_ALIAS,
     RECENT_VIEWS_CACHE_ALIAS,
     build_default_cache,
     worker_scoped_key,
@@ -84,11 +83,7 @@ class TestProfileIsolationTests(SimpleTestCase):
 
 class WorkerScopedKeyTests(SimpleTestCase):
     """
-    The namespacing applied to the aliases that must stay on Redis.
-
-    Lock keys are the sharp edge: several are constants -- `PatientCreateLock`
-    has no per-object component -- so without this two workers would contend for
-    one lock and one would see a spurious 423.
+    The namespacing applied to the Redis-only recent-views alias.
     """
 
     def test_key_includes_the_worker_id(self):
@@ -111,23 +106,10 @@ class WorkerScopedKeyTests(SimpleTestCase):
         self.assertEqual(first, second)
 
     def test_redis_backed_aliases_use_the_worker_scoped_key_function(self):
-        for alias in (LOCK_CACHE_ALIAS, RECENT_VIEWS_CACHE_ALIAS):
-            with self.subTest(alias=alias):
-                self.assertEqual(
-                    settings.CACHES[alias]["KEY_FUNCTION"],
-                    "config.caches.worker_scoped_key",
-                )
-
-    def test_lock_keys_are_namespaced_per_worker_in_practice(self):
-        cache = caches[LOCK_CACHE_ALIAS]
-        with patch("django.test.runner._worker_id", 91):
-            cache.set("isolation-probe", "w91", 30)
-        try:
-            with patch("django.test.runner._worker_id", 92):
-                self.assertIsNone(cache.get("isolation-probe"))
-        finally:
-            with patch("django.test.runner._worker_id", 91):
-                cache.delete("isolation-probe")
+        self.assertEqual(
+            settings.CACHES[RECENT_VIEWS_CACHE_ALIAS]["KEY_FUNCTION"],
+            "config.caches.worker_scoped_key",
+        )
 
 
 class ProductionKeySemanticsTests(SimpleTestCase):
@@ -143,7 +125,7 @@ class ProductionKeySemanticsTests(SimpleTestCase):
         from config.caches import build_redis_only_cache
 
         production_lock = build_redis_only_cache(
-            "redis://localhost:6379", responsibility=LOCK_CACHE_ALIAS
+            "redis://localhost:6379", responsibility=RECENT_VIEWS_CACHE_ALIAS
         )
         self.assertNotIn("KEY_FUNCTION", production_lock)
 

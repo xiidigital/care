@@ -1,3 +1,4 @@
+from django.db import transaction
 from django.db.models import Sum
 
 from care.emr.locks.billing import AccountLock
@@ -22,7 +23,7 @@ def calculate_charge_item_amount_sum(charge_items):
 
 
 def sync_account_items(account: Account):
-    with AccountLock(account):
+    with transaction.atomic(), AccountLock(account):
         charge_items_base = ChargeItem.objects.filter(
             account=account,
         )

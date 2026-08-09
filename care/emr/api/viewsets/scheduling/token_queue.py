@@ -148,7 +148,7 @@ class TokenQueueViewSet(EMRModelViewSet):
     def set_primary(self, request, *args, **kwargs):
         obj = self.get_object()
         self.authorize_update(None, obj)
-        with Lock(f"queue:primary:{obj.id}"), transaction.atomic():
+        with transaction.atomic(), Lock(f"queue:primary:{obj.id}"):
             TokenQueue.objects.filter(resource=obj.resource, date=obj.date).update(
                 is_primary=False
             )
@@ -183,7 +183,7 @@ class TokenQueueViewSet(EMRModelViewSet):
             filter_data["name"] = "System Generated"
             filter_data["system_generated"] = True
             queue = TokenQueue.objects.create(**filter_data)
-        with Lock(f"booking:token:{queue.id}"), transaction.atomic():
+        with transaction.atomic(), Lock(f"booking:token:{queue.id}"):
             category = get_object_or_404(
                 TokenCategory.objects.only("id"),
                 facility=facility,
@@ -226,7 +226,7 @@ class TokenQueueViewSet(EMRModelViewSet):
                 facility=obj.facility,
                 external_id=request_data.category,
             )
-        with Lock(f"queue:next_token:{obj.id}"), transaction.atomic():
+        with transaction.atomic(), Lock(f"queue:next_token:{obj.id}"):
             tokens_qs = Token.objects.filter(
                 queue=obj, status__in=[TokenStatusOptions.CREATED.value]
             ).order_by("created_date")

@@ -124,7 +124,7 @@ def cancel_return_invoice(delivery_order: DeliveryOrder):
                 product=supply_delivery.supplied_item,
                 location=delivery_order.destination,
             )
-            with InventoryItemLock(inventory_item):
+            with transaction.atomic(), InventoryItemLock(inventory_item):
                 inventory_item.refresh_from_db(fields=["net_content"])
                 if (
                     supply_delivery.status
