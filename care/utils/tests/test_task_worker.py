@@ -174,9 +174,17 @@ class TaskWorkerTests(SimpleTestCase):
 
 
 class WorkerRouteSeparationTests(SimpleTestCase):
-    """The API role should not route the internal endpoint at all."""
+    """
+    The API role must not route the internal endpoint at all.
 
-    def route_names(self, *, enabled):
+    ES-06 made the runtime role the thing that decides this, so the full route
+    surface of each role -- including which public routes a worker does *not*
+    serve -- is asserted in ``test_runtime_roles.py``. What remains here is the
+    endpoint's own half of the contract: the flag that governs it, and the
+    default that keeps it off wherever the role is not ``task_worker``.
+    """
+
+    def route_names(self, *, role, enabled):
         import importlib
 
         from django.urls import clear_url_caches
@@ -184,7 +192,9 @@ class WorkerRouteSeparationTests(SimpleTestCase):
         import config.urls
 
         try:
-            with override_settings(CARE_TASK_HANDLER_ENDPOINT_ENABLED=enabled):
+            with override_settings(
+                CARE_PROCESS_ROLE=role, CARE_TASK_HANDLER_ENDPOINT_ENABLED=enabled
+            ):
                 clear_url_caches()
                 urlconf = importlib.reload(config.urls)
                 return {
@@ -196,10 +206,16 @@ class WorkerRouteSeparationTests(SimpleTestCase):
             importlib.reload(config.urls)
 
     def test_the_worker_role_serves_the_route(self):
-        self.assertIn("internal_task_execute", self.route_names(enabled=True))
+        names = self.route_names(role="task_worker", enabled=True)
+        self.assertIn("internal_task_execute", names)
 
     def test_the_api_role_does_not(self):
-        self.assertNotIn("internal_task_execute", self.route_names(enabled=False))
+        names = self.route_names(role="api", enabled=False)
+        self.assertNotIn("internal_task_execute", names)
+
+    def test_a_worker_can_still_have_the_endpoint_switched_off(self):
+        names = self.route_names(role="task_worker", enabled=False)
+        self.assertNotIn("internal_task_execute", names)
 
     def test_it_is_disabled_by_default(self):
         from django.conf import settings

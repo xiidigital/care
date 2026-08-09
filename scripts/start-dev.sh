@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-printf "api" > /tmp/container-role
+# Runtime role: api (ADR-0006). The development server, same responsibilities
+# and same exclusions as scripts/start.sh.
+export CARE_PROCESS_ROLE="${CARE_PROCESS_ROLE:-api}"
+printf "http" > /tmp/container-probe
 
 set -euo pipefail
 

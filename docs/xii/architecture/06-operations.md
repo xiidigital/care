@@ -2609,3 +2609,178 @@ It will define:
 - validation rules;
 - safe defaults;
 - prohibited production defaults.
+
+---
+
+# 112. Runtime Roles (ES-06)
+
+Added 2026-08-09. This section describes how CARE processes are operated after
+ADR-0006. It applies to every deployment — local, traditional, and managed — and
+is deliberately written without reference to a cloud provider, because the role
+model does not have one.
+
+## 112.1 Role is not topology
+
+A CARE deployment is a composition of two independent choices:
+
+```text
+what each process is responsible for   ->  CARE_PROCESS_ROLE
+what infrastructure it uses            ->  CARE_STORAGE_BACKEND
+                                           CARE_TASK_BACKEND
+                                           CARE_CACHE_BACKEND
+```
+
+There is no variable that names the platform, and none may be introduced.
+`CARE_RUNTIME_PROFILE`, `IS_GCP`, `USE_CLOUD_RUN` and equivalents are rejected
+by ADR-0006; a deployment expresses itself by choosing a role per process and
+the backends it actually has.
+
+## 112.2 The four roles
+
+| Role | Owns | Never does |
+| --- | --- | --- |
+| `api` | the public application API | migrate, create the cache table, sync permissions or valuesets, schedule, or serve the task endpoint |
+| `task_worker` | executing asynchronous work | serve the public API, migrate, or schedule |
+| `scheduler` | deciding when periodic work runs | hold business logic, or initialize |
+| `init` | deployment-time initialization | serve HTTP, run Celery, or stay running |
+
+An unknown role raises `ImproperlyConfigured` at startup naming all four. It is
+never treated as `api`.
+
+## 112.3 Starting each role
+
+| Role | Entrypoint | Probe |
+| --- | --- | --- |
+| `api` | `scripts/start.sh` (prod), `scripts/start-dev.sh` (dev) | `GET /ping/` |
+| `task_worker` over HTTP | `scripts/start-worker.sh` | `GET /ping/` |
+| `task_worker` over Celery | `scripts/celery_worker.sh`, `scripts/celery-dev.sh` | `celery inspect ping` |
+| `scheduler` | `scripts/celery_beat.sh`, `scripts/celery_beat-dev.sh` | marker file — see §112.8 |
+| `init` | `scripts/initialize.sh` | process exit status |
+
+All five run from the same application image. The image declares no `CMD` on
+purpose: the orchestrator chooses the role by choosing the command.
+
+`scripts/start.sh` and `scripts/start-worker.sh` bind `${PORT:-9000}`, so a
+platform that assigns a port needs no wrapper.
+
+## 112.4 Initialization is a deployment step
+
+```bash
+./scripts/initialize.sh
+```
+
+runs, in order and stopping at the first failure:
+
+```text
+python manage.py migrate --noinput
+python manage.py createcachetable
+python manage.py compilemessages -v 0
+python manage.py sync_permissions_roles
+python manage.py sync_valueset
+```
+
+It needs a reachable database and the application image. It needs no broker, no
+worker, no scheduler and no Redis. It exits 0 on success and non-zero on the
+first failure, and that exit status is its entire health contract.
+
+Run it **before** starting or promoting application revisions. Concurrent
+invocations are safe where it matters: `sync_permissions_roles` holds a
+PostgreSQL transaction-scoped advisory lock (ADR-0005), so a second initializer
+contends on the lock rather than interleaving a rebuild of the permission table.
+
+**Operators upgrading from a pre-ES-06 deployment must act.** Celery Beat used
+to run this sequence at startup, so migrations happened as a side effect of
+starting the scheduler. It no longer does. A deployment that does not add an
+explicit initialization step will not migrate.
+
+## 112.5 Route surfaces
+
+| Path | `api` | `task_worker` | `scheduler` / `init` |
+| --- | --- | --- | --- |
+| `/`, `/ping/`, `/health/`, `/app_version/` | yes | yes | yes |
+| `/api/v1/...`, `/admin/`, schema and plugin routes | yes | no | no |
+| `/internal/tasks/execute/` | no | yes | no |
+
+Isolation is by absence: the routes are not registered, so there is no view to
+protect. An operator who finds `/internal/tasks/execute/` answering on an API
+service has a misconfigured role, not a permissions problem.
+
+## 112.6 Worker security
+
+The internal task endpoint has **no application-layer authentication**, by
+decision. It is safe only behind a platform authorization boundary that rejects
+unauthenticated invocation.
+
+For a managed deployment this means, without exception:
+
+- the worker service rejects unauthenticated invocation at the platform IAM
+  boundary;
+- only the task-dispatch service account holds invoker permission;
+- there is no public/anonymous invoker binding.
+
+Do not add a shared secret to compensate for an IAM binding that has not been
+created yet. Fix the binding.
+
+## 112.7 Health by role
+
+`/health/` reports only what the role depends on:
+
+| Role | Probes |
+| --- | --- |
+| `api` | database, cache, and the Celery queue only when `CARE_TASK_BACKEND=celery` |
+| `task_worker` | database, cache, task registry |
+| `scheduler` | database, and the Celery queue only when `CARE_TASK_BACKEND=celery` |
+| `init` | none |
+
+Two consequences worth knowing before reading a dashboard:
+
+- an API running Cloud Tasks reports no queue probe. That is correct, not a
+  missing check: there is no Celery queue to measure.
+- a task worker reports no queue probe either, under any backend. Work arrives
+  inbound; a worker probing the queue would be reporting on a dependency it does
+  not use to receive work.
+
+The task-registry probe fails when the worker can execute nothing — an
+unimportable handler module, or an empty registry. That failure is worth paging
+on: such a worker accepts deliveries and fails every one.
+
+## 112.8 Known probe limitation
+
+The Celery Beat container probe checks a marker file written before beat starts.
+It reports that the container started, not that beat is still scheduling. See
+`inventory/unresolved-items.md` L3 for why no replacement was invented; monitor
+beat by whether its scheduled work actually happens.
+
+## 112.9 Startup diagnostics
+
+Each long-running process logs one line at startup:
+
+```text
+CARE runtime: process_role=api storage_backend=s3 task_backend=celery cache_backend=redis
+```
+
+It contains backend names only — never a URL, credential or connection string.
+Most role and backend misconfigurations are visible in this one line.
+
+It does not currently appear for the `scheduler` role: no log record escapes a
+Celery Beat process under the deployment settings, for the reason recorded in
+`inventory/unresolved-items.md` L2.
+
+## 112.10 Redis
+
+Redis is not a CARE runtime requirement. It is required by whatever the
+deployment selects:
+
+| Selection | Needs Redis |
+| --- | --- |
+| `CARE_CACHE_BACKEND=redis` | yes, to serve the cache |
+| `CARE_TASK_BACKEND=celery` | yes, as the broker |
+| `recent_views` API endpoints | yes, always — see `unresolved-items.md` L5 |
+| distributed locking | no — PostgreSQL advisory locks (ADR-0005) |
+| initialization | no |
+| the PostgreSQL cache | no |
+| the HTTP task transport | no |
+
+`scripts/wait_for_redis.sh` waits only when the first two apply, and otherwise
+exits immediately after logging both selections. CARE does not claim to be
+Redis-free while `recent_views` remains Redis-backed.

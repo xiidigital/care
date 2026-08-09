@@ -1059,3 +1059,175 @@ use failure-tolerant semantics such as:
 
 ```text
 IGNORE_EXCEPTIONS = true
+
+---
+
+## Part L — Runtime roles (ES-06)
+
+Recorded 2026-08-09 on `feature/runtime-roles`. ES-06 implemented ADR-0006:
+four runtime roles, isolated route surfaces, role-aware health, and
+initialization as its own ephemeral role. These are the items it did **not**
+resolve, plus the findings its verification surfaced.
+
+### L1. A non-Redis `default` cache blocks every management command
+
+**Status:** Open. **Severity:** blocks the intended managed-cloud composition.
+**Origin:** ES-06 verification of §36 and §38. **Category:** cache /
+rate-limiting.
+
+**verified** With `CARE_CACHE_BACKEND=postgres`, `manage.py migrate` — and every
+other management command — aborts before doing anything:
+
+```text
+SystemCheckError: System check identified some issues:
+ERRORS:
+?: (django_ratelimit.E003) cache backend
+   django.core.cache.backends.db.DatabaseCache does not support atomic increment
+```
+
+**verified** The same check fires for `locmem` (`is not a shared cache`). Only
+the Redis backend passes it. `config/settings/test.py` silences `E003` and
+`W001`; no other settings module does, so the error is invisible in the test
+suite and appears the moment a real process selects a non-Redis cache.
+
+**Consequence.** The `init` role runs management commands exclusively, so under
+`CARE_CACHE_BACKEND=postgres` a deployment cannot initialize at all. The
+composition documented in `07-configuration-reference.md` §60–62 and named in
+ES-06 §36 is therefore not currently runnable end to end. The blocker is the
+rate limiter's cache requirement, not the runtime-role architecture: with
+`CARE_CACHE_BACKEND=redis` the same processes run with **no reachable Redis**,
+because initialization touches no cache.
+
+**Not fixed in ES-06, deliberately.** ES-06 §54 forbids redesigning the cache,
+and every honest fix is a rate-limiter decision rather than a runtime one:
+
+1. give the rate limiter its own cache alias — the shape `CARE_RATE_LIMIT_BACKEND`
+   already anticipated in `07-configuration-reference.md` §2.2 — so the
+   `default` cache stops determining whether CARE can start;
+2. silence `E003` outside tests, which trades a startup error for the silent
+   overshoot recorded in K4 and is the worse option;
+3. keep Redis mandatory for rate limiting and say so, which contradicts
+   ADR-0006's position that Redis is capability-specific.
+
+**Recommended owner:** ES-07, before any managed-cloud deployment selects the
+PostgreSQL cache. It is a hard prerequisite for that composition, and K4 above
+is the same defect seen from the correctness side.
+
+### L2. Deployment settings disable every logger created during settings import
+
+**Status:** Open. **Severity:** diagnostics. **Origin:** ES-06 §33 verification.
+
+**verified** `config/settings/deployment.py:75` sets
+`"disable_existing_loggers": True`. `django.setup()` applies that dictConfig, and
+`logging.config` permanently disables every logger object that already exists —
+which includes every logger created while the settings module was importing, and
+every logger Celery created before Django was set up.
+
+**This explains §11.6 of `runtime-and-deployment.md`**, which recorded that the
+local Celery container never emits `celery@<host> ready.` and beat never emits
+`beat: Starting...`, and attributed it to log truncation under `watchmedo`. It
+is not truncation. The local Celery containers run
+`config.settings.production` (via the `setdefault` in `config/celery_app.py`,
+since `DJANGO_SETTINGS_MODULE` is unset for them), which imports
+`deployment.py`, which disables Celery's loggers.
+
+**Worked around, narrowly.** `config/runtime.py` resolves its logger when it
+logs rather than at import, so the ES-06 startup summary survives for the `api`
+and `task_worker` roles. **verified** for gunicorn, `runserver_plus` and a
+Celery worker.
+
+**Not worked around for the `scheduler` role.** In a Celery Beat process no log
+record of any level reaches stderr, including records emitted directly on the
+root logger — verified by probe. The `beat_init` receiver runs and the summary
+is emitted; it is discarded downstream. ES-06 §33 says to use the existing
+logging infrastructure and not to add a framework, so no bypass was invented.
+
+**Recommended fix:** set `disable_existing_loggers` to `False` in
+`deployment.py`, matching `base.py` and `test.py`, and re-verify Celery's own
+startup lines return. That is a one-line change to a settings module shared by
+production and staging and was not made inside a runtime-roles phase.
+
+### L3. The Celery Beat container probe is still a start marker
+
+**Status:** Open, pre-existing. **Origin:** `runtime-and-deployment.md` §5.
+
+**verified** `scripts/celery_beat.sh` and `scripts/celery_beat-dev.sh` `touch
+/tmp/healthy` *before* beat is exec'd, and `scripts/healthcheck.sh` checks for
+that file. The probe therefore reports "the container started", not "beat is
+scheduling".
+
+**Not replaced in ES-06, with a reason.** The obvious replacement — asserting
+that beat's schedule file was written recently — is unsound here: CARE's
+periodic work is sparse (daily, and every `FILE_UPLOAD_EXPIRY_HOURS` hours), so
+a healthy beat can legitimately leave the file untouched for hours and a staleness
+threshold would restart-loop a working scheduler. ES-06 §28 says not to build a
+health framework where one is not needed, and inventing a probe that fails on
+healthy processes is worse than a marker that is honestly documented.
+
+**Note** the managed-cloud composition does not run this process at all: it uses
+a platform scheduler, so this probe is a traditional-deployment concern.
+
+### L4. The task worker is unsafe to expose publicly
+
+**Status:** Open by design. **Carried to ES-07 as a production blocker.**
+
+**verified** `POST /internal/tasks/execute/` has no application-layer
+authentication: no shared secret, no bearer token, no HMAC. This is the ES-03
+decision, and ES-06 §14 requires it be preserved — an application secret added
+to compensate for undeployed IAM would become the permanent authentication
+mechanism.
+
+**verified** ES-06 narrowed the exposure as far as the application can: the
+route is registered only under `CARE_PROCESS_ROLE=task_worker`, so an API
+service does not route it at all, and a worker serves no public API.
+
+**Unchanged requirement for ES-07**, stated so it cannot be lost:
+
+```text
+the task_worker service SHALL reject unauthenticated invocation at the
+platform boundary; on Cloud Run that means IAM, with roles/run.invoker
+granted to the Cloud Tasks service account alone, and no allUsers binding
+```
+
+`scripts/start-worker.sh` states the same requirement at the point where a
+deployment would use it.
+
+### L5. `recent_views` keeps Redis on the API's capability list
+
+**Status:** Open, unchanged from ES-04 (K2). Restated because ES-06 §36 asks for
+it not to be hidden.
+
+**verified** The `recent_views` cache alias is Redis in every configuration and
+sets `IGNORE_EXCEPTIONS: False`. It is used by specific API endpoints, not by
+process startup, so with Redis absent those endpoints raise and the rest of the
+API serves normally.
+
+**Consequence for the managed-cloud composition:** a deployment that wants no
+Redis at all must accept that those endpoints fail, or keep a Redis-compatible
+service for that one responsibility. ES-06 stopped `wait_for_redis.sh` from
+turning this capability dependency into a startup dependency; it did not remove
+the dependency, which needs the PostgreSQL model described in K2.
+
+### L6. Traditional deployments must now initialize explicitly
+
+**Status:** Action required by operators. Not a defect.
+
+**verified** `scripts/celery_beat.sh` no longer calls `scripts/initialize.sh`.
+A traditional deployment that relied on starting Celery Beat to migrate will
+stop migrating.
+
+**Required change:** run `scripts/initialize.sh` as a deployment step before
+starting or promoting the application. It needs a database and the application
+image, and nothing else — no broker, worker or scheduler.
+
+### L7. `ruff check .` fails on pre-existing issues outside ES-06
+
+**Status:** Open, pre-existing at the ES-06 branch point.
+
+**verified** Three errors in `care/utils/tests/test_lock.py` (import ordering,
+an unused import, nested `with`) and 33 files that `ruff format --check` would
+reformat. None is in a file ES-06 touched: every file this phase changed passes
+both `ruff check` and `ruff format --check`.
+
+**Not fixed**, because repo-wide formatting churn would bury the runtime-role
+diff. Worth a dedicated cleanup commit.

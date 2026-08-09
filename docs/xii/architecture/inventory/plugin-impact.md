@@ -396,3 +396,76 @@ introduced. Both were explicitly out of scope.
 
 **unknown**, unchanged from §4: which plugins any given deployment runs. A
 deployment adding one has to check it against the three rules above itself.
+
+---
+
+## 12. Runtime roles after ES-06
+
+Recorded 2026-08-09. ES-06 §39 asks for plugin assumptions about URL
+registration, startup, Celery, process role, `AppConfig.ready()` and
+autodiscovery to be reviewed and classified.
+
+**verified** `plug_config.py` still declares `plugs = []`, so as in every
+previous section this is a statement about what a plugin *would* encounter, not
+about an enabled one. A grep across `plugs/` and `plug_config.py` for
+`CARE_PROCESS_ROLE`, `urls`, `ready` and `celery` returns nothing: the loader is
+role-neutral and was not changed.
+
+### 12.1 The change that affects plugins
+
+**verified** `config/urls.py` registers plugin URLs for the `api` role only:
+
+```python
+if settings.CARE_PROCESS_ROLE == API_ROLE:
+    for plug in settings.PLUGIN_APPS:
+        urlpatterns += [path(f"api/{plug}/", include(f"{plug}.urls"))]
+```
+
+Before ES-06 the loop ran in every process. Plugin routes are public API
+surface, so they follow the public API rather than being mounted in a task
+worker that must not serve it.
+
+**verified** Everything else a plugin touches is unchanged. Plugin apps are
+still in `INSTALLED_APPS` in every role, `AppConfig.ready()` still runs in every
+process, `PLUGIN_CONFIGS` is still built at settings import, and
+`app.autodiscover_tasks()` still scans every installed app.
+
+### 12.2 Classification
+
+Using the categories ES-06 §39 asks for:
+
+| Plugin behaviour | Class | Why |
+| --- | --- | --- |
+| Django app with models, viewsets and `urls.py` | **compatible** | routes serve under `api`; models and migrations are role-independent |
+| `AppConfig.ready()` doing registration, signal wiring, checks | **compatible** | `ready()` runs in all four roles, unchanged |
+| Celery task defined in the plugin's `tasks` module | **compatible** | `autodiscover_tasks` is unchanged; a `task_worker` running Celery executes it |
+| Reading `PLUGIN_CONFIGS` or `settings` | **compatible** | settings are identical across roles apart from role-derived values |
+| Calling `reverse()` on a **core** CARE URL from a task handler | **API-only assumption** | core public URLs do not resolve under `task_worker`; see §12.3 |
+| Calling `reverse()` on its **own** URL from a task handler | **API-only assumption** | plugin URLs now register under `api` only |
+| Rendering a template that contains `{% url %}` for a public route | **API-only assumption** | same mechanism |
+| Expecting its endpoints to answer on the worker service | **worker-incompatible** | by design: the worker serves the task endpoint and diagnostics |
+| Contributing a Celery Beat schedule entry | **compatible** | beat is the `scheduler` role and is otherwise unchanged |
+| Assuming beat startup migrates the database | **scheduler-incompatible** | beat no longer initializes; see `runtime-and-deployment.md` §15.2 |
+| Registering a health check | **unknown, still impossible** | `HEALTHY_DJANGO` is now built by `config.health.build_health_checks` and still has no plugin hook |
+| Anything a downstream deployment installs | **unknown** | unchanged from §4 |
+
+### 12.3 The one real hazard, and how core avoids it
+
+**verified** Core CARE has the same exposure and it was checked rather than
+assumed: no task handler in `care/emr/tasks/` calls `reverse()` or
+`reverse_lazy()`. The one reverse that could reach a worker is `{% url 'home' %}`
+in `care/templates/base.html`, which every error template extends — so `home` is
+deliberately part of the diagnostic route set served by every role. Without it a
+worker would answer an ordinary 404 with `NoReverseMatch`.
+
+**Recommended plugin review criterion**, alongside the ones in §10.4 and §11: a
+plugin task handler must not build URLs. If it needs an absolute link for an
+email or a document, it should take the site URL from configuration rather than
+from the URLconf of the process that happens to be executing it.
+
+### 12.4 Not built
+
+No plugin runtime SDK, no role hook, no way for a plugin to opt into worker
+routing. ES-06 §39 says not to build one, and with no plugin bundled there is
+nothing to validate a design against. A plugin that genuinely needs a
+worker-side route is the case that should motivate the design, and none exists.

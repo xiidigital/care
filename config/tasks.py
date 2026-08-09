@@ -21,10 +21,6 @@ CLOUD_TASKS_BACKEND = "cloud_tasks"
 #: rejected rather than silently accepted.
 SUPPORTED_TASK_BACKENDS = (CELERY_BACKEND, CLOUD_TASKS_BACKEND)
 
-#: Values accepted by ``CARE_PROCESS_ROLE``. The role selects startup command,
-#: exposed routes and logging metadata; it never alters clinical behaviour.
-SUPPORTED_PROCESS_ROLES = ("api", "task_worker", "job", "celery_worker")
-
 #: Required when ``CARE_TASK_BACKEND=cloud_tasks``.
 CLOUD_TASKS_REQUIRED_SETTINGS = (
     "GCP_TASKS_PROJECT_ID",
@@ -46,15 +42,6 @@ def validate_task_backend(backend: str) -> str:
         )
         raise ImproperlyConfigured(msg)
     return backend
-
-
-def validate_process_role(role: str) -> str:
-    """Return ``role`` if supported, otherwise raise ``ImproperlyConfigured``."""
-    if role not in SUPPORTED_PROCESS_ROLES:
-        supported = ", ".join(SUPPORTED_PROCESS_ROLES)
-        msg = f"Invalid CARE_PROCESS_ROLE: {role!r}. Supported values are: {supported}."
-        raise ImproperlyConfigured(msg)
-    return role
 
 
 def validate_cloud_tasks_settings(values: dict[str, str | None]) -> None:

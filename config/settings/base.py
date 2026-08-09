@@ -9,10 +9,6 @@ from pathlib import Path
 
 import environ
 from django.utils.translation import gettext_lazy as _
-from healthy_django.healthcheck.celery_queue_length import (
-    DjangoCeleryQueueLengthHealthCheck,
-)
-from healthy_django.healthcheck.django_database import DjangoDatabaseHealthCheck
 
 from config.caches import (
     DEFAULT_CACHE_KEY_PREFIX,
@@ -24,7 +20,12 @@ from config.caches import (
     build_redis_only_cache,
     validate_cache_backend,
 )
-from config.health import CacheHealthCheck
+from config.health import build_health_checks
+from config.runtime import (
+    DEFAULT_PROCESS_ROLE,
+    TASK_WORKER_ROLE,
+    validate_process_role,
+)
 from config.storage import (
     AWS_ROLE_BASED_BUCKET_PROVIDER,
     build_object_storage,
@@ -33,7 +34,6 @@ from config.storage import (
 from config.tasks import (
     CLOUD_TASKS_BACKEND,
     validate_cloud_tasks_settings,
-    validate_process_role,
     validate_task_backend,
 )
 from plug_config import manager
@@ -493,16 +493,20 @@ CARE_TASK_BACKEND = validate_task_backend(
     env("CARE_TASK_BACKEND", default="celery").strip().lower()
 )
 
-# Selects startup command, exposed routes and logging metadata. It never alters
-# clinical behaviour.
+# Runtime role (ADR-0006)
+# ------------------------------------------------------------------------------
+# What this process is responsible for -- not where it runs. Selects routing,
+# startup, health and configuration validation; never clinical behaviour. It is
+# orthogonal to every backend variable above and below: any role may be combined
+# with any supported storage, task and cache backend.
 CARE_PROCESS_ROLE = validate_process_role(
-    env("CARE_PROCESS_ROLE", default="api").strip().lower()
+    env("CARE_PROCESS_ROLE", default=DEFAULT_PROCESS_ROLE).strip().lower()
 )
 
 # The private task-execution route is served only by the worker role, so the
 # public API never exposes it. Set explicitly to override.
 CARE_TASK_HANDLER_ENDPOINT_ENABLED = env.bool(
-    "CARE_TASK_HANDLER_ENDPOINT_ENABLED", default=CARE_PROCESS_ROLE == "task_worker"
+    "CARE_TASK_HANDLER_ENDPOINT_ENABLED", default=CARE_PROCESS_ROLE == TASK_WORKER_ROLE
 )
 
 # Task payloads carry identifiers, not records. The ceiling is a guard against
@@ -552,29 +556,16 @@ DJANGO_REST_LOOKUP_FIELD = "username"
 # Health Django (Health Check Config)
 # ------------------------------------------------------------------------------
 # https://github.com/vigneshhari/healthy_django
-HEALTHY_DJANGO = [
-    DjangoDatabaseHealthCheck(
-        "Database", slug="main_database", connection_name="default"
-    ),
-    # Probes whatever CARE_CACHE_BACKEND actually selected. Under `locmem` and
-    # `dummy` there is no external dependency to reach, and under `postgres` a
-    # missing cache table is reported by name rather than as a generic failure.
-    CacheHealthCheck(
-        "Cache",
-        slug="main_cache",
-        connection_name="default",
-        backend=CARE_CACHE_BACKEND,
-    ),
-    DjangoCeleryQueueLengthHealthCheck(
-        "Celery Queue Length",
-        slug="celery_queue_length",
-        broker=REDIS_URL,
-        queue_name="celery",
-        info_length=50,
-        warning_length=0,  # this skips the 300 status code
-        alert_length=200,
-    ),
-]
+#
+# Composed from the runtime role and the selected backends rather than fixed:
+# a process must not be reported unhealthy for a dependency belonging to a role
+# it does not carry, or to a backend it did not select. See config/health.py.
+HEALTHY_DJANGO = build_health_checks(
+    role=CARE_PROCESS_ROLE,
+    cache_backend=CARE_CACHE_BACKEND,
+    task_backend=CARE_TASK_BACKEND,
+    broker_url=REDIS_URL,
+)
 
 # Audit logs
 # ------------------------------------------------------------------------------

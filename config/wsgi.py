@@ -35,6 +35,16 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.production")
 # setting points here.
 
 application = get_wsgi_application()
+
+# ADR-0006 asks each long-running process to identify its role once, at startup,
+# so an accidental deployment misconfiguration is visible in the first lines of
+# the log rather than only in the behaviour it produces. This module is imported
+# once per serving process by gunicorn and by runserver alike, which makes it the
+# one place that covers both the `api` and `task_worker` HTTP roles.
+from config.runtime import log_runtime_summary  # noqa: E402
+
+log_runtime_summary()
+
 # Apply WSGI middleware here.
 # from helloworld.wsgi import HelloWorldApplication
 # application = HelloWorldApplication(application)

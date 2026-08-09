@@ -949,17 +949,55 @@ Those belong to subsequent Engineering Specifications and infrastructure decisio
 
 ## Implementation Status
 
+Implemented by ES-06 on `feature/runtime-roles`, 2026-08-09.
+
 - [x] Decision accepted.
-- [ ] `api` role finalized.
-- [ ] `task_worker` role finalized.
-- [ ] `scheduler` responsibility finalized.
-- [ ] `init` role finalized.
-- [ ] Runtime-role validation implemented.
-- [ ] Role-specific route isolation verified.
-- [ ] Role-specific startup commands verified.
-- [ ] Role-specific health behavior implemented.
-- [ ] Initialization fully independent from long-running processes.
-- [ ] Local/traditional runtime compatibility verified.
-- [ ] Managed-cloud-ready runtime composition verified.
-- [ ] Same-image multi-role execution verified.
-- [ ] Production worker IAM requirement carried into infrastructure phase.
+- [x] `api` role finalized. Serves the public application and the shared
+      diagnostics; registers no worker route; performs no initialization.
+- [x] `task_worker` role finalized. One role, two transports: the HTTP endpoint
+      (`scripts/start-worker.sh`) and a Celery worker (`scripts/celery_worker.sh`).
+- [x] `scheduler` responsibility finalized. Celery Beat carries the role and no
+      longer owns initialization. Periodic operations remain independently
+      callable, so a platform scheduler can replace the process.
+- [x] `init` role finalized. `scripts/initialize.sh` is ephemeral, stops at the
+      first failed step, exits non-zero on failure and zero on success, and its
+      health is that exit status.
+- [x] Runtime-role validation implemented. `config/runtime.py`;
+      `CARE_PROCESS_ROLE` accepts `api`, `task_worker`, `scheduler`, `init`, and
+      anything else raises `ImproperlyConfigured` naming all four. The ES-03
+      values `job` and `celery_worker` are removed.
+- [x] Role-specific route isolation verified. Asserted by URL resolution for
+      every role and confirmed live: the internal task route returns 404 on the
+      API, and every public route returns 404 on the worker.
+- [x] Role-specific startup commands verified. Eight entrypoints, each declaring
+      its role; recorded in `inventory/runtime-and-deployment.md` §15.1.
+- [x] Role-specific health behavior implemented. `HEALTHY_DJANGO` is composed
+      from the role and the selected backends; the Celery queue probe is absent
+      under Cloud Tasks instead of permanently failing, and `init` has none.
+- [x] Initialization fully independent from long-running processes. No
+      long-running entrypoint runs `migrate`, `createcachetable`,
+      `sync_permissions_roles`, `sync_valueset` or `initialize.sh`.
+- [x] Local/traditional runtime compatibility verified. `make up` unchanged;
+      four role services start and reach healthy; Celery worker and beat run as
+      before. Traditional deployments must now run initialization explicitly —
+      see `inventory/unresolved-items.md` L6.
+- [x] Managed-cloud-ready runtime composition verified, with one blocker outside
+      this architecture: `api` and `task_worker` compose correctly with
+      `cloud_tasks` + `gcs` + `postgres`, but `CARE_CACHE_BACKEND=postgres`
+      currently prevents every management command through
+      `django_ratelimit.E003`. Recorded as `unresolved-items.md` L1 and owned by
+      ES-07.
+- [x] Same-image multi-role execution verified. All four roles run from
+      `care_local`; no role needs a distinct image.
+- [x] Production worker IAM requirement carried into infrastructure phase.
+      Stated in `scripts/start-worker.sh`, in the operations guide §112.6, and as
+      `unresolved-items.md` L4.
+
+Not addressed, and deliberately so:
+
+- the production image still declares no `CMD`; four roles share one image and
+  the orchestrator selects the role by command;
+- the Celery Beat container probe remains a start marker (`unresolved-items.md`
+  L3);
+- the `recent_views` Redis capability dependency remains (`unresolved-items.md`
+  L5).
