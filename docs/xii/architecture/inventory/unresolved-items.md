@@ -13,6 +13,12 @@ reviewed: 2026-08-07
 
 # Unresolved Items
 
+## ES-05 follow-up
+
+The lock inventory is implemented with PostgreSQL advisory locks. Real
+multi-connection contention coverage and complete serial and parallel suite
+runs passed on 2026-08-08; this does not authorize starting ES-06.
+
 Open questions, code defects found while inventorying, and contradictions between
 the existing GCP documents and the verified state of the repository.
 

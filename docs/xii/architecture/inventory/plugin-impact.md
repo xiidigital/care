@@ -12,6 +12,12 @@ reviewed: 2026-08-07
 
 # Plugin Impact Inventory
 
+## ES-05 locking update
+
+No plugin imports of `care.utils.lock`, `MultipleItemsLock`, or cache `nx`
+locking were found. Plugins using `Lock` remain import-compatible but must enter
+`transaction.atomic()` before acquisition; `MultipleItemsLock` is removed.
+
 How CARE loads plugins, what is bundled at this commit, and what can and cannot
 be determined about plugin compatibility from this repository alone.
 

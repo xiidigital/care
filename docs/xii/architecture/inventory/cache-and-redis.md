@@ -12,6 +12,15 @@ reviewed: 2026-08-05
 
 # Cache and Redis Inventory
 
+## ES-05 update (2026-08-08)
+
+Core locking no longer uses Django cache or Redis. `care.utils.lock.Lock` is a
+non-blocking transaction-scoped PostgreSQL advisory lock with a deterministic
+BLAKE2b-derived signed 64-bit key. It must be entered after `transaction.atomic()`
+and PostgreSQL releases it on commit or rollback. The former `locks` cache alias,
+`nx=True` lock acquisition, and `MultipleItemsLock` are removed. `recent_views`
+remains the sole Redis-only alias and is unaffected.
+
 Every cache and Redis use in the repository, classified by role, with a
 backend-suitability assessment grounded in the semantics each site actually
 requires.

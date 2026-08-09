@@ -13,6 +13,13 @@ reviewed: 2026-08-07
 
 # Runtime and Deployment Inventory
 
+## ES-05 locking update
+
+Database initialization and request critical sections use PostgreSQL advisory
+locks and do not require Redis for locking. A PostgreSQL connection and an
+active transaction are required; lock contention returns the existing 423
+application response and database failures propagate.
+
 How CARE is built, started and tested today, plus the Phase 0 runtime baseline
 (§11). Nothing in the runtime was modified in this phase.
 

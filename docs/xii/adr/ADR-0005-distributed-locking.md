@@ -175,8 +175,9 @@ That selection belongs to IS-05 after call-site analysis and concurrency tests.
 ## Implementation Status
 
 - [x] Decision accepted.
-- [ ] Lock call sites classified.
-- [ ] LocMem false-lock behavior removed.
+- [x] Lock call sites classified in the ES-05 final inventory.
+- [x] LocMem false-lock behavior removed (ES-04); cache locking removed (ES-05).
 - [ ] Database invariants identified.
-- [ ] Approved lock mechanisms implemented.
-- [ ] Concurrency tests completed.
+- [x] Transaction-scoped PostgreSQL advisory locking implemented for the remaining
+  short database-write critical sections.
+- [x] Real multi-connection PostgreSQL concurrency tests completed.
