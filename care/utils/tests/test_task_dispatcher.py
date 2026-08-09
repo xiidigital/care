@@ -30,7 +30,6 @@ from care.utils.tasks.registry import (
 from config.tasks import (
     SUPPORTED_TASK_BACKENDS,
     validate_cloud_tasks_settings,
-    validate_process_role,
     validate_task_backend,
 )
 
@@ -85,9 +84,8 @@ class ConfigurationValidationTests(SimpleTestCase):
         with self.assertRaises(ImproperlyConfigured):
             validate_task_backend("postgres")
 
-    def test_an_invalid_process_role_is_rejected(self):
-        with self.assertRaises(ImproperlyConfigured):
-            validate_process_role("worker")
+    # Process-role validation moved to config/runtime.py in ES-06: the role is
+    # orthogonal to the task backend. Covered by test_runtime_roles.py.
 
     def test_cloud_tasks_settings_are_complete(self):
         validate_cloud_tasks_settings(
