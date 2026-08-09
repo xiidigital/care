@@ -19,6 +19,20 @@ The lock inventory is implemented with PostgreSQL advisory locks. Real
 multi-connection contention coverage and complete serial and parallel suite
 runs passed on 2026-08-08; this does not authorize starting ES-06.
 
+**Closed 2026-08-09 — consumer-level contention test.** The remaining ES-05
+acceptance gap was that contention had been proven only for the generic lock
+helper, not for a real caller.
+`care/security/tests/test_sync_permissions_roles_concurrency.py` now runs two
+concurrent `sync_permissions_roles` management-command invocations on
+independent PostgreSQL connections. The first is suspended inside the critical
+section, after a protected `PermissionModel` write and before commit, by a
+test-only `post_save` receiver; the second raises `ObjectLocked` from
+`pg_try_advisory_xact_lock` on the same key and issues no mutating statement
+against `security_permissionmodel`, `security_rolemodel` or
+`security_rolepermission`. Normal execution resumes once the first commits. The
+lock helper is not mocked, synchronization uses `threading.Event` rather than
+sleeps, and the test passes with Redis stopped. No ES-05 gap remains.
+
 Open questions, code defects found while inventorying, and contradictions between
 the existing GCP documents and the verified state of the repository.
 

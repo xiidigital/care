@@ -181,3 +181,7 @@ That selection belongs to IS-05 after call-site analysis and concurrency tests.
 - [x] Transaction-scoped PostgreSQL advisory locking implemented for the remaining
   short database-write critical sections.
 - [x] Real multi-connection PostgreSQL concurrency tests completed.
+- [x] Consumer-level contention proven for `sync_permissions_roles`: two
+  concurrent invocations of the management command on independent PostgreSQL
+  connections cannot enter its protected critical section together
+  (`care/security/tests/test_sync_permissions_roles_concurrency.py`).
