@@ -396,19 +396,31 @@ The application SHALL not require a fixed production port.
 
 ## 7.2 `CARE_PROCESS_ROLE`
 
-**Implemented in ES-03** (`config/tasks.py`).
+**Implemented in ES-03, completed in ES-06** (`config/runtime.py`).
+
+Declares what the process is responsible for. It says nothing about where the
+process runs, and there is no companion variable that does: ADR-0006 rejects
+`CARE_RUNTIME_PROFILE`, `IS_GCP`, `USE_CLOUD_RUN` and any equivalent
+deployment-topology switch. A deployment is a composition of a role and the
+independently selected backends documented elsewhere in this reference.
 
 Supported values:
 
 ```text
 api            (default)
 task_worker
-job
-celery_worker
+scheduler
+init
 ```
 
+**Changed in ES-06.** ES-03 shipped `job` and `celery_worker`. `job` named a
+deployment shape rather than a responsibility and became `init`;
+`celery_worker` named a transport, and a Celery worker is a `task_worker` like
+any other. Both old values now raise `ImproperlyConfigured`.
+
 `postgres_queue_worker` is **not** supported; the PostgreSQL queue backend does
-not exist. An unsupported value raises `ImproperlyConfigured` at startup.
+not exist. An unsupported value raises `ImproperlyConfigured` at startup, naming
+every valid role. It is never mapped to `api`.
 
 Example:
 
@@ -416,10 +428,52 @@ Example:
 CARE_PROCESS_ROLE=api
 ```
 
-Today the role controls one thing: whether the internal task-execution route is
-registered, through the default of `CARE_TASK_HANDLER_ENDPOINT_ENABLED`. It is
-also the natural place to hang startup command selection, health-check
-selection and logging metadata as those arrive.
+### What each role does
+
+| Role | Responsibility | Routes | Health probes | Long-running |
+| --- | --- | --- | --- | --- |
+| `api` | public application API | public API + diagnostics | database, cache, Celery queue when `CARE_TASK_BACKEND=celery` | yes |
+| `task_worker` | executes asynchronous work | `internal/tasks/execute/` + diagnostics | database, cache, task registry | yes |
+| `scheduler` | decides when periodic work runs | diagnostics only | database, Celery queue when `CARE_TASK_BACKEND=celery` | yes |
+| `init` | deployment-time initialization | none served | none; health is the exit status | no |
+
+Diagnostics shared by every role are `/`, `/ping/`, `/health/` and
+`/app_version/`.
+
+### The default
+
+`api`, preserved for backward compatibility: an unset value has always meant
+"serve the API", and a checkout that runs `manage.py` directly relies on it.
+Every entrypoint in this repository sets the role explicitly, and production
+deployment definitions SHOULD do the same rather than depend on the default.
+
+### Orthogonality
+
+The role never selects a backend and no backend selection is restricted by
+role. These are independent dimensions:
+
+```text
+CARE_PROCESS_ROLE
+CARE_STORAGE_BACKEND
+CARE_TASK_BACKEND
+CARE_CACHE_BACKEND
+```
+
+A combination is rejected only when a capability it requires is missing — for
+example Cloud Tasks selected without its queue settings — never because the
+combination is unusual for a named platform.
+
+### Entrypoints
+
+| Role | Entrypoint |
+| --- | --- |
+| `api` | `scripts/start.sh`, `scripts/start-dev.sh` |
+| `task_worker` (HTTP) | `scripts/start-worker.sh` |
+| `task_worker` (Celery) | `scripts/celery_worker.sh`, `scripts/celery-dev.sh` |
+| `scheduler` | `scripts/celery_beat.sh`, `scripts/celery_beat-dev.sh` |
+| `init` | `scripts/initialize.sh` |
+
+All of them run from the same application image.
 
 It SHALL not alter clinical business behavior.
 
@@ -2907,13 +2961,12 @@ can create follow-up tasks.
 
 ---
 
-# 62. Example Migration Job Configuration
+# 62. Example Initialization Job Configuration
 
 ```text
 DJANGO_SETTINGS_MODULE=config.settings.deployment
 CARE_ENVIRONMENT=prod
-CARE_PROCESS_ROLE=job
-CARE_JOB_NAME=migrate
+CARE_PROCESS_ROLE=init
 
 CARE_STORAGE_BACKEND=gcs
 CARE_CACHE_BACKEND=postgres
@@ -2925,9 +2978,16 @@ CARE_LOG_FORMAT=json
 CARE_LOG_LEVEL=INFO
 ```
 
-The migration job may not require task-dispatch configuration.
+The initialization job may not require task-dispatch configuration.
 
 The exact settings validation SHALL account for process role.
+
+**ES-06 note.** `CARE_CACHE_BACKEND=postgres` is shown here and in sections 60
+and 61 as the intended managed-cloud selection, and it is currently **blocked**
+for any process that runs a management command: `django_ratelimit`'s `E003`
+system check rejects every non-Redis `default` cache, and `init` runs
+`manage.py` exclusively. See `inventory/unresolved-items.md` item L1. The role
+architecture does not require Redis; this check does.
 
 ---
 

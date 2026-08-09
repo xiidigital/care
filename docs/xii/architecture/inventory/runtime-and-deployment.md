@@ -888,3 +888,237 @@ command, and the three cache-touching modules alone failed 4 of 4 immediately
 before the fix and passed 4 of 4 immediately after. Unlike the ES-03 note above,
 this is evidence: the defect was reproduced on demand, the mechanism was
 identified, and the reproduction no longer fires.
+
+---
+
+## 15. Runtime changes in ES-06
+
+Recorded 2026-08-09 on `feature/runtime-roles`. This section supersedes §1, §2,
+§3 and §5 wherever they conflict; the earlier text is left in place as the
+record of what the runtime was before roles existed.
+
+### 15.1 Re-verified process inventory
+
+Every startup path in the repository, as it stands after ES-06. The previous
+inventory listed five entrypoints; there are now eight, because two roles that
+had been implicit — the HTTP task worker and the local scheduler — became
+explicit.
+
+| Entrypoint | Role | Long-running | Routes served | migrate | createcachetable | sync_permissions_roles | sync_valueset | collectstatic | compilemessages | Celery |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `scripts/start.sh` | `api` | yes | public API + diagnostics | no | no | no | no | yes | yes | no |
+| `scripts/start-dev.sh` | `api` | yes | public API + diagnostics | no | no | no | no | yes | yes | no |
+| `scripts/start-worker.sh` | `task_worker` | yes | task endpoint + diagnostics | no | no | no | no | yes | yes | no |
+| `scripts/celery_worker.sh` | `task_worker` | yes | none (broker) | no | no | no | no | yes | yes | worker |
+| `scripts/celery-dev.sh` | `task_worker` | yes | none (broker) | no | no | no | no | no | no | worker |
+| `scripts/celery_beat.sh` | `scheduler` | yes | none | no | no | no | no | no | no | beat |
+| `scripts/celery_beat-dev.sh` | `scheduler` | yes | none | no | no | no | no | no | no | beat |
+| `scripts/initialize.sh` | `init` | **no** | none | **yes** | **yes** | **yes** | **yes** | no | **yes** | no |
+| `Procfile` `web` | `api` | yes | public API + diagnostics | no | no | no | no | no | no | no |
+| `Procfile` `release` | `init` | no | none | yes | yes | yes | yes | yes | yes | no |
+
+**verified** The `-ecs` scripts remain thin `exec` wrappers over `start.sh`,
+`celery_worker.sh` and `celery_beat.sh` and inherit their roles unchanged.
+
+### 15.2 Migration behavior: the beat coupling is gone
+
+§2 recorded the single most important runtime fact — schema migration was a side
+effect of starting Celery Beat. ES-03 moved the sequence into
+`scripts/initialize.sh` but left the beat entrypoints calling it. ES-06 removed
+those calls.
+
+**verified** No long-running entrypoint contains `migrate`, `createcachetable`,
+`sync_permissions_roles`, `sync_valueset` or `initialize.sh`. Asserted in
+`care/utils/tests/test_runtime_roles.py::InitializationSeparationTests` against
+the script sources with comments stripped.
+
+**verified** `Procfile` `release` was `collectstatic && migrate`, which ran one
+of the five initialization steps. It now runs `collectstatic` and the whole
+`scripts/initialize.sh` sequence.
+
+**Consequence for traditional deployments, stated plainly.** A deployment that
+relied on starting Celery Beat to migrate will no longer migrate. Initialization
+must become an explicit step: run `scripts/initialize.sh` before starting or
+promoting the application. This is a deliberate breaking change required by
+ADR-0006, and it is the same change managed-cloud deployment requires.
+
+### 15.3 Startup dependencies: Redis is conditional
+
+§3 recorded that every entrypoint blocked on Redis before serving, and called it
+a Cloud Run cold-start blocker.
+
+**Resolved.** `scripts/wait_for_redis.sh` now waits only when the selected
+configuration needs Redis in order to start:
+
+```text
+CARE_CACHE_BACKEND=redis   the default cache is Redis
+CARE_TASK_BACKEND=celery   the broker is Redis
+```
+
+With neither selected it exits 0 after logging both values. The defaults are
+unchanged — `redis` and `celery` — so local and traditional deployments wait
+exactly as before.
+
+**verified** `init` runs to completion with `REDIS_URL` pointed at a closed port
+and `CARE_TASK_BACKEND=cloud_tasks`: the whole sequence succeeds and the process
+exits 0. Nothing in initialization opens a Redis connection.
+
+**Unchanged, and honestly recorded:** the `recent_views` cache alias is Redis in
+every configuration. It backs specific API endpoints rather than process
+startup, so its absence degrades those endpoints instead of preventing the API
+from serving. It is no longer treated as a reason to block startup.
+
+### 15.4 Route isolation
+
+**verified** by resolution against each role's URLconf, and confirmed live
+against running processes:
+
+| Path | `api` | `task_worker` | `scheduler` / `init` |
+| --- | --- | --- | --- |
+| `/`, `/ping/`, `/health/`, `/app_version/` | yes | yes | yes |
+| `/api/v1/...` | yes | **no** | **no** |
+| `/admin/` | yes | **no** | **no** |
+| `/api/schema/`, `/swagger/`, `/redoc/` | yes | **no** | **no** |
+| `api/{plug}/...` | yes | **no** | **no** |
+| `/internal/tasks/execute/` | **no** | yes | **no** |
+
+**verified live.** Against the running API: `/ping/` 200, `/health/` 200,
+`/api/v1/users/` 403 (route present, authentication required),
+`/internal/tasks/execute/` **404**. Against a `task_worker` gunicorn started
+from the same image: `/ping/` 200, `/health/` 200,
+`/internal/tasks/execute/` 405 for `GET` (route present, method rejected), and
+`/api/v1/users/`, `/api/v1/auth/login/`, `/admin/`, `/swagger/` all **404**.
+
+The four diagnostic routes are shared deliberately, and that is the exact shared
+scope. `home` is among them for a concrete reason: every error template extends
+`base.html`, which reverses `home`, so a worker without that route would answer
+an ordinary 404 with `NoReverseMatch`.
+
+### 15.5 Health checks
+
+§5 recorded three fixed probes — database, cache and Celery queue length — and
+noted that the third connects directly to Redis and is meaningless under Cloud
+Tasks.
+
+**Resolved.** `HEALTHY_DJANGO` is composed by `config.health.build_health_checks`
+from the role and the selected backends:
+
+| Role | Probes |
+| --- | --- |
+| `api` | database, cache, Celery queue length *only when* `CARE_TASK_BACKEND=celery` |
+| `task_worker` | database, cache, task registry |
+| `scheduler` | database, Celery queue length *only when* `CARE_TASK_BACKEND=celery` |
+| `init` | none |
+
+**verified live.** The API role under the local profile reports three probes,
+all 200. A `task_worker` process reports database, cache and
+`{"registered_tasks": 6}`, and no Celery queue probe even under
+`CARE_TASK_BACKEND=celery` — delivery to a worker is inbound, so a worker
+probing the queue would be reporting on a dependency it does not use to receive
+work. Under `CARE_TASK_BACKEND=cloud_tasks` the API reports database and cache
+only.
+
+**Container probes.** `scripts/healthcheck.sh` now dispatches on
+`/tmp/container-probe`, which each entrypoint writes, with values `http`,
+`celery` and `beat`. The probe follows the *transport*, not the role: an HTTP
+task worker and a Celery task worker carry the same role and answer on different
+channels. The `init` role writes no probe file and has none.
+
+**Unchanged:** the beat probe is still `touch /tmp/healthy` before beat is
+exec'd, so it proves the container started rather than that beat is alive. §5
+called this a liveness lie and it remains one; see `unresolved-items.md` L3 for
+why no replacement was invented.
+
+### 15.6 Startup logging
+
+Each long-running process logs one line naming its role and the three backend
+names — no URL, credential or connection string:
+
+```text
+CARE runtime: process_role=api storage_backend=s3 task_backend=celery cache_backend=redis
+```
+
+**verified** for `api` (gunicorn and `runserver_plus`, through `config/wsgi.py`),
+for `task_worker` over HTTP (same path), and for `task_worker` over Celery
+(through the `celeryd_init` signal).
+
+**Not visible for `scheduler`.** The line is emitted — the `beat_init` receiver
+runs, confirmed by probe — but no log record of any level reaches stderr from a
+Celery Beat process in this repository. Celery's own `beat: Starting...` line is
+missing for the same reason, which §11.6 recorded as unexplained log truncation.
+The cause is now identified: see `unresolved-items.md` L2.
+
+### 15.7 Images
+
+§6 recorded that the production image declares no `CMD`, and §13.2 listed that
+as ES-06 work. It is **unchanged and deliberate**: four roles run from one
+image, and the orchestrator supplies the command. §7.2 of the configuration
+reference now lists the entrypoint for each role, which is what the absent `CMD`
+requires a deployment to know.
+
+**verified same-image execution.** Every local service runs `care_local`:
+`init`, `backend` (api), `celery` (task_worker) and `beat` (scheduler). The HTTP
+task worker was additionally started from the same image by role and command
+alone. No role required a rebuild and none needs a distinct image.
+
+`scripts/start.sh` and `scripts/start-worker.sh` bind `0.0.0.0:${PORT:-9000}`
+rather than a fixed 9000, so a platform that assigns the port can use the same
+image without a wrapper. The default is unchanged.
+
+### 15.8 Compose topology
+
+§7 recorded `backend` and `celery`, with `backend` waiting for `celery` to
+become healthy because `celery-dev.sh` ran the migrations.
+
+`docker-compose.local.yaml` now defines four application services, one per role:
+
+| Service | Role | Notes |
+| --- | --- | --- |
+| `init` | `init` | ephemeral; runs `wait_for_db.sh` then `initialize.sh`, then exits |
+| `backend` | `api` | depends on `init: service_completed_successfully` |
+| `celery` | `task_worker` | `celery worker`; no longer `worker -B` |
+| `beat` | `scheduler` | new; `celery beat` |
+
+**verified** `docker compose up -d --wait` handles the one-shot `init` service
+correctly: it runs, exits 0, and the three long-running services then start and
+reach healthy. `make up` is unchanged.
+
+**verified** Initialization failure propagates. With `DATABASE_URL` pointed at a
+closed port, `scripts/initialize.sh` fails at `migrate`, runs no later step, and
+exits **1**.
+
+### 15.9 Managed-cloud composition, verified without deploying anything
+
+**verified** With `CARE_PROCESS_ROLE=api`, `CARE_TASK_BACKEND=cloud_tasks`,
+`CARE_STORAGE_BACKEND=gcs` and `CARE_CACHE_BACKEND=postgres` plus the Cloud
+Tasks variables, settings load, the public API resolves, the internal task route
+does not, and health reports database and cache only.
+
+**verified** With `CARE_PROCESS_ROLE=task_worker` and the same backends, the
+internal task route resolves, no public route resolves, and health reports
+database, cache and task registry.
+
+**Blocked, and not by the role architecture.** Under
+`CARE_CACHE_BACKEND=postgres` no management command runs at all:
+`django_ratelimit`'s `E003` system check rejects every non-Redis `default`
+cache, and the `init` role is management commands exclusively. Recorded as
+`unresolved-items.md` L1.
+
+### 15.10 Regression result
+
+Recorded on `feature/runtime-roles`, same host and Docker versions as §11.1.
+
+| Run | Mode | Seed | Tests | Pass | Fail | Skip | Duration | Exit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | serial `--shuffle` | 8706916825 | 2282 | 2282 | 0 | 0 | 167.0 s | 0 |
+| 2 | `--parallel --shuffle` | 1498679159 | 2282 | 2282 | 0 | 0 | 42.0 s | 0 |
+| 3 | `--parallel --shuffle` | 7138364412 | 2282 | 2282 | 0 | 0 | 44.3 s | 0 |
+| 4 | `--parallel --shuffle` | 3179802003 | 2282 | 2282 | 0 | 0 | 40.2 s | 0 |
+
+Parallel worker count: 16. Skipped: 0. E7 did not recur; the ES-04 fix holds.
+
+**verified** 2282 tests. The pre-ES-06 count was measured rather than assumed:
+the suite was run at the branch point (`5066cfebb`) and reported **2234**. The
+difference is the 48-test runtime-roles module, one test added to the
+worker-route module and one dispatcher test removed when role validation moved
+out of the task-backend module.
