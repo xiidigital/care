@@ -1,5 +1,14 @@
 #!/bin/bash
-printf "celery-worker" > /tmp/container-role
+# Runtime role: task_worker, Celery transport (ADR-0006).
+#
+# The role says what this process is responsible for -- executing asynchronous
+# CARE work -- and says nothing about how that work arrives. This entrypoint and
+# scripts/start-worker.sh carry the same role over different transports, and run
+# the same registered handlers.
+#
+# It performs no deployment initialization: see scripts/initialize.sh.
+export CARE_PROCESS_ROLE="${CARE_PROCESS_ROLE:-task_worker}"
+printf "celery" > /tmp/container-probe
 
 set -eo pipefail
 

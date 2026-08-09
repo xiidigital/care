@@ -1,4 +1,33 @@
+# Local composition of CARE runtime roles (ADR-0006).
+#
+# One process, one role. `init` runs the deployment-time initialization and
+# exits; `backend` serves the API; `celery` executes asynchronous work; `beat`
+# decides when periodic work runs. Until ES-06 the `celery` service was all
+# three of the last ones at once -- it ran the initialization sequence and then
+# `worker -B` -- which is why `backend` had to wait for it to become healthy.
+#
+# Every service runs the same `care_local` image and differs only by command and
+# environment, which is the same property the managed-cloud composition relies
+# on.
 services:
+  init:
+    image: care_local
+    env_file:
+      - ./docker/.local.env
+    environment:
+      CARE_PROCESS_ROLE: init
+    volumes:
+      - .:/app
+    # wait_for_db.sh creates the database if it does not exist yet; initialize.sh
+    # assumes it is there. Ephemeral by design: it runs the sequence and exits,
+    # and `restart: "no"` keeps it from being treated as a service that should
+    # come back.
+    entrypoint: ["bash", "-c", "./scripts/wait_for_db.sh && ./scripts/initialize.sh"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
   backend:
     image: care_local
     build:
@@ -8,6 +37,8 @@ services:
         ADDITIONAL_PLUGS: ${ADDITIONAL_PLUGS:-}
     env_file:
       - ./docker/.local.env
+    environment:
+      CARE_PROCESS_ROLE: api
     volumes:
       - .:/app
     entrypoint: ["bash", "scripts/start-dev.sh"]
@@ -20,17 +51,41 @@ services:
         condition: service_started
       redis:
         condition: service_started
-      celery:
-        condition: service_healthy
+      init:
+        condition: service_completed_successfully
 
   celery:
     image: care_local
     env_file:
       - ./docker/.local.env
+    environment:
+      CARE_PROCESS_ROLE: task_worker
     entrypoint: ["bash", "scripts/celery-dev.sh"]
     restart: unless-stopped
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - .:/app
+
+  beat:
+    image: care_local
+    env_file:
+      - ./docker/.local.env
+    environment:
+      CARE_PROCESS_ROLE: scheduler
+    entrypoint: ["bash", "scripts/celery_beat-dev.sh"]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
+      init:
+        condition: service_completed_successfully
     volumes:
       - .:/app

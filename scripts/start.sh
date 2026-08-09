@@ -1,5 +1,13 @@
 #!/bin/bash
-printf "api" > /tmp/container-role
+# Runtime role: api (ADR-0006).
+#
+# Serves the public application API. It does not migrate, does not create the
+# cache table, does not sync permissions or valuesets, and runs no scheduling
+# loop: those belong to the init role and are run once per deployment by
+# scripts/initialize.sh. Several API instances start concurrently, and none of
+# them may race to mutate the schema.
+export CARE_PROCESS_ROLE="${CARE_PROCESS_ROLE:-api}"
+printf "http" > /tmp/container-probe
 
 set -eo pipefail
 
@@ -25,5 +33,5 @@ python manage.py collectstatic --noinput
 python manage.py compilemessages -v 0
 
 
-gunicorn --config python:config.gunicorn config.wsgi:application --bind 0.0.0.0:9000 --chdir=/app --workers $GUNICORN_WORKERS \
+gunicorn --config python:config.gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-9000} --chdir=/app --workers $GUNICORN_WORKERS \
   --access-logformat "$GUNICORN_LOG_FORMAT" --access-logfile $GUNICORN_ACCESS_LOGFILE --error-logfile $GUNICORN_ERROR_LOGFILE
