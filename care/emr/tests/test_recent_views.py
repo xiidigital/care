@@ -17,7 +17,10 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-from django.db import connections
+from django.db import IntegrityError, connections, transaction
+from django.db.backends.utils import CursorWrapper
+from django.db.models import signals
+from django.db.models.deletion import Collector
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from model_bakery import baker
@@ -473,6 +476,69 @@ class RecentViewsApiTests(CareAPITestBase):
         self.assertIn(self.client.get(self.url("recent-views")).status_code, (401, 403))
 
 
+TABLE = UserValueSetRecentView._meta.db_table  # noqa: SLF001
+
+# Every wait in this module has a deadline. None of them is a pause: a barrier
+# that trips has already had every party arrive, so the test proceeds at once.
+# The timeouts exist only so a lost thread fails loudly instead of hanging the
+# suite.
+RACE_TIMEOUT = 30
+
+
+class InsertRace:
+    """
+    Force concurrent ``INSERT``s of the same row, and count the collisions.
+
+    Test-side instrumentation only -- it patches Django's cursor wrapper, not
+    recent views. Production code is untouched and cannot tell the difference.
+
+    Every ``INSERT`` into the recent-views table is held at a
+    :class:`threading.Barrier` until all parties have reached it. Because the
+    barrier sits between ``update_or_create``'s lookup and its insert, every
+    worker's lookup is guaranteed to have run -- and found nothing -- before any
+    insert is issued. The race is then not probabilistic: all *N* workers insert
+    the same key, exactly one wins, and the other *N-1* must be recovered by
+    ``update_or_create``. Those recoveries are what ``conflicts`` counts, so the
+    test can prove the race actually happened rather than assuming it.
+
+    ``Barrier(timeout=...)`` is the hang detector: a worker that never arrives
+    breaks the barrier for everyone and every thread raises rather than blocking
+    forever.
+    """
+
+    def __init__(self, parties, timeout=RACE_TIMEOUT):
+        self.barrier = threading.Barrier(parties, timeout=timeout)
+        self.lock = threading.Lock()
+        self.uninstrumented = CursorWrapper.execute
+        self.attempts = 0
+        self.conflicts = 0
+
+    def __enter__(self):
+        race = self
+
+        def execute(cursor, sql, params=None):
+            targeted = isinstance(sql, str) and f'INSERT INTO "{TABLE}"' in sql
+            if targeted:
+                with race.lock:
+                    race.attempts += 1
+                race.barrier.wait()
+            try:
+                return race.uninstrumented(cursor, sql, params)
+            except IntegrityError:
+                if targeted:
+                    with race.lock:
+                        race.conflicts += 1
+                raise
+
+        CursorWrapper.execute = execute
+        return self
+
+    def __exit__(self, *exc_info):
+        CursorWrapper.execute = self.uninstrumented
+        self.barrier.abort()
+        return False
+
+
 class ConcurrentWriteTests(TransactionTestCase):
     """
     Real PostgreSQL, real threads, real connections.
@@ -489,7 +555,15 @@ class ConcurrentWriteTests(TransactionTestCase):
         self.user = baker.make(User)
         self.valueset = make_valueset("concurrent-recent-views")
 
-    def run_concurrently(self, targets):
+    def run_concurrently(self, targets, timeout=RACE_TIMEOUT):
+        """
+        Run `targets` on their own threads and connections; return their errors.
+
+        Asserts termination rather than reporting it: a worker still alive after
+        the deadline fails the test by name instead of leaving the suite to hang
+        or, worse, letting the remaining assertions pass against a half-finished
+        run.
+        """
         errors = []
 
         def wrapped(fn):
@@ -503,37 +577,103 @@ class ConcurrentWriteTests(TransactionTestCase):
 
             return run
 
-        threads = [threading.Thread(target=wrapped(fn)) for fn in targets]
+        threads = [
+            threading.Thread(target=wrapped(fn), name=f"recent-views-{index}")
+            for index, fn in enumerate(targets)
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(timeout=30)
+            thread.join(timeout=timeout)
+
+        stuck = [thread.name for thread in threads if thread.is_alive()]
+        self.assertEqual(stuck, [], f"worker threads did not terminate: {stuck}")
         return errors
 
-    def test_concurrent_views_of_the_same_code_produce_one_row(self):
-        # The unique constraint is what makes this safe: the loser of the race
-        # gets an IntegrityError, which update_or_create retries as a fetch.
-        def view():
-            RecentViewsManager.add_recent_view(self.user, self.valueset, code("123"))
+    def assertNoIntegrityErrors(self, errors):  # noqa: N802
+        integrity = [exc for exc in errors if isinstance(exc, IntegrityError)]
+        self.assertEqual(
+            integrity, [], f"IntegrityError escaped add_recent_view: {integrity}"
+        )
+        self.assertEqual(errors, [], f"workers raised: {errors}")
 
-        errors = self.run_concurrently([view] * 8)
-        self.assertEqual(errors, [])
+    def viewer(self, value="123", wrap_in_transaction=False):
+        """One worker: record a view of `value`, optionally inside a transaction."""
+
+        def run():
+            if wrap_in_transaction:
+                # The production shape: ATOMIC_REQUESTS=True means the view
+                # already runs inside a transaction, so add_recent_view's
+                # atomic() is a savepoint, not a transaction.
+                with transaction.atomic():
+                    RecentViewsManager.add_recent_view(
+                        self.user, self.valueset, code(value)
+                    )
+            else:
+                RecentViewsManager.add_recent_view(
+                    self.user, self.valueset, code(value)
+                )
+
+        return run
+
+    def assertSingleRowFor(self, value):  # noqa: N802
+        """The whole point of the exercise, asserted through the public API."""
         self.assertEqual(UserValueSetRecentView.objects.count(), 1)
+        self.assertEqual(
+            [
+                entry["code"]
+                for entry in RecentViewsManager.get_recent_views(
+                    self.user, self.valueset
+                )
+            ],
+            [value],
+        )
+
+    def test_forced_concurrent_inserts_of_one_code_produce_one_row(self):
+        # Deterministic: the barrier makes all six workers insert the same key,
+        # so exactly one wins and five are recovered by update_or_create.
+        parties = 6
+        with InsertRace(parties) as race:
+            errors = self.run_concurrently([self.viewer()] * parties)
+
+        self.assertNoIntegrityErrors(errors)
+        self.assertEqual(
+            race.attempts, parties, "not every worker reached the insert stage"
+        )
+        # The proof that a duplicate-insert race actually happened. Zero here
+        # would mean the test passed without racing anything.
+        self.assertEqual(
+            race.conflicts,
+            parties - 1,
+            f"expected {parties - 1} duplicate-insert collisions -- one insert "
+            f"wins, the rest are recovered by update_or_create -- but saw "
+            f"{race.conflicts}",
+        )
+        self.assertSingleRowFor("123")
+
+    def test_the_upsert_race_is_safe_inside_an_outer_transaction(self):
+        # Production runs with ATOMIC_REQUESTS=True, so add_recent_view's
+        # atomic() is nested. This proves the savepoint shape still recovers the
+        # loser's IntegrityError without poisoning the enclosing transaction --
+        # which would surface here as an error escaping the outer atomic().
+        parties = 6
+        with InsertRace(parties) as race:
+            errors = self.run_concurrently(
+                [self.viewer(wrap_in_transaction=True)] * parties
+            )
+
+        self.assertNoIntegrityErrors(errors)
+        self.assertEqual(race.attempts, parties)
+        self.assertEqual(race.conflicts, parties - 1)
+        self.assertSingleRowFor("123")
 
     def test_concurrent_writes_do_not_leave_permanent_unbounded_growth(self):
         max_entries = 3
         with patch.object(RecentViewsManager, "MAX_RECENT_VIEW", max_entries):
-
-            def view(value):
-                def run():
-                    RecentViewsManager.add_recent_view(
-                        self.user, self.valueset, code(value)
-                    )
-
-                return run
-
-            errors = self.run_concurrently([view(str(i)) for i in range(12)])
-            self.assertEqual(errors, [])
+            errors = self.run_concurrently(
+                [self.viewer(str(index)) for index in range(12)]
+            )
+            self.assertNoIntegrityErrors(errors)
 
             # A concurrent burst can leave rows above the bound transiently:
             # each writer trims against the window it saw. The next write must
@@ -548,3 +688,138 @@ class ConcurrentWriteTests(TransactionTestCase):
     def tearDown(self):
         UserValueSetRecentView.objects.all().delete()
         super().tearDown()
+
+
+class OuterTransactionShapeTests(TestCase):
+    """
+    The production request shape, without changing test settings.
+
+    `ATOMIC_REQUESTS = True` wraps every view in a transaction, so
+    `add_recent_view`'s `atomic()` is always a savepoint in production. The test
+    settings do *not* reproduce that -- `config/settings/test.py` rebuilds
+    `DATABASES` wholesale, dropping the flag `base.py` set -- and that is left
+    alone deliberately: changing it globally would alter every test in the
+    suite. The shape is instead reproduced locally, with an explicit outer
+    `atomic()`, so the nesting is covered rather than assumed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from care.users.models import User
+
+        self.user = baker.make(User)
+        self.valueset = make_valueset("outer-transaction-recent-views")
+
+    def test_the_setting_this_mirrors_is_on_in_production(self):
+        # Asserted against the settings sources rather than `settings.DATABASES`,
+        # because the test settings deliberately do not carry the flag. Without
+        # this, the outer atomic() below would be modelling nothing.
+        for relative in ("config/settings/base.py", "config/settings/deployment.py"):
+            with self.subTest(module=relative):
+                source = (REPO_ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn('DATABASES["default"]["ATOMIC_REQUESTS"] = True', source)
+
+    @patch.object(RecentViewsManager, "MAX_RECENT_VIEW", 3)
+    def test_add_dedupe_trim_and_read_all_work_inside_an_outer_transaction(self):
+        with transaction.atomic():
+            for value in ("a", "b", "c", "d"):
+                RecentViewsManager.add_recent_view(
+                    self.user, self.valueset, code(value)
+                )
+            RecentViewsManager.add_recent_view(self.user, self.valueset, code("b"))
+
+            self.assertEqual(
+                [
+                    entry["code"]
+                    for entry in RecentViewsManager.get_recent_views(
+                        self.user, self.valueset
+                    )
+                ],
+                ["b", "d", "c"],
+            )
+            self.assertEqual(UserValueSetRecentView.objects.count(), 3)
+
+    def test_a_duplicate_view_inside_an_outer_transaction_does_not_break_it(self):
+        # The savepoint contract: if update_or_create's IntegrityError recovery
+        # left the enclosing transaction in an aborted state, the query after it
+        # would raise TransactionManagementError instead of returning.
+        with transaction.atomic():
+            RecentViewsManager.add_recent_view(self.user, self.valueset, code("123"))
+            RecentViewsManager.add_recent_view(self.user, self.valueset, code("123"))
+            self.assertEqual(UserValueSetRecentView.objects.count(), 1)
+
+    def test_the_scope_is_rolled_back_with_its_outer_transaction(self):
+        with self.assertRaises(RuntimeError), transaction.atomic():
+            RecentViewsManager.add_recent_view(self.user, self.valueset, code("123"))
+            msg = "request failed after the view was recorded"
+            raise RuntimeError(msg)
+
+        self.assertEqual(UserValueSetRecentView.objects.count(), 0)
+
+
+class TrimExecutionShapeTests(TestCase):
+    """
+    Pins the trim description in `_trim`'s docstring and RF1's entry in
+    `inventory/unresolved-items.md`, both of which previously claimed the whole
+    trim happened inside PostgreSQL.
+
+    There are two claims and only one of them was true. The *retained window* is
+    a bounded SQL subquery and never reaches Python. The *victim rows* do reach
+    Python, because CARE's global delete signals stop Django's collector taking
+    its fast path -- deliberately, since that path is also the audit path.
+    """
+
+    def test_the_retained_window_is_a_bounded_sql_subquery(self):
+        user = baker.make("users.User")
+        valueset = make_valueset("trim-shape-vs")
+        retained = (
+            UserValueSetRecentView.objects.filter(user=user, valueset=valueset)
+            .order_by("-last_viewed_at", "-id")
+            .values_list("id", flat=True)[: RecentViewsManager.MAX_RECENT_VIEW]
+        )
+        sql = str(
+            UserValueSetRecentView.objects.filter(user=user, valueset=valueset)
+            .exclude(id__in=retained)
+            .query
+        )
+        # A nested SELECT with a LIMIT -- not a list of ids interpolated by
+        # Python, which is what evaluating the slice would have produced.
+        self.assertIn("IN (SELECT", sql)
+        self.assertIn(f"LIMIT {RecentViewsManager.MAX_RECENT_VIEW}", sql)
+
+    def test_victim_rows_are_materialised_because_delete_signals_exist(self):
+        # CARE registers senderless pre_delete/post_delete receivers in
+        # care/audit_log/receivers.py, so Django's collector cannot fast-delete
+        # anything. The victims are selected, instantiated and deleted by pk.
+        # That is deliberate: bypassing the collector would skip the audit and
+        # delete-signal path. Documented in `_trim` and in RF1's entry.
+        self.assertTrue(signals.pre_delete.has_listeners(UserValueSetRecentView))
+        self.assertTrue(signals.post_delete.has_listeners(UserValueSetRecentView))
+        self.assertFalse(
+            Collector(using="default").can_fast_delete(
+                UserValueSetRecentView.objects.all()
+            )
+        )
+
+    @patch.object(RecentViewsManager, "MAX_RECENT_VIEW", 3)
+    def test_the_victim_set_is_one_row_under_normal_operation(self):
+        # The documented cost: a steady-state write evicts one row, so the
+        # collector loads one object. Only a concurrent burst enlarges this.
+        user = baker.make("users.User")
+        valueset = make_valueset("trim-steady-state-vs")
+        for value in ("a", "b", "c"):
+            RecentViewsManager.add_recent_view(user, valueset, code(value))
+
+        with patch.object(RecentViewsManager, "_trim"):
+            RecentViewsManager.add_recent_view(user, valueset, code("d"))
+
+        scoped = UserValueSetRecentView.objects.filter(user=user, valueset=valueset)
+        retained = scoped.order_by("-last_viewed_at", "-id").values_list(
+            "id", flat=True
+        )[: RecentViewsManager.MAX_RECENT_VIEW]
+        self.assertEqual(scoped.exclude(id__in=retained).count(), 1)
+
+        # And the next ordinary write -- a re-view, which adds no row -- trims
+        # that one victim away.
+        RecentViewsManager.add_recent_view(user, valueset, code("d"))
+        self.assertEqual(scoped.count(), 3)
