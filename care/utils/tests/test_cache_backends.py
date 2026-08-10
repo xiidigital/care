@@ -37,10 +37,10 @@ def redis_url_with_database(url: str, database: int) -> str:
 #:
 #: They exercise `clear()`, and django_redis implements that as FLUSHDB, which
 #: empties the entire database and ignores KEY_PREFIX -- the same mechanism that
-#: caused E7. Sharing database 0 with the `locks` and `recent_views` aliases
-#: would let this module flush lock keys a concurrent worker is holding, so it
-#: gets a database the rest of the suite never touches. Per-worker key prefixes
-#: cannot help here: FLUSHDB does not look at keys at all.
+#: caused E7. Sharing database 0 with the `ratelimit` alias would let this
+#: module flush counters a concurrent worker is asserting on, so it gets a
+#: database the rest of the suite never touches. Per-worker key prefixes cannot
+#: help here: FLUSHDB does not look at keys at all.
 REDIS_LOCATION = redis_url_with_database(settings.REDIS_URL, 15)
 
 POSTGRES_CACHES = {

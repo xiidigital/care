@@ -9,6 +9,7 @@ CARE will actually construct without needing four processes to do it.
 import ast
 from pathlib import Path
 
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase
 
@@ -16,11 +17,9 @@ from config.caches import (
     DUMMY_CACHE_BACKEND,
     LOCMEM_CACHE_BACKEND,
     POSTGRES_CACHE_BACKEND,
-    RECENT_VIEWS_CACHE_ALIAS,
     REDIS_CACHE_BACKEND,
     SUPPORTED_CACHE_BACKENDS,
     build_default_cache,
-    build_redis_only_cache,
     resolve_redis_cache_url,
     validate_cache_backend,
 )
@@ -151,25 +150,25 @@ class RedisUrlPrecedenceTests(SimpleTestCase):
 
 class RedisOnlyAliasTests(SimpleTestCase):
     """
-    Recent views is not cache and is not selected by CARE_CACHE_BACKEND.
+    RF1: recent views no longer has a cache alias at all.
+
+    It is a PostgreSQL model now, so `CACHES` must not grow a `recent_views`
+    entry back and `config.caches` must not keep the generic Redis-only alias
+    builder that only recent views and the pre-ES-05 lock alias ever used.
     """
 
-    def test_recent_views_alias_is_redis_regardless_of_cache_backend(self):
-        config = build_redis_only_cache(REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS)
-        self.assertEqual(config["BACKEND"], "django_redis.cache.RedisCache")
+    def test_no_recent_views_cache_alias_exists(self):
+        self.assertNotIn("recent_views", settings.CACHES)
 
-    def test_recent_views_alias_does_not_swallow_exceptions(self):
-        # A swallowed error would turn a failed acquisition into an apparent
-        # success -- the exact silent failure ES-04 section 19 forbids.
-        config = build_redis_only_cache(REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS)
-        self.assertFalse(config["OPTIONS"]["IGNORE_EXCEPTIONS"])
+    def test_recent_views_alias_constant_is_gone(self):
+        import config.caches
 
-    def test_missing_redis_url_fails_loudly(self):
-        # ES-04 section 25: the application fails clearly if a selected
-        # responsibility still requires Redis.
-        with self.assertRaises(ImproperlyConfigured) as ctx:
-            build_redis_only_cache(None, responsibility=RECENT_VIEWS_CACHE_ALIAS)
-        self.assertIn("REDIS_URL", str(ctx.exception))
+        self.assertFalse(hasattr(config.caches, "RECENT_VIEWS_CACHE_ALIAS"))
+
+    def test_redis_only_alias_builder_is_gone(self):
+        import config.caches
+
+        self.assertFalse(hasattr(config.caches, "build_redis_only_cache"))
 
 
 class GenericCacheKeyTests(SimpleTestCase):
@@ -188,10 +187,10 @@ class DirectRedisBoundaryTests(SimpleTestCase):
     """
     ES-04 section 32: ordinary cache consumers must not reach for Redis.
 
-    Deliberately an allowlist rather than a blanket ban. Responsibilities that
-    genuinely still need Redis -- the recent-views list --
-    are permitted and named, so this test documents the remaining surface
-    instead of pretending it is empty.
+    Deliberately an allowlist rather than a blanket ban. The one responsibility
+    that genuinely still needs Redis -- rate limiting -- is permitted and named,
+    so this test documents the remaining surface instead of pretending it is
+    empty. RF1 removed `care/emr/utils/recent_views.py` from this list.
     """
 
     REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -200,10 +199,16 @@ class DirectRedisBoundaryTests(SimpleTestCase):
     ALLOWED = {
         # Builds the CACHES entries; names the backend as a string.
         "config/caches.py",
-        # The isolated Redis-only recent-views component.
-        "care/emr/utils/recent_views.py",
-        # Test settings construct the Redis-only aliases.
+        # Test settings construct the Redis-only ratelimit alias.
         "config/settings/test.py",
+        # Resets the Redis-only `ratelimit` alias between tests. Uses
+        # delete_pattern deliberately: clear() is FLUSHDB, which is the E7
+        # mechanism. See the module docstring there.
+        "care/utils/tests/ratelimit.py",
+        # Names django_redis in order to forbid it: the RF1 Redis-off tests
+        # patch get_redis_connection to raise, then prove recent views still
+        # works. See NoRedisImportTests in the same module for the static half.
+        "care/emr/tests/test_recent_views.py",
         # This test.
         "care/utils/tests/test_cache_config.py",
     }

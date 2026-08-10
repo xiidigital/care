@@ -559,13 +559,17 @@ class RedisIsNotUniversalTests(SimpleTestCase):
         self.assertIn("CARE_CACHE_BACKEND", source)
         self.assertIn("CARE_TASK_BACKEND", source)
 
-    def test_recent_views_remains_a_declared_redis_capability(self):
-        # Not hidden: the alias still requires Redis, and specific API endpoints
-        # depend on it. It does not gate process startup.
-        from config.caches import RECENT_VIEWS_CACHE_ALIAS
+    def test_rate_limiting_remains_a_declared_redis_capability(self):
+        # Not hidden: the alias still requires Redis, and the login and
+        # password-reset paths depend on it. It does not gate process startup.
+        from config.caches import RATELIMIT_CACHE_ALIAS
 
-        self.assertIn(RECENT_VIEWS_CACHE_ALIAS, settings.CACHES)
-        self.assertIn("redis", settings.CACHES[RECENT_VIEWS_CACHE_ALIAS]["BACKEND"])
+        self.assertIn(RATELIMIT_CACHE_ALIAS, settings.CACHES)
+        self.assertIn("redis", settings.CACHES[RATELIMIT_CACHE_ALIAS]["BACKEND"])
+
+    def test_recent_views_is_no_longer_a_redis_capability(self):
+        # RF1: recent views is a PostgreSQL model. No alias, no Redis.
+        self.assertNotIn("recent_views", settings.CACHES)
 
 
 class StartupLoggingTests(SimpleTestCase):

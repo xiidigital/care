@@ -25,6 +25,7 @@ from unittest.mock import patch
 from django.test import RequestFactory, SimpleTestCase, override_settings
 from django_ratelimit.core import _get_window, _make_cache_key
 
+from care.utils.tests.ratelimit import reset_ratelimit_counters
 from config.ratelimit import get_ratelimit_key, ratelimit
 
 RATE = "10/h"
@@ -70,9 +71,10 @@ class RateLimitCallerIsolationTests(SimpleTestCase):
 
     def setUp(self):
         super().setUp()
-        from django.core.cache import cache
-
-        cache.clear()
+        # Counters live in the `ratelimit` alias since the L1 follow-up, so
+        # clearing `default` would reset nothing. This drops only this worker's
+        # keys -- see care/utils/tests/ratelimit.py for why not `clear()`.
+        reset_ratelimit_counters()
         self.factory = RequestFactory()
 
     def request(self):

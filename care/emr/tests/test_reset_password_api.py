@@ -8,6 +8,7 @@ from django.test import override_settings
 from django.urls import reverse
 
 from care.utils.tests.base import CareAPITestBase
+from care.utils.tests.ratelimit import reset_ratelimit_counters
 
 
 class ResetPasswordAPITest(CareAPITestBase):
@@ -22,6 +23,11 @@ class ResetPasswordAPITest(CareAPITestBase):
         self.reset_password_check_url = reverse("password_reset_check")
         self.change_password_url = reverse("change_password_view")
         cache.clear()
+        # Rate-limit counters live in the `ratelimit` alias, not `default`, so
+        # the clear above no longer reaches them. The three rate-limit tests
+        # below count exact request numbers and need a clean bucket; the ones
+        # keyed on the client IP would otherwise carry 127.0.0.1 across tests.
+        reset_ratelimit_counters()
 
     def extract_token_from_email(self, email_body):
         """Extract token from reset password email body"""

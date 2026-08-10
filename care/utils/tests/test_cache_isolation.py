@@ -14,9 +14,10 @@ three modules in parallel reproduced it 4 times out of 4.
 
 **Fix.** The test profile uses LocMem for the `default` cache. Each worker is a
 separate process with its own cache, so a clear cannot reach across workers and
-no key can collide. The two aliases that must stay on Redis -- `locks` and
-`recent_views`, which use Redis commands with no portable equivalent -- are
-namespaced per worker with `KEY_FUNCTION` instead.
+no key can collide. The one alias that must stay on Redis -- `ratelimit`, whose
+atomic `INCR` has no portable equivalent -- is namespaced per worker with
+`KEY_FUNCTION` instead. (`locks` moved to PostgreSQL advisory locks in ES-05 and
+`recent_views` to a PostgreSQL model in RF1.)
 
 **Not fixed by hiding shared state.** ES-04 section 18 forbids that, so these
 tests assert the isolation mechanism directly rather than asserting that the six
@@ -30,7 +31,7 @@ from django.core.cache import caches
 from django.test import SimpleTestCase, override_settings
 
 from config.caches import (
-    RECENT_VIEWS_CACHE_ALIAS,
+    RATELIMIT_CACHE_ALIAS,
     build_default_cache,
     worker_scoped_key,
 )
@@ -107,7 +108,7 @@ class WorkerScopedKeyTests(SimpleTestCase):
 
     def test_redis_backed_aliases_use_the_worker_scoped_key_function(self):
         self.assertEqual(
-            settings.CACHES[RECENT_VIEWS_CACHE_ALIAS]["KEY_FUNCTION"],
+            settings.CACHES[RATELIMIT_CACHE_ALIAS]["KEY_FUNCTION"],
             "config.caches.worker_scoped_key",
         )
 
@@ -122,12 +123,10 @@ class ProductionKeySemanticsTests(SimpleTestCase):
     """
 
     def test_production_settings_do_not_use_the_worker_scoped_key_function(self):
-        from config.caches import build_redis_only_cache
+        from config.caches import build_ratelimit_cache
 
-        production_lock = build_redis_only_cache(
-            "redis://localhost:6379", responsibility=RECENT_VIEWS_CACHE_ALIAS
-        )
-        self.assertNotIn("KEY_FUNCTION", production_lock)
+        production_ratelimit = build_ratelimit_cache("redis://localhost:6379")
+        self.assertNotIn("KEY_FUNCTION", production_ratelimit)
 
     def test_default_cache_key_function_is_djangos_own(self):
         production = build_default_cache("postgres", table="care_cache")
