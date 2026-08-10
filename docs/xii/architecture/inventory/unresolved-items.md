@@ -1347,6 +1347,12 @@ Recorded 2026-08-09. **RF1 is implemented and closed; RF2 remains architectural
 direction only and is not implemented, planned into a current phase, or
 authorized to start.**
 
+RF1 carries two recorded follow-ups, both below and both deliberately left open:
+"RF1 follow-up: concurrent trim can evict a just-bumped entry" (a known
+low-severity divergence from the former Redis semantics) and "RF1 assumption:
+READ COMMITTED" (a constraint on database configuration, not a defect). Neither
+blocks RF1's closure.
+
 Neither item belongs to ES-04, ES-05, ES-06 or ES-07. RF1 was executed as a
 focused modernization of one capability. RF2 is future modernization work, to be
 specified in its own Engineering Specification if and when it is scheduled.
@@ -1424,6 +1430,37 @@ trims against the window it saw — so reads are also bounded, and the next writ
 brings the table back down. Verified with real threads on real PostgreSQL in
 `care/emr/tests/test_recent_views.py::ConcurrentWriteTests`.
 
+Because `ATOMIC_REQUESTS = True`, that `atomic()` is nested inside the request
+transaction and opens a savepoint rather than a transaction. The savepoint shape
+is exercised explicitly by
+`ConcurrentWriteTests::test_the_upsert_race_is_safe_inside_an_outer_transaction`,
+which wraps the call in an outer `atomic()` equivalent to the production request
+shape.
+
+**How the trim actually executes.** Earlier RF1 wording said the trim happened
+entirely inside PostgreSQL and that no victim row was ever materialised in
+Python. That is only half true, and the accurate description is:
+
+- The **retained window** is a bounded SQL subquery. `_trim` slices a
+  `values_list("id", flat=True)` queryset, which compiles to
+  `SELECT id ... ORDER BY last_viewed_at DESC, id DESC LIMIT MAX_RECENT_VIEW`
+  nested inside the victim query's `NOT IN`. It is never read into Python.
+- The **victim rows are materialised in Python.** CARE registers senderless
+  `pre_delete` and `post_delete` receivers in `care/audit_log/receivers.py`, so
+  `Collector.can_fast_delete()` is `False` for every model — including
+  `UserValueSetRecentView`, verified directly. Django's delete collector
+  therefore issues a `SELECT` for the victims, instantiates them, fires the
+  signals, and deletes by primary key.
+- This is **preserved deliberately**, not tolerated. Bypassing the collector
+  with raw SQL or `_raw_delete` would skip the audit/delete signal path the rest
+  of CARE depends on. RF1 does not do that.
+- The cost is **small under normal operation**: a steady-state write evicts at
+  most one row, so the collector loads one object.
+- **Burst concurrency may temporarily increase that set.** Several writers can
+  each push the scope above the bound before any of them trims, so the next
+  trim's victim set — and the objects the collector loads — is correspondingly
+  larger. It is still bounded by the size of the burst, not by table size.
+
 **Data migration: none, deliberately.** The table starts empty. Recent-view
 state in Redis is ephemeral, non-critical user convenience state with no
 clinical or audit value, the deployment is greenfield, and reading the old lists
@@ -1439,6 +1476,91 @@ does `CARE_CACHE_BACKEND=redis`.
 **Consequence, now realised:** a deployment that runs without Redis keeps the
 recent-views endpoints. Rate limiting (RF2) is the only capability left holding
 the Redis requirement.
+
+**Isolation-level assumption.** See "RF1 assumption: READ COMMITTED" below.
+
+**Known divergence from Redis semantics.** See "RF1 follow-up: concurrent trim
+can evict a just-bumped entry" below.
+
+### RF1 follow-up: concurrent trim can evict a just-bumped entry
+
+**Status:** Open, accepted. Low severity. **Not fixed in RF1, deliberately.**
+**Category:** concurrency / behavioural divergence from the former Redis
+implementation.
+
+Two concurrent writes for the same `(user, valueset)` can lose one recently
+viewed entry. The sequence:
+
+1. Transaction **A** bumps item `A` — `update_or_create` sets its
+   `last_viewed_at` to now. A has not committed.
+2. Transaction **B**, for a different code in the same scope, computes its
+   retained/victim set. Under `READ COMMITTED` it reads a snapshot that does not
+   include A's uncommitted bump, so it still sees item `A` with its old
+   timestamp.
+3. B's retained window therefore excludes item `A`, and B selects `A` as a
+   victim.
+4. B's `DELETE` blocks on the row lock A holds.
+5. A commits. B's delete proceeds and removes item `A` **by primary key** — the
+   row it already identified — even though `A` is now the most recently viewed
+   entry in the scope.
+
+**Consequences, in full:**
+
+- One recently viewed convenience entry may disappear from the list.
+- No durable domain data is corrupted. `UserValueSetRecentView` holds only
+  ephemeral UI convenience state; nothing clinical, financial or auditable
+  depends on it.
+- No duplicate row is created. The unique constraint on `(user, valueset, code)`
+  holds throughout; this anomaly deletes, it does not double-insert.
+- Reads remain bounded by `MAX_RECENT_VIEW`. `get_recent_views` applies its own
+  slice, so no read ever exposes an over-long list, whatever the physical row
+  count is.
+- Subsequent writes restore the physical table to the configured bound. The next
+  `add_recent_view` trims against a committed, consistent window.
+
+**Classification.** A known **low-severity Recent Views concurrency divergence
+from the former Redis semantics**. The Redis implementation serialised
+`LREM`+`LPUSH`+`LTRIM` through a single-threaded server, so the equivalent
+interleaving could not arise there; the PostgreSQL implementation trades that
+for storage portability. The user-visible effect is that a code the user just
+looked at may be missing from their recent list until they look at it again.
+
+**Not fixed in RF1.** A fix would need either a scope-level lock (an advisory
+lock or `SELECT ... FOR UPDATE` on the scope) serialising writers per
+`(user, valueset)`, or re-selecting the victim set after acquiring the row
+locks. Both are real changes to the write path and neither is justified by the
+severity. Recorded here so the trade is explicit rather than accidental.
+
+### RF1 assumption: READ COMMITTED
+
+**Status:** Recorded assumption. No configuration change is made by this entry.
+**Category:** concurrency / configuration constraint.
+
+`add_recent_view` relies on `update_or_create`'s concurrent-insert recovery:
+when two requests race to insert the same `(user, valueset, code)`, the loser
+receives an `IntegrityError` and `update_or_create` retries the read.
+
+**That recovery depends on the transaction isolation level.** Under PostgreSQL
+`READ COMMITTED`, the loser's retry read is taken after the winner's commit
+became visible, so it finds the winning row and the retry succeeds. Under
+`REPEATABLE READ` or `SERIALIZABLE`, the retry re-reads the transaction's
+original snapshot, does not see the winning row, and the recovery would fail —
+surfacing the `IntegrityError`, or a serialization failure, to the caller.
+
+**Current repository behaviour:** CARE uses PostgreSQL's default isolation level
+and does not override it. There is no `isolation_level` key in `DATABASES`, no
+`SET TRANSACTION ISOLATION LEVEL` anywhere in the codebase, and no server-side
+override in the compose files. The server default is `read committed`, confirmed
+against the running PostgreSQL 17 instance.
+
+**Constraint.** Changing the database isolation level to `REPEATABLE READ` or
+`SERIALIZABLE` — whether in `DATABASES["default"]["OPTIONS"]`, via
+`default_transaction_isolation` on the server, or through a managed-database
+parameter group — **requires re-validating this concurrency behaviour**, and
+`ConcurrentWriteTests` is the test that would need to be re-run and, if it
+fails, the write path reworked (most likely with an explicit retry loop). The
+same caveat applies to any other `update_or_create` or `get_or_create` on a
+contended unique constraint; recent views is simply where it is documented.
 
 ### RF2 — Redis-free Rate Limiting
 

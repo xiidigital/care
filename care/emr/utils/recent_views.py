@@ -16,6 +16,14 @@ Consequence, recorded deliberately: recent views no longer require Redis in any
 configuration, and a deployment with ``CARE_CACHE_BACKEND=postgres`` keeps this
 feature. Existing Redis recent-view state was **not** migrated -- it is
 ephemeral, non-critical user convenience state, and the new table starts empty.
+
+Two concurrency properties are recorded rather than fixed, both in
+``docs/xii/architecture/inventory/unresolved-items.md`` Part RF: concurrent
+writes to one scope can evict an entry that was just bumped (a known
+low-severity divergence from the Redis semantics), and ``update_or_create``'s
+duplicate-insert recovery assumes PostgreSQL ``READ COMMITTED``. See
+:meth:`RecentViewsManager.add_recent_view` and
+:meth:`RecentViewsManager._trim`.
 """
 
 from django.conf import settings
@@ -55,10 +63,25 @@ class RecentViewsManager:
         """
         Drop everything outside the newest ``MAX_RECENT_VIEW`` entries.
 
-        The retained window is a sliced subquery, so at most one bounded id set
-        is ever materialised -- by PostgreSQL, inside the ``DELETE``, never in
-        Python. The ordering matches :meth:`get_recent_views` exactly, so the
-        rows that survive are precisely the ones a read would have returned.
+        The retained window stays inside PostgreSQL: it is a sliced subquery,
+        so it compiles to a ``SELECT ... ORDER BY ... LIMIT MAX_RECENT_VIEW``
+        nested in the victim query's ``NOT IN``, and is never read into Python.
+        The ordering matches :meth:`get_recent_views` exactly, so the rows that
+        survive are precisely the ones a read would have returned.
+
+        The *victim* rows are a different matter, and the claim that trimming
+        happens entirely inside PostgreSQL is false. CARE registers senderless
+        ``pre_delete``/``post_delete`` receivers in
+        :mod:`care.audit_log.receivers`, so ``Collector.can_fast_delete`` is
+        ``False`` for every model, including this one. Django therefore selects
+        the victims, instantiates them, fires the signals, and deletes by
+        primary key. That is deliberate and is not worked around here: raw SQL
+        or ``_raw_delete`` would skip the audit/delete signal path that the rest
+        of CARE relies on. The cost is bounded in practice -- under normal
+        operation a write evicts at most one row -- though a burst of concurrent
+        writes for the same scope can leave several rows above the bound and so
+        temporarily enlarge the victim set. See ``unresolved-items.md`` Part RF,
+        "RF1 follow-up: concurrent trim can evict a just-bumped entry".
         """
         retained = (
             cls._scoped(user, valueset)
@@ -87,6 +110,21 @@ class RecentViewsManager:
         same code cannot both insert, because the loser's ``IntegrityError`` is
         caught and retried as a fetch. The trim runs in the same transaction so
         a write is never observable as an over-long list.
+
+        That recovery assumes PostgreSQL ``READ COMMITTED``, which is the
+        server default and which CARE does not override. Under ``READ
+        COMMITTED`` the loser's re-read, taken after the winner commits, sees
+        the winning row and the retry succeeds. Under ``REPEATABLE READ`` or
+        ``SERIALIZABLE`` the retry would re-read the same snapshot, find
+        nothing, and surface the error instead. Changing the database isolation
+        level therefore requires re-validating this path -- see
+        ``unresolved-items.md`` Part RF, "RF1 assumption: READ COMMITTED".
+
+        The outer ``atomic()`` here is nested inside the request transaction
+        (``ATOMIC_REQUESTS = True``), so in production it opens a savepoint
+        rather than a transaction; ``update_or_create``'s own inner ``atomic()``
+        is what lets the ``IntegrityError`` be recovered from without poisoning
+        the enclosing transaction.
         """
         code = code_obj.get("code")
         if not code:
