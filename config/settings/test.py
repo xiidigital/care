@@ -4,7 +4,11 @@ import json
 from authlib.jose import JsonWebKey
 
 from care.utils.jwks.generate_jwk import get_jwks_from_file
-from config.caches import RATELIMIT_CACHE_ALIAS, build_ratelimit_cache
+from config.caches import (
+    RATELIMIT_CACHE_ALIAS,
+    REDIS_RATE_LIMIT_BACKEND,
+    build_ratelimit_cache,
+)
 
 from .base import *  # noqa
 from .base import BASE_DIR, REDIS_URL, TEMPLATES, env
@@ -64,18 +68,20 @@ CACHES = {
         "LOCATION": "care-test",
         "KEY_PREFIX": "care-test",
     },
-    # This one must stay on Redis even in tests: it needs a guarantee with no
-    # portable equivalent, and a LocMem stand-in is not even configurable,
-    # because django_ratelimit's E003 rejects it as "not a shared cache". It is
-    # namespaced per worker instead, which is what stops parallel workers
-    # sharing the rate-limit bucket keyed on the test client's fixed 127.0.0.1.
+    # The suite runs the strict Redis mode by default, so the default profile
+    # exercises the strongest semantics and any test that wants a weaker mode
+    # has to select it explicitly. RF2's `postgres` and `disabled` modes are
+    # covered that way in care/utils/tests/test_ratelimit_modes.py.
+    #
+    # It is namespaced per worker, which is what stops parallel workers sharing
+    # the rate-limit bucket keyed on the test client's fixed 127.0.0.1.
     #
     # Never call `clear()` on it: django_redis implements it as FLUSHDB, which
     # ignores KEY_PREFIX and is the mechanism behind E7. Reset rate-limit
     # counters with `care.utils.tests.ratelimit.reset_ratelimit_counters()`,
     # which deletes only the current worker's keys.
     RATELIMIT_CACHE_ALIAS: {
-        **build_ratelimit_cache(REDIS_URL),
+        **build_ratelimit_cache(REDIS_RATE_LIMIT_BACKEND, redis_url=REDIS_URL),
         "KEY_FUNCTION": "config.caches.worker_scoped_key",
     },
     "swagger_cache": {
@@ -84,10 +90,13 @@ CACHES = {
     },
 }
 
-# No SILENCED_SYSTEM_CHECKS. `django_ratelimit.E003` and `W001` were silenced
-# here while rate limiting read the `default` cache, which the profile above
-# sets to LocMem. Rate limiting now names its own Redis alias, so both checks
-# pass on their own and the suite sees the same check results as production.
+# SILENCED_SYSTEM_CHECKS is inherited from base and, because the profile above
+# selects the Redis rate-limit backend, is empty. `django_ratelimit.E003` and
+# `W001` were once silenced here, while rate limiting read the `default` cache
+# that this profile sets to LocMem; rate limiting has named its own alias since,
+# so both checks pass on their own and the suite sees the same check results a
+# production process does. RF2's postgres mode adds E003 back, but only under
+# its own override -- see test_ratelimit_modes.SystemCheckSuppressionTests.
 
 # https://whitenoise.evans.io/en/stable/django.html#whitenoise-makes-my-tests-run-slow
 WHITENOISE_AUTOREFRESH = True

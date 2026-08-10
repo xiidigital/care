@@ -14,12 +14,19 @@ from config.caches import (
     DEFAULT_CACHE_KEY_PREFIX,
     DEFAULT_CACHE_TABLE,
     DEFAULT_CACHE_TIMEOUT,
+    DEFAULT_RATELIMIT_CACHE_TABLE,
+    DEFAULT_RATELIMIT_CACHE_TIMEOUT,
     DEFAULT_RATELIMIT_KEY_PREFIX,
+    DEFAULT_RATELIMIT_MAX_ENTRIES,
     RATELIMIT_CACHE_ALIAS,
     REDIS_CACHE_BACKEND,
+    REDIS_RATE_LIMIT_BACKEND,
     build_default_cache,
-    build_ratelimit_cache,
+    build_ratelimit_caches,
+    ratelimit_installed_apps,
+    ratelimit_silenced_checks,
     validate_cache_backend,
+    validate_rate_limit_backend,
 )
 from config.health import build_health_checks
 from config.runtime import (
@@ -130,11 +137,35 @@ CARE_CACHE_TIMEOUT = env.int("CARE_CACHE_TIMEOUT", default=DEFAULT_CACHE_TIMEOUT
 # Redis cache URL, provider-neutral. Falls back to the legacy REDIS_URL.
 REDIS_CACHE_URL = env("REDIS_CACHE_URL", default="")
 
+# RATE LIMIT STORE
+# ------------------------------------------------------------------------------
+# RF2: where rate-limit counters live, chosen independently of CARE_CACHE_BACKEND
+# and never inferred from it. `redis` remains the default so an existing
+# deployment keeps the strict semantics it already had; the Redis-free
+# managed-cloud profile selects `postgres` and accepts best-effort counting.
+# See config/caches.build_ratelimit_cache for what each mode guarantees.
+CARE_RATE_LIMIT_BACKEND = validate_rate_limit_backend(
+    env("CARE_RATE_LIMIT_BACKEND", default=REDIS_RATE_LIMIT_BACKEND).strip().lower()
+)
+
 # Redis URL for rate-limit counters, configurable independently of the cache
 # (07-configuration-reference.md §28.1). Falls back to the legacy REDIS_URL.
+# Read only when CARE_RATE_LIMIT_BACKEND=redis.
 REDIS_RATE_LIMIT_URL = env("REDIS_RATE_LIMIT_URL", default="")
 REDIS_RATE_LIMIT_PREFIX = env(
     "REDIS_RATE_LIMIT_PREFIX", default=DEFAULT_RATELIMIT_KEY_PREFIX
+)
+
+# Read only when CARE_RATE_LIMIT_BACKEND=postgres. Its own table -- never
+# CARE_CACHE_TABLE -- created by the same `createcachetable` step.
+CARE_RATE_LIMIT_TABLE = env(
+    "CARE_RATE_LIMIT_TABLE", default=DEFAULT_RATELIMIT_CACHE_TABLE
+)
+CARE_RATE_LIMIT_CACHE_TIMEOUT = env.int(
+    "CARE_RATE_LIMIT_CACHE_TIMEOUT", default=DEFAULT_RATELIMIT_CACHE_TIMEOUT
+)
+CARE_RATE_LIMIT_MAX_ENTRIES = env.int(
+    "CARE_RATE_LIMIT_MAX_ENTRIES", default=DEFAULT_RATELIMIT_MAX_ENTRIES
 )
 
 CACHES = {
@@ -146,12 +177,16 @@ CACHES = {
         key_prefix=CARE_CACHE_KEY_PREFIX,
         timeout=CARE_CACHE_TIMEOUT,
     ),
-    # Not cache, and not selected by CARE_CACHE_BACKEND. The last alias that
-    # still requires Redis; see config/caches.py for why.
-    RATELIMIT_CACHE_ALIAS: build_ratelimit_cache(
+    # Not cache, and not selected by CARE_CACHE_BACKEND. Contributes nothing at
+    # all under CARE_RATE_LIMIT_BACKEND=disabled; see config/caches.py.
+    **build_ratelimit_caches(
+        CARE_RATE_LIMIT_BACKEND,
         redis_url=REDIS_RATE_LIMIT_URL,
         legacy_redis_url=REDIS_URL,
         key_prefix=REDIS_RATE_LIMIT_PREFIX,
+        table=CARE_RATE_LIMIT_TABLE,
+        timeout=CARE_RATE_LIMIT_CACHE_TIMEOUT,
+        max_entries=CARE_RATE_LIMIT_MAX_ENTRIES,
     ),
     "swagger_cache": {  # In-memory cache (only for Swagger)
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
@@ -183,7 +218,10 @@ THIRD_PARTY_APPS = [
     "rest_framework.authtoken",
     "drf_spectacular",
     "django_filters",
-    "django_ratelimit",
+    # Present unless CARE_RATE_LIMIT_BACKEND=disabled, where there is no
+    # rate-limit cache alias for its system check to validate. See
+    # config/caches.ratelimit_installed_apps.
+    *ratelimit_installed_apps(CARE_RATE_LIMIT_BACKEND),
     "corsheaders",
     "djangoql",
     "maintenance_mode",
@@ -620,18 +658,32 @@ OTP_LENGTH = 5
 # Rate Limiting
 # ------------------------------------------------------------------------------
 # django_ratelimit reads its counters from this alias instead of `default`, so
-# the ADR-0004 cache choice no longer decides whether management commands run.
-# The alias is always Redis because the library requires an atomic INCR; see
-# config/caches.build_ratelimit_cache and unresolved-items.md L1/K4.
+# the ADR-0004 cache choice no longer decides whether management commands run
+# (unresolved-items.md L1). Which technology backs the alias is RF2's
+# CARE_RATE_LIMIT_BACKEND; under `disabled` the alias is absent and so is the
+# app, which is why nothing here consults it.
 RATELIMIT_USE_CACHE = RATELIMIT_CACHE_ALIAS
 
 # Left explicit rather than relying on the library default. When the rate-limit
 # store cannot be reached the count is unknown, and an unknown count must not
 # read as "under the limit" on the login and password-reset paths. False makes
 # django_ratelimit report should_limit, which sends CARE's wrapper to captcha
-# validation (07-configuration-reference.md §26.4).
+# validation (07-configuration-reference.md §26.4). It is the Redis half of the
+# policy; the PostgreSQL half is in config/ratelimit.py, because a DatabaseCache
+# failure raises rather than returning None.
 RATELIMIT_FAIL_OPEN = False
 
+# Exactly one check, in exactly one mode: django_ratelimit.E003 under
+# CARE_RATE_LIMIT_BACKEND=postgres, where CARE knowingly accepts a non-atomic
+# increment in exchange for a Redis-free deployment. Empty in every other mode.
+# W001 is deliberately left to fire so the weaker guarantee stays visible to
+# whoever runs `manage.py check`. See config/caches.ratelimit_silenced_checks.
+SILENCED_SYSTEM_CHECKS = ratelimit_silenced_checks(CARE_RATE_LIMIT_BACKEND)
+
+# The pre-existing kill switch, kept unchanged for backward compatibility. It
+# short-circuits the wrapper the same way CARE_RATE_LIMIT_BACKEND=disabled does,
+# but it is a per-environment override rather than a deployment's declared
+# backend -- local and test settings set it, and continue to.
 DISABLE_RATELIMIT = env.bool("DISABLE_RATELIMIT", default=False)
 DJANGO_RATE_LIMIT = env("RATE_LIMIT", default="5/10m")
 GOOGLE_RECAPTCHA_SECRET_KEY = env("GOOGLE_RECAPTCHA_SECRET_KEY", default="")
