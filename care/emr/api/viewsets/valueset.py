@@ -58,9 +58,6 @@ class ValueSetViewSet(EMRModelViewSet):
     def get_queryset(self):
         return super().get_queryset().select_related("created_by", "updated_by")
 
-    def get_recent_view_cache_key(self, valueset_slug, user_id):
-        return f"user_valueset_code_prefs:{valueset_slug}:{user_id}:recent_views"
-
     def get_favourites_cache_key(self, valueset_slug, user_id):
         return f"user_valueset_code_prefs:{valueset_slug}:{user_id}:favourites"
 
@@ -196,37 +193,31 @@ class ValueSetViewSet(EMRModelViewSet):
     @extend_schema(request=MinimalCodeConcept, responses={200: None}, methods=["POST"])
     @action(detail=True, methods=["POST"])
     def add_recent_view(self, request, *args, **kwargs):
-        valueset_slug = kwargs.get(self.lookup_field)
-        user_id = request.user.external_id
-        cache_key = self.get_recent_view_cache_key(valueset_slug, user_id)
         code_obj = MinimalCodeConcept(**request.data)
         valueset = self.get_object()
         if not valueset.lookup(code_obj):
             raise ValidationError("Invalid code value")
-        RecentViewsManager.add_recent_view(cache_key, code_obj.model_dump())
+        RecentViewsManager.add_recent_view(
+            request.user, valueset, code_obj.model_dump()
+        )
         return Response({"message": f"Code {code_obj.code} added to recent views"})
 
     @extend_schema(request=MinimalCodeConcept, responses={200: None}, methods=["POST"])
     @action(detail=True, methods=["POST"])
     def remove_recent_view(self, request, *args, **kwargs):
-        valueset_slug = kwargs.get(self.lookup_field)
-        user_id = request.user.external_id
-        cache_key = self.get_recent_view_cache_key(valueset_slug, user_id)
         code_obj = MinimalCodeConcept(**request.data)
-        RecentViewsManager.remove_recent_view(cache_key, code_obj.model_dump())
+        RecentViewsManager.remove_recent_view(
+            request.user, self.get_object(), code_obj.model_dump()
+        )
         return Response({"message": f"Code {code_obj.code} removed from recent views"})
 
     @action(detail=True, methods=["GET"])
     def recent_views(self, request, *args, **kwargs):
-        valueset_slug = kwargs.get(self.lookup_field)
-        user_id = request.user.external_id
-        cache_key = self.get_recent_view_cache_key(valueset_slug, user_id)
-        return Response(RecentViewsManager.get_recent_views(cache_key))
+        return Response(
+            RecentViewsManager.get_recent_views(request.user, self.get_object())
+        )
 
     @action(detail=True, methods=["POST"])
     def clear_recent_views(self, request, *args, **kwargs):
-        valueset_slug = kwargs.get(self.lookup_field)
-        user_id = request.user.external_id
-        cache_key = self.get_recent_view_cache_key(valueset_slug, user_id)
-        RecentViewsManager.clear_recent_views(cache_key)
+        RecentViewsManager.clear_recent_views(request.user, self.get_object())
         return Response({"message": "All recent views cleared"})

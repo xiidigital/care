@@ -62,3 +62,54 @@ class UserValueSetPreference(EMRBaseModel):
         unique_together = ("user", "valueset")
 
     MAX_FAVORITES = getattr(settings, "MAX_FAVORITES_FOR_VALUESET", 50)
+
+
+class UserValueSetRecentView(models.Model):
+    """
+    One entry of a user's most-recently-viewed codes for a single valueset.
+
+    Replaces the Redis list that backed recent views (RF1). The recency scope is
+    the same composite the Redis key encoded -- user plus valueset -- and the
+    uniqueness constraint is on ``code`` alone because the Redis implementation
+    de-duplicated on ``code`` alone, ignoring ``system``.
+
+    Deliberately a plain ``models.Model`` rather than ``EMRBaseModel``. This is
+    ephemeral UI convenience state: it needs no audit trail, no ``external_id``
+    and no history. Soft deletion would actively break it -- a soft-deleted row
+    still occupies the unique constraint, so re-viewing a removed code would
+    raise ``IntegrityError``, and trimming would never reclaim anything.
+
+    The code payload is stored as columns rather than a JSON blob because its
+    shape is fixed by
+    :class:`~care.emr.fhir.resources.code_concept.MinimalCodeConcept`; the
+    reader reassembles that exact dict, so the API response is unchanged.
+    """
+
+    user = models.ForeignKey(
+        "users.User", on_delete=models.CASCADE, related_name="valueset_recent_views"
+    )
+    valueset = models.ForeignKey("emr.ValueSet", on_delete=models.CASCADE)
+    code = models.CharField(max_length=255)
+    system = models.CharField(max_length=255)
+    display = models.TextField()
+    designation = models.JSONField(null=True, blank=True, default=None)
+    last_viewed_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "valueset", "code"],
+                name="unique_user_valueset_recent_view_code",
+            )
+        ]
+        indexes = [
+            # Covers both reads: list a scope newest-first, and select the
+            # retained window when trimming to MAX_RECENT_VIEW.
+            models.Index(
+                fields=["user", "valueset", "-last_viewed_at"],
+                name="user_valueset_recent_view_idx",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.code} ({self.valueset_id}) for user {self.user_id}"

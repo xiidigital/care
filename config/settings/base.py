@@ -14,10 +14,11 @@ from config.caches import (
     DEFAULT_CACHE_KEY_PREFIX,
     DEFAULT_CACHE_TABLE,
     DEFAULT_CACHE_TIMEOUT,
-    RECENT_VIEWS_CACHE_ALIAS,
+    DEFAULT_RATELIMIT_KEY_PREFIX,
+    RATELIMIT_CACHE_ALIAS,
     REDIS_CACHE_BACKEND,
     build_default_cache,
-    build_redis_only_cache,
+    build_ratelimit_cache,
     validate_cache_backend,
 )
 from config.health import build_health_checks
@@ -129,6 +130,13 @@ CARE_CACHE_TIMEOUT = env.int("CARE_CACHE_TIMEOUT", default=DEFAULT_CACHE_TIMEOUT
 # Redis cache URL, provider-neutral. Falls back to the legacy REDIS_URL.
 REDIS_CACHE_URL = env("REDIS_CACHE_URL", default="")
 
+# Redis URL for rate-limit counters, configurable independently of the cache
+# (07-configuration-reference.md §28.1). Falls back to the legacy REDIS_URL.
+REDIS_RATE_LIMIT_URL = env("REDIS_RATE_LIMIT_URL", default="")
+REDIS_RATE_LIMIT_PREFIX = env(
+    "REDIS_RATE_LIMIT_PREFIX", default=DEFAULT_RATELIMIT_KEY_PREFIX
+)
+
 CACHES = {
     "default": build_default_cache(
         CARE_CACHE_BACKEND,
@@ -138,10 +146,12 @@ CACHES = {
         key_prefix=CARE_CACHE_KEY_PREFIX,
         timeout=CARE_CACHE_TIMEOUT,
     ),
-    # Neither of these is cache, and neither is selected by CARE_CACHE_BACKEND.
-    # Both still require Redis; see config/caches.py for why.
-    RECENT_VIEWS_CACHE_ALIAS: build_redis_only_cache(
-        REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS
+    # Not cache, and not selected by CARE_CACHE_BACKEND. The last alias that
+    # still requires Redis; see config/caches.py for why.
+    RATELIMIT_CACHE_ALIAS: build_ratelimit_cache(
+        redis_url=REDIS_RATE_LIMIT_URL,
+        legacy_redis_url=REDIS_URL,
+        key_prefix=REDIS_RATE_LIMIT_PREFIX,
     ),
     "swagger_cache": {  # In-memory cache (only for Swagger)
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
@@ -609,6 +619,19 @@ OTP_LENGTH = 5
 
 # Rate Limiting
 # ------------------------------------------------------------------------------
+# django_ratelimit reads its counters from this alias instead of `default`, so
+# the ADR-0004 cache choice no longer decides whether management commands run.
+# The alias is always Redis because the library requires an atomic INCR; see
+# config/caches.build_ratelimit_cache and unresolved-items.md L1/K4.
+RATELIMIT_USE_CACHE = RATELIMIT_CACHE_ALIAS
+
+# Left explicit rather than relying on the library default. When the rate-limit
+# store cannot be reached the count is unknown, and an unknown count must not
+# read as "under the limit" on the login and password-reset paths. False makes
+# django_ratelimit report should_limit, which sends CARE's wrapper to captcha
+# validation (07-configuration-reference.md §26.4).
+RATELIMIT_FAIL_OPEN = False
+
 DISABLE_RATELIMIT = env.bool("DISABLE_RATELIMIT", default=False)
 DJANGO_RATE_LIMIT = env("RATE_LIMIT", default="5/10m")
 GOOGLE_RECAPTCHA_SECRET_KEY = env("GOOGLE_RECAPTCHA_SECRET_KEY", default="")

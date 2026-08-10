@@ -4,10 +4,7 @@ import json
 from authlib.jose import JsonWebKey
 
 from care.utils.jwks.generate_jwk import get_jwks_from_file
-from config.caches import (
-    RECENT_VIEWS_CACHE_ALIAS,
-    build_redis_only_cache,
-)
+from config.caches import RATELIMIT_CACHE_ALIAS, build_ratelimit_cache
 
 from .base import *  # noqa
 from .base import BASE_DIR, REDIS_URL, TEMPLATES, env
@@ -67,12 +64,18 @@ CACHES = {
         "LOCATION": "care-test",
         "KEY_PREFIX": "care-test",
     },
-    # These two must stay on Redis even in tests: they use Redis commands with
-    # no portable equivalent, so a LocMem stand-in would test nothing. They are
+    # This one must stay on Redis even in tests: it needs a guarantee with no
+    # portable equivalent, and a LocMem stand-in is not even configurable,
+    # because django_ratelimit's E003 rejects it as "not a shared cache". It is
     # namespaced per worker instead, which is what stops parallel workers
-    # contending for the constant lock keys such as PatientCreateLock.
-    RECENT_VIEWS_CACHE_ALIAS: {
-        **build_redis_only_cache(REDIS_URL, responsibility=RECENT_VIEWS_CACHE_ALIAS),
+    # sharing the rate-limit bucket keyed on the test client's fixed 127.0.0.1.
+    #
+    # Never call `clear()` on it: django_redis implements it as FLUSHDB, which
+    # ignores KEY_PREFIX and is the mechanism behind E7. Reset rate-limit
+    # counters with `care.utils.tests.ratelimit.reset_ratelimit_counters()`,
+    # which deletes only the current worker's keys.
+    RATELIMIT_CACHE_ALIAS: {
+        **build_ratelimit_cache(REDIS_URL),
         "KEY_FUNCTION": "config.caches.worker_scoped_key",
     },
     "swagger_cache": {
@@ -81,8 +84,10 @@ CACHES = {
     },
 }
 
-# for testing retelimit use override_settings decorator
-SILENCED_SYSTEM_CHECKS = ["django_ratelimit.E003", "django_ratelimit.W001"]
+# No SILENCED_SYSTEM_CHECKS. `django_ratelimit.E003` and `W001` were silenced
+# here while rate limiting read the `default` cache, which the profile above
+# sets to LocMem. Rate limiting now names its own Redis alias, so both checks
+# pass on their own and the suite sees the same check results as production.
 
 # https://whitenoise.evans.io/en/stable/django.html#whitenoise-makes-my-tests-run-slow
 WHITENOISE_AUTOREFRESH = True
