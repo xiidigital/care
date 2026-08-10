@@ -19,7 +19,18 @@ non-blocking transaction-scoped PostgreSQL advisory lock with a deterministic
 BLAKE2b-derived signed 64-bit key. It must be entered after `transaction.atomic()`
 and PostgreSQL releases it on commit or rollback. The former `locks` cache alias,
 `nx=True` lock acquisition, and `MultipleItemsLock` are removed. `recent_views`
-remains the sole Redis-only alias and is unaffected.
+was unaffected by ES-05 and was the sole remaining Redis-only alias until
+2026-08-09, when the L1 follow-up added `ratelimit` and RF1 then removed
+`recent_views` entirely — see "Current cache surface" below.
+
+## RF1 update (2026-08-09)
+
+Recent views no longer uses Redis or the Django cache. `RecentViewsManager`
+reads and writes `emr.UserValueSetRecentView` through the ORM. The
+`recent_views` cache alias, the `RECENT_VIEWS_CACHE_ALIAS` constant, the
+`build_redis_only_cache` builder and every `LPUSH`/`LTRIM`/`LREM`/`LRANGE` on
+this path are removed. There is no backend selector and no fallback: recent
+views is PostgreSQL-only. `ratelimit` is now the only Redis-only alias.
 
 Every cache and Redis use in the repository, classified by role, with a
 backend-suitability assessment grounded in the semantics each site actually
@@ -48,7 +59,7 @@ The three hard couplings in section 1 are resolved or isolated:
 | --- | --- | --- |
 | A | `cache.set(..., nx=True)` | **Isolated.** Moved to a dedicated Redis-backed `locks` alias. The false-lock shim is deleted and LocMem, Dummy and DatabaseCache now all raise `TypeError` on `nx`. Not replaced -- ADR-0005 / ES-05. |
 | B | `cache.delete_pattern(...)` | **Removed.** Replaced by explicit key deletion via a registry the `@cacheable` decorator fills. |
-| C | `get_redis_connection("default")` | **Isolated.** Moved out of the models package to `care/emr/utils/recent_views.py` and onto its own `recent_views` alias. Still Redis-only; a PostgreSQL model for it is an unresolved item. |
+| C | `get_redis_connection("default")` | **Removed.** ES-04 isolated it out of the models package to `care/emr/utils/recent_views.py` on its own `recent_views` alias; RF1 then replaced the whole implementation with `emr.UserValueSetRecentView`. No Redis connection remains on this path. |
 
 Blockers 4 and 5 from section 7: the Redis-broker health check is untouched and
 remains an ES-03 concern (§21 of ES-04 keeps Celery health separate); the test
@@ -91,14 +102,72 @@ after. Full parallel suite: 6 runs, 6 green, 2240 tests.
 | Alias | Backend | Selected by | Responsibility |
 | --- | --- | --- | --- |
 | `default` | postgres / redis / locmem / dummy | `CARE_CACHE_BACKEND` | ADR-0004 cache |
-| `locks` | Redis, always | not configurable | distributed locking (ES-05) |
-| `recent_views` | Redis, always | not configurable | bounded MRU list |
+| ~~`locks`~~ | removed | — | distributed locking is PostgreSQL advisory locking (ES-05) |
+| ~~`recent_views`~~ | removed | — | bounded MRU list is `emr.UserValueSetRecentView` (RF1) |
+| `ratelimit` | Redis, always | not configurable | `django_ratelimit` counters |
 | `swagger_cache` | LocMem | not configurable | schema cache, unchanged |
 
-**verified** Redis is optional for ordinary caching and required for the other
-two. Verified by stopping Redis with `CARE_CACHE_BACKEND=postgres`: a cache
-round trip succeeds and cache health reports 200, while `Lock` raises
-`ConnectionError` rather than silently succeeding.
+**verified** Redis is optional for ordinary caching and required only by
+`ratelimit`. Verified by stopping Redis with `CARE_CACHE_BACKEND=postgres`: a
+cache round trip succeeds and cache health reports 200. Re-verified for RF1 by
+running the recent-views suite with the Redis container stopped and `REDIS_URL`
+pointing at a dead port: 39 tests, all green.
+
+**`ratelimit` added 2026-08-09** by the L1 follow-up. Rate limiting previously
+read `default`, which made `CARE_CACHE_BACKEND=postgres` fail
+`django_ratelimit.E003` and abort every management command. It is Redis-only for
+the same class of reason as the other two: the library requires an atomic `INCR`,
+and `DatabaseCache` inherits `BaseCache.incr`, an unlocked `get()`-then-`set()`
+that loses concurrent increments. Selected through `settings.RATELIMIT_USE_CACHE`
+and configured by `REDIS_RATE_LIMIT_URL` / `REDIS_RATE_LIMIT_PREFIX`.
+
+It sets `IGNORE_EXCEPTIONS: True`, so an outage becomes a fail-closed captcha
+challenge rather than a 500 on the login path. It is now the only Redis-only
+alias, so there is no longer a second policy to contrast it with.
+
+### Redis compatibility, portability and the Redis-free target (2026-08-09)
+
+Architectural clarification. No code, configuration or test changed with it.
+
+Three statements were being conflated in this document and elsewhere. They are
+distinct and all three hold:
+
+| Concept | Statement | Where it is enforced |
+| --- | --- | --- |
+| **Compatibility** | Redis is fully supported and is a first-class deployment choice — default cache, rate limiting, Celery broker. A deployment that already operates Redis SHOULD use it. Recent views is the exception: RF1 made it PostgreSQL-only and no Redis option is offered. | `CARE_CACHE_BACKEND=redis` is the default; the `ratelimit` alias falls back to `REDIS_URL` |
+| **Portability** | CARE does not depend *architecturally* on Redis. Redis-dependent capabilities sit behind explicit seams and business code does not know whether Redis exists. | the four seams below |
+| **Redis-free target** | A fully Redis-free deployment is a **future** supported profile. One capability still requires redesign. | RF2, `unresolved-items.md` Part RF (RF1 is done) |
+
+The seams:
+
+```text
+cache alias            config/caches.py, selected by CARE_CACHE_BACKEND
+rate limit wrapper     config/ratelimit.py
+recent views service   care/emr/utils/recent_views.py (PostgreSQL, RF1)
+async dispatcher       ADR-0003 task backend selection
+```
+
+**What still requires Redis, and what no longer does.** This supersedes the
+earlier roll-ups in §5 and §7, which describe the pre-ES-04 repository:
+
+| Responsibility | Requires Redis today | Disposition |
+| --- | --- | --- |
+| rate limiting | **yes**, every profile | RF2 — provider-neutral limiter with PostgreSQL atomic counters |
+| Celery broker | only when `CARE_TASK_BACKEND=celery` | already selectable (ADR-0003) |
+| `default` cache | only when `CARE_CACHE_BACKEND=redis` | already selectable (ADR-0004) |
+| `recent_views` | no | `emr.UserValueSetRecentView` (RF1) |
+| distributed locking | no | PostgreSQL advisory locks (ADR-0005 / ES-05) |
+| pattern invalidation | no | explicit key registry (ES-04) |
+| initialization | no | verified with an unreachable Redis |
+
+RF2 belongs to no current phase — not ES-04, ES-05, ES-06 or ES-07. It is future
+modernization work and is not designed in this inventory. RF1 was executed as a
+focused modernization of the recent-views capability and is closed.
+
+So: Redis-free is **not impossible**, and it is **not already implemented**. One
+bounded capability stands between the current state and that profile, and the
+seams above are what keep it a change to that capability rather than to the
+application.
 
 ---
 
@@ -313,6 +382,14 @@ connection is created once per process.
 **verified** `get_redis_connection` is imported from `django_redis` at
 `valueset.py:5`. This import fails at module load if `django_redis` is absent, so
 it is a hard package dependency, not just a runtime one.
+
+> **Disposition (RF1, 2026-08-09).** Every row in the table above is gone. ES-04
+> moved this code to `care/emr/utils/recent_views.py` and onto a `recent_views`
+> alias; RF1 then took the "explicit PostgreSQL model" option assessed as viable
+> here and built it — `emr.UserValueSetRecentView`, migration
+> `emr/0081_recent_views_postgres`. No `get_redis_connection`, no list commands,
+> and no `django_redis` import remains on this path, asserted statically by
+> `care/emr/tests/test_recent_views.py::NoRedisImportTests`.
 
 ### 4.4 Pattern-based invalidation
 
@@ -582,6 +659,11 @@ Test-file cache calls are excluded and listed in §6.
 ---
 
 ## 7. Assessment against the "keep Redis optional" goal
+
+> **Phase 0 baseline, superseded.** Every blocker below is resolved: 1, 2, 4 and
+> 5 by ES-04/ES-05, and 3 by RF1, which made the schema addition it called for.
+> Read §0 and "Redis compatibility, portability and the Redis-free target" for
+> the current position. This section is preserved as written.
 
 **verified blockers**, in the order they must be resolved:
 

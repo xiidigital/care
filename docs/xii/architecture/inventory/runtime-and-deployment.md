@@ -836,10 +836,20 @@ Two aliases are **not** selected by it and remain Redis in every profile —
 `REDIS_URL` rather than `REDIS_CACHE_URL`, and both set `IGNORE_EXCEPTIONS` to
 false so a failure cannot be read as success.
 
+**Superseded since.** Neither alias exists any more. ES-05 replaced cache locking
+with PostgreSQL advisory locks, removing `locks`; RF1 replaced the recent-views
+lists with `emr.UserValueSetRecentView`, removing `recent_views` along with the
+`build_redis_only_cache` helper that built both. A `ratelimit` alias was added by
+the ES-04/L1 follow-up and is Redis in every profile, with
+`IGNORE_EXCEPTIONS: True` so an outage fails closed to captcha rather than to a
+500. `ratelimit` is therefore the only Redis-only alias; its architectural
+direction is roadmap item RF2 in `unresolved-items.md` Part RF.
+
 **verified end to end.** With Redis stopped and `CARE_CACHE_BACKEND=postgres`, a
-cache round trip succeeds and cache health reports 200; acquiring a lock raises
-`ConnectionError`. Redis is optional for ordinary caching and required for those
-two responsibilities — the runtime says so rather than degrading quietly.
+cache round trip succeeds and cache health reports 200. Re-verified for RF1 with
+the Redis container stopped: the recent-views suite is green and the recent-views
+endpoints serve normally. Redis is optional for ordinary caching and required
+only for rate limiting — the runtime says so rather than degrading quietly.
 
 ### 14.2 Initialization gained a step
 
@@ -963,10 +973,18 @@ exactly as before.
 and `CARE_TASK_BACKEND=cloud_tasks`: the whole sequence succeeds and the process
 exits 0. Nothing in initialization opens a Redis connection.
 
-**Unchanged, and honestly recorded:** the `recent_views` cache alias is Redis in
-every configuration. It backs specific API endpoints rather than process
-startup, so its absence degrades those endpoints instead of preventing the API
-from serving. It is no longer treated as a reason to block startup.
+**Honestly recorded:** since the ES-04/L1 follow-up the `ratelimit` alias is
+Redis in every configuration. It backs request handling rather than process
+startup, so its absence degrades the affected endpoints instead of preventing
+the API from serving. It is not a reason to block startup.
+
+The `recent_views` alias was in the same position until RF1 replaced it with a
+PostgreSQL model. Those endpoints now serve with no Redis at all.
+
+Startup is therefore Redis-conditional today, and the API's *capability* surface
+is down to one item. Removing that last dependency is roadmap work — RF2 for
+rate limiting, in `unresolved-items.md` Part RF, and not part of any current
+phase. A Redis-free deployment profile is a future option, not a current one.
 
 ### 15.4 Route isolation
 

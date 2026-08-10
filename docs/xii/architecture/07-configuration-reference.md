@@ -69,9 +69,14 @@ Examples:
 ```text
 CARE_TASK_BACKEND=cloud_tasks
 CARE_CACHE_BACKEND=postgres
-CARE_RATE_LIMIT_BACKEND=postgres
 CARE_TRANSIENT_STATE_BACKEND=postgres
 ```
+
+Note that rate limiting has no such variable **today**. It is Redis-backed in
+every profile, for the reason given in §26.1, and a selection variable with one
+legal value would only mislead. It gains one when roadmap item RF2
+(`inventory/unresolved-items.md` Part RF) delivers a second legal value; until
+then, no such variable is offered.
 
 The application SHALL NOT infer the entire runtime from variables such as:
 
@@ -1537,18 +1542,32 @@ explicitly.
 ## 22.2 What this variable does *not* select
 
 **Implemented, and important.** `CARE_CACHE_BACKEND` selects the `default` cache
-only. Two other aliases exist and are always Redis:
+only. One other alias exists and is Redis in every profile:
 
 ```text
-locks          care/utils/lock.py            SET ... NX
-recent_views   care/emr/utils/recent_views.py  LPUSH / LTRIM / LREM
+ratelimit      config/caches.py                 atomic INCR
 ```
 
-Both use Redis commands with no portable equivalent, both read `REDIS_URL`
-rather than `REDIS_CACHE_URL`, and both set `IGNORE_EXCEPTIONS` to false so a
-failure cannot read as success. Selecting `postgres` therefore makes Redis
-optional **for ordinary caching**, not for CARE as a whole. ADR-0005 / ES-05
-owns replacing the lock.
+It needs a Redis guarantee with no portable equivalent through Django's cache
+API, and it falls back to `REDIS_URL` rather than reading `REDIS_CACHE_URL`. It
+sets `IGNORE_EXCEPTIONS` to true so an outage fails closed to captcha rather
+than to a 500 on the login path (§26.4).
+
+Selecting `postgres` therefore makes Redis optional **for ordinary caching**,
+not for CARE as a whole.
+
+**Corrected 2026-08-09.** This section previously listed a `locks` alias and a
+`recent_views` alias. Locking has not used the cache since ES-05 — it is a
+PostgreSQL transaction-scoped advisory lock. Recent views has not used the cache
+since RF1 — it is `emr.UserValueSetRecentView`, read and written through the
+ORM, with no backend selector and no Redis fallback. Both aliases are removed,
+as is the `build_redis_only_cache` helper that built them. The `ratelimit` alias
+was added by the ES-04/L1 follow-up.
+
+That one alias is the entire distance between the current state and a Redis-free
+profile. Its architectural direction is roadmap item RF2 in
+`inventory/unresolved-items.md`, Part RF. It is not implemented and does not
+belong to a current phase.
 
 ---
 
@@ -1692,7 +1711,8 @@ ImproperlyConfigured
 
 The fallback is what keeps the existing local Docker Compose profile working
 without anyone adding a new variable. `REDIS_URL` is retained because Celery and
-the `locks` / `recent_views` aliases read it.
+the `ratelimit` alias read it. (It was also read by the `locks` and
+`recent_views` aliases; both are gone — ES-05 and RF1.)
 
 Provider-neutral by design: Upstash, Memorystore or a local container are all
 selected by URL. There is no `USE_UPSTASH` or `USE_MEMORYSTORE` switch.
@@ -1733,8 +1753,12 @@ correctness property of each consumer and not an operational preference:
 | Alias | `IGNORE_EXCEPTIONS` | Why |
 | --- | --- | --- |
 | `default` | `true` | Performance cache degrades to a miss on a Redis outage. |
-| `locks` | `false` | A swallowed exception would turn a failed acquisition into an apparent success. |
-| `recent_views` | `false` | A swallowed exception would silently drop writes. |
+| `ratelimit` | `true` | An unknown count is reported as `should_limit`, so the outage fails closed to captcha rather than to a 500 (§26.4). |
+
+The `locks` row was removed on 2026-08-09: ES-05 replaced cache locking with a
+PostgreSQL advisory lock and the alias no longer exists. The `recent_views` row
+went the same day: RF1 moved recent views to a PostgreSQL model, so there is no
+Redis exception left to ignore or propagate.
 
 **Known consequence, recorded rather than fixed.** The JWT denylist at
 `config/authentication.py:21` reads the `default` cache, so under a Redis outage
@@ -1749,34 +1773,71 @@ or a dedicated non-cache backend is preferred.
 
 # 26. Rate-Limit Backend Selection
 
-## 26.1 `CARE_RATE_LIMIT_BACKEND`
+## 26.1 `CARE_RATE_LIMIT_BACKEND` — not implemented, and deliberately not
 
-Required.
+**This variable does not exist.** It was specified here anticipating a choice
+between a PostgreSQL and a Redis rate-limit store. Only one of those two values
+can be implemented correctly *with the current limiter*, so a selection variable
+with a single legal value would be a knob that only ever misleads.
 
-Supported values:
+Rate limiting is **Redis-backed in every profile today**, through a dedicated
+cache alias. There is nothing to select.
 
-```text
-postgres
-redis
-```
+**Why `postgres` cannot be offered today.** `django-ratelimit` counts with
+`cache.add()` then `cache.incr()` and requires the increment to be atomic.
+Django's `DatabaseCache` does not implement `incr` at all — it inherits
+`BaseCache.incr`, a `get()` followed by a `set()` with no row lock. Two
+concurrent requests both read *n* and both write *n+1*, so the limiter
+undercounts and lets traffic through. The library's own `django_ratelimit.E003`
+system check rejects the backend for exactly this reason, and that check is
+correct rather than conservative. See `inventory/unresolved-items.md` K4 for the
+proof and `care/utils/tests/test_ratelimit_backend.py::WhyNotPostgresTests` for
+the tests that assert it.
 
-Recommended Redis-free GCP value:
+LocMem is rejected by the same check as "not a shared cache", which is also
+correct: a per-process counter multiplies the effective limit by the instance
+count.
 
-```text
-CARE_RATE_LIMIT_BACKEND=postgres
-```
+**Read that constraint precisely.** It is a property of `django-ratelimit`
+counting through the Django cache API, not of PostgreSQL. PostgreSQL can
+increment atomically; `DatabaseCache` is what cannot express it. A
+provider-neutral limiter that uses a PostgreSQL atomic counter directly is
+therefore possible, and is recorded as roadmap item **RF2** in
+`inventory/unresolved-items.md`, Part RF. It is not implemented, not designed,
+and not part of ES-04, ES-05, ES-06 or ES-07. Nothing in this reference should
+be read as "a PostgreSQL rate limiter is impossible" — the correct reading is
+"the current limiter cannot provide one".
 
-LocMem SHALL not be a supported globally consistent production backend.
+**Consequence for the managed-cloud composition.** `CARE_CACHE_BACKEND=postgres`
+is fully supported and requires no Redis for ordinary caching. Redis is still
+required for rate limiting. CARE is Redis-**optional** for caching and
+Redis-**required** for rate limiting; it is not Redis-free, and a Redis-free
+profile is future work (RF2), not a currently offered option. Recent views used
+to appear in this sentence; RF1 removed it, and those endpoints now need no
+Redis. What was fixed is the coupling: the rate limiter used to read the
+`default` cache, so the ADR-0004 cache choice decided whether any management
+command could run at all (`unresolved-items.md` L1). It now reads its own alias,
+and the two choices are independent.
+
+**None of this discourages Redis.** A deployment that already operates a
+Redis-compatible service is running the supported composition with the least
+engineering effort and the best limiter performance, and RF2 would not change
+that — it would add a second supported store, not remove the first.
+
+The alias is configured by `settings.RATELIMIT_USE_CACHE`, which CARE sets to
+`ratelimit`. See §28 for the variables that configure it.
 
 ## 26.2 `CARE_RATE_LIMIT_DEFAULT`
 
-Existing CARE-compatible default MAY be:
+**Implemented under its existing name, `RATE_LIMIT`** (`settings.DJANGO_RATE_LIMIT`).
+
+Default:
 
 ```text
-5/10m
+RATE_LIMIT=5/10m
 ```
 
-The exact syntax SHALL remain compatible with the selected library.
+The syntax is `django-ratelimit`'s; see its rates documentation.
 
 ## 26.3 `DISABLE_RATELIMIT`
 
@@ -1789,61 +1850,74 @@ false
 Disabling rate limiting in production SHALL require an explicit exceptional
 decision.
 
-## 26.4 `CARE_RATE_LIMIT_FAILURE_POLICY`
+## 26.4 `CARE_RATE_LIMIT_FAILURE_POLICY` — not a variable; the policy is fixed
 
-Recommended.
+**No variable.** The policy is **fail closed, with a captcha escape**, and it is
+not configurable — an operator should not be able to turn a security control off
+by misreading a setting name.
 
-Supported conceptual values:
+How it is built, in terms of the library's own settings:
 
-```text
-fail_closed
-fail_open
-controlled_error
-```
+| Setting | Value | Effect |
+| --- | --- | --- |
+| `CACHES["ratelimit"]["OPTIONS"]["IGNORE_EXCEPTIONS"]` | `True` | A Redis outage makes `add()`/`incr()` return `None` instead of raising |
+| `RATELIMIT_FAIL_OPEN` | `False` (set explicitly) | An unknown count reports `should_limit` rather than "under the limit" |
 
-Security-sensitive endpoints SHOULD not silently fail open.
+So when the rate-limit store is unreachable, `config.ratelimit.ratelimit()`
+falls through to captcha validation: a caller who solves the captcha proceeds, a
+caller who does not is refused. This is deliberately *not* `controlled_error`
+(`IGNORE_EXCEPTIONS: False`), which would fail closed as an unhandled 500 on the
+login and password-reset paths — the same outcome, expressed as an outage.
+
+`RATELIMIT_FAIL_OPEN` is set explicitly even though `False` is the library
+default, so that a security decision is visible in the settings file rather than
+inherited silently.
+
+Asserted by `test_ratelimit_backend.py::BackendUnavailableTests`.
 
 ---
 
-# 27. PostgreSQL Rate-Limit Configuration
+# 27. PostgreSQL Rate-Limit Configuration — not applicable today
 
-## 27.1 `CARE_RATE_LIMIT_TABLE`
+**None of these variables exist**, because there is no PostgreSQL rate-limit
+store. `CARE_RATE_LIMIT_TABLE`, `CARE_RATE_LIMIT_RETENTION_SECONDS` and
+`CARE_RATE_LIMIT_CLEANUP_BATCH_SIZE` were specified for a design that §26.1
+explains cannot be implemented safely on top of Django's `DatabaseCache`.
 
-Optional.
+Nothing needs to replace them. Redis expires rate-limit counters itself — each is
+written with a TTL of the rate period plus `django_ratelimit`'s five-second fudge
+— so there are no expired counters to retain, clean up or batch.
 
-Required only if explicit database models or tables are introduced.
+If roadmap item **RF2** (`inventory/unresolved-items.md` Part RF) is ever
+scheduled, a PostgreSQL store would bring retention and cleanup concerns back
+with it, and the variables it needs would be specified by that work rather than
+resurrected from here. This section is not a design placeholder for RF2 and
+these three names are not reserved.
 
-## 27.2 `CARE_RATE_LIMIT_RETENTION_SECONDS`
-
-Optional.
-
-Defines cleanup retention for expired counters.
-
-## 27.3 `CARE_RATE_LIMIT_CLEANUP_BATCH_SIZE`
-
-Optional.
-
-Used by maintenance jobs where applicable.
+Note that `CARE_CACHE_TABLE` (§ on the application cache) is unrelated and does
+still exist: that is the ADR-0004 `default` cache, created by
+`scripts/initialize.sh`.
 
 ---
 
 # 28. Redis Rate-Limit Configuration
 
-Required when:
-
-```text
-CARE_RATE_LIMIT_BACKEND=redis
-```
+Required in every profile today. Rate limiting is Redis-backed regardless of
+`CARE_CACHE_BACKEND` — see §26.1, and RF2 for the direction that would change
+this.
 
 ## 28.1 `REDIS_RATE_LIMIT_URL`
 
-Required secret.
+**Implemented.** Optional in the sense that it falls back to `REDIS_URL`, so the
+existing local compose profile keeps working with no new variable. Set it when
+rate-limit counters should live somewhere other than the Celery Redis; it is
+configurable independently of `REDIS_CACHE_URL`.
 
-It MAY equal `REDIS_CACHE_URL`, but SHALL be configurable independently.
+Treat as a secret: it routinely carries a password, and it is never logged.
 
 ## 28.2 `REDIS_RATE_LIMIT_PREFIX`
 
-Recommended.
+**Implemented.** Defaults to `care-ratelimit`.
 
 Example:
 
@@ -1853,11 +1927,16 @@ care:prod:ratelimit
 
 ## 28.3 `REDIS_RATE_LIMIT_SOCKET_TIMEOUT`
 
-Recommended.
+**Not implemented.** The alias uses `django-redis`'s connection defaults. Add it
+here if an operator ever needs a bound tighter than the default, rather than
+carrying an unimplemented variable in the reference.
 
 ## 28.4 Failure behavior
 
-The configured outage policy SHALL be tested.
+Specified in §26.4 and tested by
+`care/utils/tests/test_ratelimit_backend.py::BackendUnavailableTests`, which
+points the alias at a closed port and asserts that an outage does not raise,
+that it fails closed, and that a valid captcha is still an escape.
 
 ---
 
@@ -2227,7 +2306,9 @@ Recommended when the selected cache is required for normal operation.
 
 SHALL default according to active Redis responsibilities.
 
-It SHALL not be required in a Redis-free profile.
+It SHALL not be required by a profile that has selected no Redis-backed
+responsibility, and it SHALL NOT become required by the future Redis-free
+profile of §44.2.
 
 ## 37.4 `CARE_HEALTH_CELERY_ENABLED`
 
@@ -2400,9 +2481,14 @@ A plugin SHALL not be enabled without confirming compatibility with:
 - GCP settings;
 - Django Storage API;
 - Cloud Tasks or selected task backend;
-- Redis-free operation;
+- operation without a Redis-backed `default` cache, and without a Celery broker;
 - Cloud Run startup;
 - empty-database initialization.
+
+A plugin SHALL NOT assume that a Redis connection is available for its own use,
+and SHALL NOT assume one is absent. CARE's Redis-dependent capabilities are
+named in §26.1 and §22.2; a plugin that needs Redis for something else declares
+that as its own dependency.
 
 Plugin configuration SHALL not be mixed into the core GCP contract without a
 documented reason.
@@ -2430,6 +2516,10 @@ Variables SHALL be injected only where needed where practical.
 
 # 44. Default GCP Profile
 
+**Two valid managed-GCP compositions exist.** They differ only in whether a
+Redis-compatible service is present. §44.1 is the profile below and is available
+now; §44.2 is future work and SHALL NOT be configured yet.
+
 Recommended initial configuration:
 
 ```text
@@ -2442,9 +2532,12 @@ CARE_PROCESS_ROLE=api
 CARE_STORAGE_BACKEND=gcs
 CARE_TASK_BACKEND=cloud_tasks
 CARE_CACHE_BACKEND=postgres
-CARE_RATE_LIMIT_BACKEND=postgres
 CARE_TRANSIENT_STATE_BACKEND=postgres
 CARE_REPORT_PROGRESS_BACKEND=database_model
+
+# Rate limiting is Redis-backed in every profile today (§26.1). Ordinary
+# caching, queueing, locking, recent views and initialization are not.
+REDIS_RATE_LIMIT_URL=rediss://<managed-redis>
 
 GCP_PROJECT_ID=<project>
 GCP_REGION=<region>
@@ -2466,7 +2559,57 @@ CARE_LOG_TASK_PAYLOADS=false
 
 Secrets are injected separately.
 
-This profile SHALL start without any Redis variable.
+## 44.1 Managed GCP with Redis — available now
+
+The profile above. Composition:
+
+```text
+Cloud SQL          durable state and the application cache
+Cloud Storage      files
+Cloud Tasks        asynchronous dispatch
+Redis-compatible   rate limiting
+```
+
+Advantages:
+
+- it is the existing implementation, verified end to end;
+- it requires the least engineering effort;
+- it gives the best rate-limit performance — counters are one server-side atomic
+  command.
+
+A deployment that already operates a Redis-compatible service SHOULD choose this
+composition. Nothing in this reference discourages it, and it may additionally
+select Redis for the `default` cache and for Celery if that suits the operator.
+
+**Corrected 2026-08-09.** This section previously stated that the profile "SHALL
+start without any Redis variable". That contradicted the `REDIS_RATE_LIMIT_URL`
+in the block above it and was wrong. What is true, and verified: the `init` role
+needs no reachable Redis, and the API needs one for rate limiting and recent
+views (§62, `unresolved-items.md` L1).
+
+## 44.2 Managed GCP Redis-free — future
+
+```text
+Cloud SQL          durable state and the application cache
+Cloud Storage      files
+Cloud Tasks        asynchronous dispatch
+no Redis
+```
+
+**This profile does not exist.** It required both roadmap items in
+`inventory/unresolved-items.md`, Part RF. One is now delivered:
+
+- **RF1** — Redis-free recent views, replacing the Redis list operations with a
+  PostgreSQL persistence model. **Done** — `emr.UserValueSetRecentView`;
+- **RF2** — Redis-free rate limiting, replacing `django-ratelimit` with an
+  implementation supporting PostgreSQL atomic counters. **Open.**
+
+RF2 belongs to no current phase and is not designed here. Until it ships, this
+composition SHALL NOT be configured, offered to operators, or used as a cost
+baseline.
+
+It is recorded because it is the intended long-term direction and because the
+architecture is deliberately kept able to reach it — not because it is available.
 
 ---
 
@@ -2481,7 +2624,6 @@ CARE_ENVIRONMENT=dev
 CARE_STORAGE_BACKEND=s3
 CARE_TASK_BACKEND=celery
 CARE_CACHE_BACKEND=redis
-CARE_RATE_LIMIT_BACKEND=redis
 CARE_TRANSIENT_STATE_BACKEND=redis
 
 BUCKET_ENDPOINT=http://minio:9000
@@ -2516,7 +2658,6 @@ Conceptual example:
 ```text
 CARE_TASK_BACKEND=cloud_tasks
 CARE_CACHE_BACKEND=redis
-CARE_RATE_LIMIT_BACKEND=redis
 CARE_TRANSIENT_STATE_BACKEND=redis
 
 REDIS_CACHE_URL=rediss://...
@@ -2540,9 +2681,16 @@ Only if the PostgreSQL queue backend is approved:
 ```text
 CARE_TASK_BACKEND=postgres
 CARE_CACHE_BACKEND=postgres
-CARE_RATE_LIMIT_BACKEND=postgres
 CARE_TRANSIENT_STATE_BACKEND=postgres
+
+REDIS_RATE_LIMIT_URL=rediss://<managed-redis>
 ```
+
+Note that "consolidated PostgreSQL" does not mean Redis-free: rate limiting
+still needs Redis (§26.1). This profile consolidates the queue, cache and
+transient state — not the rate limiter, which is RF2
+(`inventory/unresolved-items.md` Part RF) and is future work. Recent views is
+already PostgreSQL and needs no variable at all (RF1).
 
 This profile requires:
 
@@ -2765,14 +2913,20 @@ At minimum, automated tests SHALL validate:
 
 | Profile | Tasks | Cache | Rate limits | State | Storage |
 |---|---|---|---|---|---|
-| GCP default | Cloud Tasks | PostgreSQL | PostgreSQL | PostgreSQL | GCS |
+| GCP default (§44.1) | Cloud Tasks | PostgreSQL | Redis | PostgreSQL | GCS |
 | GCP Redis | Cloud Tasks | Redis | Redis | Redis | GCS |
 | Local | Celery | Redis | Redis | Redis | MinIO/S3 |
-| GCP LocMem | Cloud Tasks | LocMem | PostgreSQL | PostgreSQL | GCS |
-| Consolidated PostgreSQL | PostgreSQL queue | PostgreSQL | PostgreSQL | PostgreSQL | configured storage |
+| GCP LocMem | Cloud Tasks | LocMem | Redis | PostgreSQL | GCS |
+| Consolidated PostgreSQL | PostgreSQL queue | PostgreSQL | Redis | PostgreSQL | configured storage |
 | Test | fake/eager | Dummy | test backend | test backend | filesystem |
 
 The consolidated profile applies only if implemented.
+
+**Corrected 2026-08-09.** The rate-limit column previously read `PostgreSQL` for
+three profiles. No PostgreSQL rate-limit store exists (§26.1, §27); every profile
+uses Redis. A row for the Redis-free profile of §44.2 is deliberately absent —
+it cannot be tested because it does not exist, and it now arrives with RF2 alone
+(RF1 shipped).
 
 ---
 
@@ -2896,9 +3050,10 @@ DJANGO_DEBUG=false
 CARE_STORAGE_BACKEND=gcs
 CARE_TASK_BACKEND=cloud_tasks
 CARE_CACHE_BACKEND=postgres
-CARE_RATE_LIMIT_BACKEND=postgres
 CARE_TRANSIENT_STATE_BACKEND=postgres
 CARE_REPORT_PROGRESS_BACKEND=database_model
+
+REDIS_RATE_LIMIT_URL=rediss://<managed-redis>
 
 GCP_PROJECT_ID=care-production
 GCP_REGION=us-central1
@@ -2938,9 +3093,10 @@ CARE_PROCESS_ROLE=task_worker
 CARE_STORAGE_BACKEND=gcs
 CARE_TASK_BACKEND=cloud_tasks
 CARE_CACHE_BACKEND=postgres
-CARE_RATE_LIMIT_BACKEND=postgres
 CARE_TRANSIENT_STATE_BACKEND=postgres
 CARE_REPORT_PROGRESS_BACKEND=database_model
+
+REDIS_RATE_LIMIT_URL=rediss://<managed-redis>
 
 CARE_TASK_HANDLER_ENDPOINT_ENABLED=true
 CARE_TASK_LOG_PAYLOAD=false
@@ -2982,12 +3138,19 @@ The initialization job may not require task-dispatch configuration.
 
 The exact settings validation SHALL account for process role.
 
-**ES-06 note.** `CARE_CACHE_BACKEND=postgres` is shown here and in sections 60
-and 61 as the intended managed-cloud selection, and it is currently **blocked**
-for any process that runs a management command: `django_ratelimit`'s `E003`
-system check rejects every non-Redis `default` cache, and `init` runs
-`manage.py` exclusively. See `inventory/unresolved-items.md` item L1. The role
-architecture does not require Redis; this check does.
+**ES-06 note, resolved 2026-08-09.** `CARE_CACHE_BACKEND=postgres` is shown here
+and in sections 60 and 61 as the intended managed-cloud selection. It was
+briefly **blocked** for any process that runs a management command:
+`django_ratelimit`'s `E003` system check rejects every non-Redis `default`
+cache, and `init` runs `manage.py` exclusively. Rate limiting now reads its own
+`ratelimit` alias rather than `default`, so the block is gone — see
+`inventory/unresolved-items.md` item L1.
+
+Note the absence of `REDIS_RATE_LIMIT_URL` in the `init` configuration above. It
+is deliberate and it is safe: `init` rate-limits nothing, the `E003` check reads
+configuration rather than connectivity, and `createcachetable` walks `CACHES`
+touching only `DatabaseCache` aliases. **The `init` role needs no reachable
+Redis**, verified with an unreachable host and a `0` exit status.
 
 ---
 
@@ -2996,7 +3159,16 @@ architecture does not require Redis; this check does.
 Configuration implementation is complete when:
 
 - GCP settings load with explicit validated values;
-- the default GCP profile starts without Redis;
+- the `init` role runs to completion with no reachable Redis;
+- the default GCP profile needs Redis only for the capability named in §26.1
+  and §22.2 — rate limiting — and not for ordinary caching, queueing, storage,
+  locking, recent views or initialization. The original wording here was "starts
+  without Redis"; that is not achievable *with the current rate limiter*,
+  because `django-ratelimit` requires an atomic `INCR` that the Django cache API
+  cannot express portably. It is achievable in principle, and the direction is
+  recorded as RF2 in `inventory/unresolved-items.md` Part RF — future work,
+  outside ES-04 through ES-07, and not a condition of completion here. Recent
+  views left this list with RF1;
 - local Celery, Redis and MinIO remain supported;
 - GCS storage aliases resolve;
 - MinIO aliases resolve locally;

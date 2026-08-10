@@ -185,3 +185,21 @@ That selection belongs to IS-05 after call-site analysis and concurrency tests.
   concurrent invocations of the management command on independent PostgreSQL
   connections cannot enter its protected critical section together
   (`care/security/tests/test_sync_permissions_roles_concurrency.py`).
+
+### Position on Redis (clarification, 2026-08-09)
+
+No decision above changes; this records where locking sits in the wider Redis
+question.
+
+Locking is **not** a Redis dependency and is **not** on the Redis-free critical
+path. The `locks` cache alias, `nx=True` acquisition and `MultipleItemsLock` are
+removed; contention is enforced by `pg_try_advisory_xact_lock`.
+
+This ADR keeps Redis locks as a *permitted* option (see "Redis locks" above) for
+a deployment that has a concrete low-latency requirement and already operates
+Redis. That is compatibility, not a dependency: selecting Redis for locking
+would be a deliberate deployment choice, and the default needs no broker.
+
+The one capability that does still require Redis is rate limiting, tracked as
+roadmap item RF2 in `inventory/unresolved-items.md`, Part RF. Recent views was
+the other; RF1 moved it to PostgreSQL. Neither is a locking concern.

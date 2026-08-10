@@ -33,8 +33,11 @@ The guide assumes:
 - asynchronous work uses Cloud Tasks by default;
 - task execution occurs in a private Cloud Run service;
 - periodic work uses Cloud Scheduler and Cloud Run Jobs;
-- PostgreSQL may provide cache, rate limiting and transient state;
-- Redis-compatible services remain optional;
+- PostgreSQL may provide cache and transient state;
+- rate limiting is Redis-backed in every profile today — a PostgreSQL rate
+  limiter is roadmap item RF2 and does not exist;
+- a Redis-compatible service is optional for caching, queueing, locking,
+  recent views and initialization, and required for rate limiting;
 - infrastructure is managed using Terraform;
 - the same application image supports API, worker and job roles.
 
@@ -827,21 +830,36 @@ service.
 Celery queue-length health is a separate check and is unchanged. The ES-03
 finding that it is meaningless under Cloud Tasks remains open.
 
-## 31.2 Redis is still required for two things
+## 31.2 Redis is still required for one capability
 
 **Implemented, and stated so it is not misread.** Selecting `postgres` makes
-Redis optional **for ordinary caching only**. Two aliases are always Redis:
+Redis optional **for ordinary caching only**. One alias is always Redis,
+regardless of `CARE_CACHE_BACKEND`:
 
 ```text
-locks          distributed locking   ADR-0005 / ES-05
-recent_views   bounded MRU lists     needs LPUSH / LTRIM / LREM
+ratelimit      limiter counters    needs an atomic INCR
 ```
 
 Verified by stopping Redis with `CARE_CACHE_BACKEND=postgres`: cache reads and
-writes succeed and cache health reports 200, while acquiring a lock raises
-`ConnectionError`. That is the intended behaviour — it fails loudly rather than
-appearing to lock. A deployment that needs the endpoints behind those two
-features still needs Redis.
+writes succeed and cache health reports 200. A deployment that serves the API
+still needs a Redis-compatible service for that one capability.
+
+**Corrected 2026-08-09.** This section previously listed `locks`, then
+`recent_views`. Locking has not used Redis since ES-05 — it is a PostgreSQL
+transaction-scoped advisory lock. Recent views has not used Redis since RF1 — it
+is `emr.UserValueSetRecentView`, an ordinary table, with no Redis fallback and
+no backend selector. The `ratelimit` alias was added by the ES-04/L1 follow-up
+and is what remains.
+
+**That one is the whole gap to a Redis-free profile.** Its architectural
+direction is recorded as roadmap item RF2 (provider-neutral rate limiting) in
+`inventory/unresolved-items.md`, Part RF. It is not implemented, does not belong
+to any current phase, and a Redis-free deployment SHALL NOT be offered or
+planned for until it is delivered.
+
+Nothing here discourages Redis. A deployment that already operates a
+Redis-compatible service is running the supported, lowest-effort composition and
+has no reason to change.
 
 ---
 
@@ -1749,20 +1767,39 @@ The user-facing behavior SHALL be explicit.
 
 ---
 
-# 72. Optional Redis Operations
+# 72. Redis Operations
 
-This section applies only when Redis is enabled.
+Operators SHALL know which responsibilities use Redis, and SHALL NOT treat Redis
+as one undifferentiated dependency.
 
-Operators SHALL know which responsibilities use Redis:
+Required in every profile that serves the API:
 
 ```text
-cache
-rate limiting
-transient state
-Celery
+rate limiting     see §31.2 and 07-configuration-reference §26.1
 ```
 
-The application SHALL not treat Redis as one undifferentiated dependency.
+Optional, present only when selected:
+
+```text
+default cache     CARE_CACHE_BACKEND=redis
+Celery broker     CARE_TASK_BACKEND=celery
+transient state   when the Redis transient-state backend is selected
+```
+
+Not Redis at all:
+
+```text
+distributed locking   PostgreSQL advisory locks (ADR-0005)
+recent views          PostgreSQL model (RF1)
+initialization        needs no reachable Redis
+```
+
+A deployment that already operates Redis MAY use it for everything in the first
+two lists; that is a supported composition and the least operational effort.
+Recent views is not on offer even then — RF1 made it PostgreSQL-only. A
+deployment avoiding Redis can remove everything in the optional list today, and
+the required list only after roadmap item RF2
+(`inventory/unresolved-items.md` Part RF).
 
 ---
 
@@ -1816,11 +1853,18 @@ Expected behavior depends on responsibility.
 
 ## Performance cache
 
-May degrade to cache misses.
+May degrade to cache misses. Applies only under `CARE_CACHE_BACKEND=redis`.
 
 ## Rate limiting
 
-Must follow the documented security fallback.
+Must follow the documented security fallback: fail closed with a captcha escape
+(`07-configuration-reference.md` §26.4). Applies in every profile.
+
+## Recent views
+
+Unaffected since RF1. The endpoints read and write PostgreSQL and serve normally
+during a Redis outage. (Before RF1 they failed while the rest of the API served
+normally.)
 
 ## Progress state
 
@@ -1828,7 +1872,12 @@ May temporarily stop showing progress.
 
 ## Celery broker
 
-Task dispatch fails until broker recovery.
+Task dispatch fails until broker recovery. Applies only under
+`CARE_TASK_BACKEND=celery`.
+
+## Locking and initialization
+
+Unaffected. Neither uses Redis.
 
 The outage behavior SHALL be tested before production.
 
@@ -1902,10 +1951,17 @@ Other persistent costs include:
 - retained backups;
 - retained logs;
 - retained images;
-- optional managed Redis;
+- a managed Redis-compatible service, which every API-serving profile currently
+  requires for rate limiting (§31.2);
 - a minimum-instance queue worker if selected.
 
 The system SHALL not be described as entirely scale-to-zero.
+
+**Budget for the Redis line item.** It is not optional today, and a cost model
+that omits it is wrong. Removing it is the practical motivation for roadmap item
+RF2 (`inventory/unresolved-items.md` Part RF), which is future work and SHALL
+NOT be assumed in a current cost plan. RF1 removed recent views from the same
+line item but did not remove the line item.
 
 ---
 
@@ -2467,7 +2523,10 @@ Before first production use:
 - [ ] Migration job succeeds.
 - [ ] Storage upload and download pass through CARE.
 - [ ] PostgreSQL cache works when selected.
-- [ ] Redis is not required by the default profile.
+- [ ] Redis is not required for caching, queueing, locking or initialization in
+      the default profile.
+- [ ] A Redis-compatible service is provisioned for rate limiting and recent
+      views, which every profile still requires (§31.2).
 - [ ] Logs exclude sensitive payloads.
 - [ ] Alerts are configured.
 - [ ] Restore procedure is documented.
@@ -2768,19 +2827,40 @@ Celery Beat process under the deployment settings, for the reason recorded in
 
 ## 112.10 Redis
 
-Redis is not a CARE runtime requirement. It is required by whatever the
-deployment selects:
+Redis is not a *universal* CARE runtime requirement, and it is not optional
+everywhere either. It is required per capability:
 
-| Selection | Needs Redis |
+| Selection or capability | Needs Redis |
 | --- | --- |
+| rate limiting | yes, always — see §31.2, `unresolved-items.md` L1 and RF2 |
 | `CARE_CACHE_BACKEND=redis` | yes, to serve the cache |
 | `CARE_TASK_BACKEND=celery` | yes, as the broker |
-| `recent_views` API endpoints | yes, always — see `unresolved-items.md` L5 |
+| `recent_views` API endpoints | no — PostgreSQL model (RF1) |
 | distributed locking | no — PostgreSQL advisory locks (ADR-0005) |
-| initialization | no |
+| initialization | no — verified with an unreachable Redis |
 | the PostgreSQL cache | no |
 | the HTTP task transport | no |
 
-`scripts/wait_for_redis.sh` waits only when the first two apply, and otherwise
-exits immediately after logging both selections. CARE does not claim to be
-Redis-free while `recent_views` remains Redis-backed.
+`scripts/wait_for_redis.sh` waits only for the two *selection* rows, and
+otherwise exits immediately after logging both selections. The always-row is a
+capability dependency rather than a startup dependency: without Redis the
+rate-limited endpoints fall back to captcha and the process still serves.
+
+**Read this in three parts, because they are different claims.**
+
+*Compatibility.* Redis is fully supported and a first-class choice. Point every
+row above at one Redis-compatible service if you have one — that is the
+supported, lowest-effort, best-performing composition, and nothing here
+discourages it.
+
+*Portability.* CARE does not depend architecturally on Redis. Each row above is
+reached through a seam — the cache alias, the rate limit wrapper, the recent
+views service, the async dispatcher — and no business code knows whether Redis
+exists.
+
+*Redis-free.* A fully Redis-free deployment is a **future** profile, not a
+current one. It needs roadmap item RF2 (provider-neutral rate limiting) in
+`inventory/unresolved-items.md` Part RF, which belongs to no current phase. RF1
+(PostgreSQL recent views) was the other requirement and is delivered. Until RF2
+lands CARE does not claim to be Redis-free — and it is not blocked from becoming
+so.
