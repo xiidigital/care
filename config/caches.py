@@ -163,6 +163,71 @@ def validate_rate_limit_backend(backend: str) -> str:
     return backend
 
 
+def validate_cache_table_isolation(
+    cache_backend: str,
+    rate_limit_backend: str,
+    *,
+    cache_table: str,
+    rate_limit_table: str,
+) -> None:
+    """Refuse a configuration where both DatabaseCache aliases share one table.
+
+    The guard applies to exactly the case where the collision is real: both
+    ``CARE_CACHE_BACKEND`` and ``CARE_RATE_LIMIT_BACKEND`` select PostgreSQL, so
+    both aliases are a ``DatabaseCache`` and both read ``LOCATION`` as a table
+    name. If either alias is Redis, LocMem, Dummy or absent, the matching
+    variable is inert -- ``CARE_CACHE_TABLE`` names nothing under
+    ``CARE_CACHE_BACKEND=redis`` -- and refusing the configuration would reject a
+    deployment in which nothing is shared.
+
+    Sharing the table is not a naming preference; it breaks four things at once:
+
+    * the dedicated rate-limit alias loses the isolation it exists to provide,
+      and ordinary cache entries sit in the security counters' table;
+    * :class:`config.db_routers.RateLimitCacheRouter` distinguishes the two
+      caches by table name and nothing else -- every ``DatabaseCache`` alias
+      shares one model stub and one app label -- so an identical name makes the
+      router match both;
+    * consequently ``default`` cache traffic is routed to
+      :data:`config.db_routers.RATELIMIT_DB_ALIAS`, a connection deliberately
+      running with ``ATOMIC_REQUESTS`` off, which is not where ADR-0004 cache
+      traffic belongs;
+    * ``MAX_ENTRIES`` is per table, so the rate-limit alias's raised cull budget
+      would be spent on ordinary cache entries and a cull could drop live
+      counters.
+
+    Neither table is renamed here. Picking a name on the operator's behalf would
+    silently move data they may already have created, and the two variables are
+    exactly the place to express the intent.
+    """
+    validate_cache_backend(cache_backend)
+    validate_rate_limit_backend(rate_limit_backend)
+
+    if cache_backend != POSTGRES_CACHE_BACKEND:
+        return
+    if rate_limit_backend != POSTGRES_RATE_LIMIT_BACKEND:
+        return
+    if cache_table != rate_limit_table:
+        return
+
+    msg = (
+        f"CARE_CACHE_TABLE and CARE_RATE_LIMIT_TABLE are both {cache_table!r}. "
+        f"CARE_CACHE_BACKEND={POSTGRES_CACHE_BACKEND!r} and "
+        f"CARE_RATE_LIMIT_BACKEND={POSTGRES_RATE_LIMIT_BACKEND!r} put both the "
+        "default cache and the rate-limit counters in a PostgreSQL "
+        "DatabaseCache, and the two tables must be distinct. Sharing one table "
+        "removes the isolation the rate-limit alias exists to provide, makes "
+        "config.db_routers.RateLimitCacheRouter -- which identifies the "
+        "rate-limit cache by table name -- route default cache traffic through "
+        "the rate-limit database alias, and puts ordinary cache entries and "
+        "security counters under a single MAX_ENTRIES cull budget. Set "
+        "CARE_CACHE_TABLE and CARE_RATE_LIMIT_TABLE to different table names "
+        f"(the defaults, {DEFAULT_CACHE_TABLE!r} and "
+        f"{DEFAULT_RATELIMIT_CACHE_TABLE!r}, already are)."
+    )
+    raise ImproperlyConfigured(msg)
+
+
 def rate_limit_semantics(backend: str) -> str | None:
     """The guarantee ``backend`` provides, for the startup summary.
 

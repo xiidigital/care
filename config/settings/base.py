@@ -27,6 +27,7 @@ from config.caches import (
     ratelimit_installed_apps,
     ratelimit_silenced_checks,
     validate_cache_backend,
+    validate_cache_table_isolation,
     validate_rate_limit_backend,
 )
 from config.db_routers import RATELIMIT_DB_ALIAS
@@ -168,6 +169,18 @@ CARE_RATE_LIMIT_CACHE_TIMEOUT = env.int(
 )
 CARE_RATE_LIMIT_MAX_ENTRIES = env.int(
     "CARE_RATE_LIMIT_MAX_ENTRIES", default=DEFAULT_RATELIMIT_MAX_ENTRIES
+)
+
+# Both tables are DatabaseCache LOCATIONs when both selections name PostgreSQL,
+# and a shared name would silently merge two responsibilities: the router below
+# tells the caches apart by table name alone, so `default` cache traffic would
+# start riding the rate-limit connection. Refused at import rather than
+# discovered later. See config/caches.validate_cache_table_isolation.
+validate_cache_table_isolation(
+    CARE_CACHE_BACKEND,
+    CARE_RATE_LIMIT_BACKEND,
+    cache_table=CARE_CACHE_TABLE,
+    rate_limit_table=CARE_RATE_LIMIT_TABLE,
 )
 
 # The PostgreSQL counter needs a connection that is not the request's.

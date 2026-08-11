@@ -55,12 +55,16 @@ from django_ratelimit.core import _get_window, _make_cache_key
 
 from config.caches import (
     BEST_EFFORT_SEMANTICS,
+    DEFAULT_CACHE_TABLE,
+    DEFAULT_RATELIMIT_CACHE_TABLE,
     DISABLED_RATE_LIMIT_BACKEND,
+    POSTGRES_CACHE_BACKEND,
     POSTGRES_RATE_LIMIT_BACKEND,
     RATELIMIT_CACHE_ALIAS,
     RATELIMIT_NON_ATOMIC_CHECK,
     REDIS_RATE_LIMIT_BACKEND,
     STRICT_ATOMIC_SEMANTICS,
+    SUPPORTED_CACHE_BACKENDS,
     SUPPORTED_RATE_LIMIT_BACKENDS,
     build_default_cache,
     build_ratelimit_cache,
@@ -68,6 +72,7 @@ from config.caches import (
     rate_limit_semantics,
     ratelimit_installed_apps,
     ratelimit_silenced_checks,
+    validate_cache_table_isolation,
     validate_rate_limit_backend,
 )
 from config.db_routers import RATELIMIT_DB_ALIAS
@@ -1444,3 +1449,200 @@ class DatabaseErrorIsNotSwallowedElsewhereTests(SimpleTestCase):
             self.assertRaises(DatabaseError),
         ):
             ratelimit(auth_request(), "rf2-redis-db-error", ["ac"], RATE)
+
+
+def run_settings_process(argv, *, settings_module="config.settings.local", **extra_env):
+    """Run `argv` in a fresh process under `settings_module` and `extra_env`.
+
+    Settings are read once per process, and what these tests ask about happens
+    *during* that read -- a collision aborting the import, and the test profile
+    ignoring the environment it was started in. Neither survives
+    `override_settings`, so a real process is the only honest instrument.
+    """
+    import os
+    import subprocess
+    import sys
+
+    from django.conf import settings
+
+    env = {
+        **os.environ,
+        "DJANGO_SETTINGS_MODULE": settings_module,
+        **extra_env,
+    }
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, *argv],
+        cwd=str(settings.BASE_DIR),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    return result, result.stdout + result.stderr
+
+
+class CacheTableIsolationTests(SimpleTestCase):
+    """
+    The two PostgreSQL cache tables must not be the same table.
+
+    `CARE_CACHE_TABLE` and `CARE_RATE_LIMIT_TABLE` are independent variables, so
+    nothing stopped an operator from pointing both at one name. Under
+    `CARE_CACHE_BACKEND=postgres` + `CARE_RATE_LIMIT_BACKEND=postgres` that is
+    not a naming preference:
+
+        both aliases are DatabaseCache, both read LOCATION as a table name
+                |
+        RateLimitCacheRouter tells them apart by table name and nothing else
+                |
+        the router matches the *default* cache too
+                |
+        ordinary cache traffic is routed to the rate-limit connection,
+        and both responsibilities share one MAX_ENTRIES cull budget
+
+    So it is refused at settings-import time. The scope of the refusal is as
+    narrow as the defect: when either alias is not a DatabaseCache, the
+    corresponding table variable names nothing, and a configuration in which
+    nothing is actually shared must keep working.
+    """
+
+    def isolate(self, cache_backend, rate_limit_backend, cache_table, rate_limit_table):
+        return validate_cache_table_isolation(
+            cache_backend,
+            rate_limit_backend,
+            cache_table=cache_table,
+            rate_limit_table=rate_limit_table,
+        )
+
+    def test_distinct_table_names_are_accepted(self):
+        # The ordinary Redis-free deployment: both caches on PostgreSQL, each
+        # with its own table. This is the configuration RF2 exists to enable and
+        # the guard must stay out of its way.
+        self.assertIsNone(
+            self.isolate(
+                POSTGRES_CACHE_BACKEND,
+                POSTGRES_RATE_LIMIT_BACKEND,
+                "care_cache",
+                "care_ratelimit_cache",
+            )
+        )
+
+    def test_a_collision_between_two_postgres_caches_is_refused(self):
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            self.isolate(
+                POSTGRES_CACHE_BACKEND,
+                POSTGRES_RATE_LIMIT_BACKEND,
+                "care_cache",
+                "care_cache",
+            )
+        message = str(ctx.exception)
+        # Both settings named, so the operator does not have to work out which
+        # of the two to change, and the colliding value quoted back.
+        self.assertIn("CARE_CACHE_TABLE", message)
+        self.assertIn("CARE_RATE_LIMIT_TABLE", message)
+        self.assertIn("care_cache", message)
+        self.assertIn("distinct", message)
+
+    def test_the_collision_is_refused_whatever_the_shared_name_is(self):
+        # Not a check against one hardcoded default. Any shared name collides.
+        with self.assertRaises(ImproperlyConfigured):
+            self.isolate(
+                POSTGRES_CACHE_BACKEND,
+                POSTGRES_RATE_LIMIT_BACKEND,
+                "shared_cache_table",
+                "shared_cache_table",
+            )
+
+    def test_a_shared_name_is_inert_when_only_rate_limiting_is_postgres(self):
+        # `CARE_CACHE_TABLE` keeps its value when `CARE_CACHE_BACKEND` selects
+        # something else -- an operator who tried `postgres` caching and moved
+        # back to Redis still has the variable exported. Nothing is shared in
+        # that state: the default alias is a RedisCache and owns no table, the
+        # router finds one DatabaseCache to match, and the cull budget is not
+        # divided. Refusing here would reject a working deployment over a
+        # variable that names nothing, so the guard stays scoped to the case
+        # where both aliases really are DatabaseCache.
+        for cache_backend in SUPPORTED_CACHE_BACKENDS:
+            if cache_backend == POSTGRES_CACHE_BACKEND:
+                continue
+            with self.subTest(cache_backend=cache_backend):
+                self.assertIsNone(
+                    self.isolate(
+                        cache_backend,
+                        POSTGRES_RATE_LIMIT_BACKEND,
+                        "care_cache",
+                        "care_cache",
+                    )
+                )
+
+    def test_a_shared_name_is_inert_when_rate_limiting_is_not_postgres(self):
+        # The mirror image, including `disabled`, which configures no
+        # rate-limit alias at all and therefore no second table.
+        for rate_limit_backend in (
+            REDIS_RATE_LIMIT_BACKEND,
+            DISABLED_RATE_LIMIT_BACKEND,
+        ):
+            with self.subTest(rate_limit_backend=rate_limit_backend):
+                self.assertIsNone(
+                    self.isolate(
+                        POSTGRES_CACHE_BACKEND,
+                        rate_limit_backend,
+                        "care_cache",
+                        "care_cache",
+                    )
+                )
+
+    def test_the_stock_configuration_passes_in_every_combination(self):
+        # Nobody who sets neither variable can trip this. The two defaults are
+        # distinct by construction, and that is asserted rather than assumed --
+        # a later edit that unified them would otherwise make the shipped
+        # Redis-free profile fail to start.
+        self.assertNotEqual(DEFAULT_CACHE_TABLE, DEFAULT_RATELIMIT_CACHE_TABLE)
+        for cache_backend in SUPPORTED_CACHE_BACKENDS:
+            for rate_limit_backend in SUPPORTED_RATE_LIMIT_BACKENDS:
+                with self.subTest(cache=cache_backend, ratelimit=rate_limit_backend):
+                    self.assertIsNone(
+                        self.isolate(
+                            cache_backend,
+                            rate_limit_backend,
+                            DEFAULT_CACHE_TABLE,
+                            DEFAULT_RATELIMIT_CACHE_TABLE,
+                        )
+                    )
+
+    def test_the_settings_module_ships_the_stock_configuration(self):
+        # The guard is only worth having if it is actually wired into settings
+        # import, and the defaults it is wired to are the ones above.
+        from config.settings import base
+
+        self.assertEqual(base.CARE_CACHE_TABLE, DEFAULT_CACHE_TABLE)
+        self.assertEqual(base.CARE_RATE_LIMIT_TABLE, DEFAULT_RATELIMIT_CACHE_TABLE)
+
+    def test_a_collision_stops_the_process_rather_than_being_reported_later(self):
+        # Fail fast, demonstrated in a real process. The validation runs while
+        # settings are imported, so `manage.py check` never gets as far as the
+        # check registry -- which is the point, because by the time a request
+        # arrives the router has already mixed the two caches.
+        result, output = run_settings_process(
+            ["manage.py", "check"],
+            CARE_CACHE_BACKEND=POSTGRES_CACHE_BACKEND,
+            CARE_RATE_LIMIT_BACKEND=POSTGRES_RATE_LIMIT_BACKEND,
+            CARE_CACHE_TABLE="care_shared_table",
+            CARE_RATE_LIMIT_TABLE="care_shared_table",
+        )
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("ImproperlyConfigured", output)
+        self.assertIn("CARE_CACHE_TABLE", output)
+        self.assertIn("CARE_RATE_LIMIT_TABLE", output)
+
+    def test_distinct_tables_start_the_same_process_cleanly(self):
+        # The control. Without it the test above would pass just as well if
+        # postgres + postgres were broken for some unrelated reason.
+        result, output = run_settings_process(
+            ["manage.py", "check"],
+            CARE_CACHE_BACKEND=POSTGRES_CACHE_BACKEND,
+            CARE_RATE_LIMIT_BACKEND=POSTGRES_RATE_LIMIT_BACKEND,
+            CARE_CACHE_TABLE="care_cache",
+            CARE_RATE_LIMIT_TABLE="care_ratelimit_cache",
+        )
+        self.assertEqual(result.returncode, 0, output)
