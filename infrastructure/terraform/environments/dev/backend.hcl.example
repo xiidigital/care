@@ -1,0 +1,9 @@
+# Copy to backend.hcl and set the bucket the bootstrap root created.
+#
+#   tofu init -backend-config=backend.hcl
+#
+# backend.hcl is gitignored because the bucket name embeds a project id.
+# The state prefix is not here: it is fixed in main.tf so that dev state
+# cannot be pointed at another environment from the command line.
+
+bucket = "care-tfstate-YOUR-PROJECT-ID"

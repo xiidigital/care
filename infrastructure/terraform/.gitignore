@@ -18,6 +18,10 @@ crash.*.log
 *.tfvars.json
 !*.tfvars.example
 
+# Backend configuration. Not secret, but it embeds a project id, and ES-07
+# section 8 forbids committing one. Only backend.hcl.example is tracked.
+backend.hcl
+
 # Saved plans. A plan file contains every value the plan touched, including
 # ones marked sensitive.
 *.tfplan

@@ -1,0 +1,32 @@
+# Copy to terraform.tfvars and fill in.
+#
+# No secret belongs here. Values live in Secret Manager, written by
+# infrastructure/scripts/provision-secrets.sh.
+
+project_id = "your-staging-gcp-project-id"
+
+region = "us-central1"
+
+image = "us-central1-docker.pkg.dev/your-staging-gcp-project-id/care-staging/care@sha256:REPLACE_ME"
+
+# Sizing. Defaults are deliberately modest; raise them from observed load
+# rather than in anticipation of it.
+# sql_tier         = "db-g1-small"
+# sql_disk_size_gb = 20
+
+# api_max_instances               = 4
+# worker_max_instances            = 3
+# tasks_max_concurrent_dispatches = 8
+
+django_allowed_hosts = ["care-staging.example.org"]
+csrf_trusted_origins = ["https://care-staging.example.org"]
+cors_allowed_origins = ["https://care-staging.example.org"]
+current_domain       = "care-staging.example.org"
+
+# alerts_enabled = true
+# alert_notification_channels = ["projects/your-staging-gcp-project-id/notificationChannels/1234567890"]
+
+# optional_secrets = {
+#   EMAIL_PASSWORD = ["api", "worker"]
+#   SENTRY_DSN     = ["api", "worker", "init"]
+# }

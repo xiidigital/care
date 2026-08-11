@@ -1,0 +1,62 @@
+# Copy to terraform.tfvars and decide every value below.
+#
+# Every sizing variable in this root is required and has no default. That is
+# deliberate: ES-07 section 86 forbids guessing production capacity, and a
+# default would be a guess that nobody revisits. `tofu plan` fails until each is
+# set, which is what makes the decision explicit.
+#
+# Decide them from staging measurements, not from this file.
+#
+# No secret belongs here. Values live in Secret Manager, written by
+# infrastructure/scripts/provision-secrets.sh.
+
+project_id = "your-prod-gcp-project-id"
+region     = "us-central1"
+
+# A digest, not a tag. The root rejects a tag: a moving tag makes it impossible
+# to say afterwards which build was serving.
+image = "us-central1-docker.pkg.dev/your-prod-gcp-project-id/care-prod/care@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+# --- Cloud SQL: REQUIRED DECISIONS -----------------------------------------
+# The largest standing cost in the environment.
+sql_tier                  = "db-n1-standard-2"
+sql_disk_size_gb          = 100
+sql_availability_type     = "REGIONAL" # high availability; roughly doubles instance cost
+sql_backup_retained_count = 30
+
+# --- Cloud Run: REQUIRED DECISIONS -----------------------------------------
+# api_min_instances above zero removes cold starts and costs continuously.
+api_min_instances    = 1
+api_max_instances    = 10
+api_concurrency      = 40
+api_gunicorn_workers = 2
+
+worker_max_instances    = 5
+worker_concurrency      = 4
+worker_gunicorn_workers = 2
+
+# Worst-case Cloud SQL connections implied by the four numbers above:
+#   API    10 x 2 = 20
+#   worker  5 x 2 = 10
+#   total          30
+# Confirm the chosen sql_tier permits that plus headroom for maintenance and
+# for `gcloud sql connect`. The database_connection_budget output recomputes it.
+
+# --- Cloud Tasks: REQUIRED DECISIONS ---------------------------------------
+tasks_max_dispatches_per_second = 20
+tasks_max_concurrent_dispatches = 20 # must stay within worker_max_instances x worker_concurrency
+
+# --- Application -----------------------------------------------------------
+# Required: the .run.app wildcard alone is not a production ALLOWED_HOSTS.
+django_allowed_hosts = ["care.example.org"]
+csrf_trusted_origins = ["https://care.example.org"]
+cors_allowed_origins = ["https://care.example.org"]
+current_domain       = "care.example.org"
+
+# Required: alert policies that notify nobody are not monitoring.
+alert_notification_channels = ["projects/your-prod-gcp-project-id/notificationChannels/REPLACE_ME"]
+
+# optional_secrets = {
+#   EMAIL_PASSWORD = ["api", "worker"]
+#   SENTRY_DSN     = ["api", "worker", "init"]
+# }

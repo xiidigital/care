@@ -1,0 +1,32 @@
+# Copy to terraform.tfvars and fill in.
+#
+# Nothing secret belongs in this file. Secrets live in Secret Manager and are
+# written by infrastructure/scripts/provision-secrets.sh; OpenTofu never sees a
+# value (ES-07 section 70).
+
+project_id = "your-gcp-project-id"
+
+region = "us-central1"
+
+# The published CARE image. Prefer a digest — a moving tag makes it impossible
+# to say afterwards what was deployed.
+#
+#   us-central1-docker.pkg.dev/<project>/care-dev/care@sha256:<digest>
+image = "us-central1-docker.pkg.dev/your-gcp-project-id/care-dev/care:REPLACE_ME"
+
+# Cloud Run's generated hostname is covered by the .run.app suffix the module
+# adds. List custom domains only.
+# django_allowed_hosts = ["care-dev.example.org"]
+
+# Browser origins that may call the API.
+# cors_allowed_origins = ["https://care-dev.example.org"]
+# csrf_trusted_origins = ["https://care-dev.example.org"]
+
+# Frontend host used in outbound email links.
+# current_domain = "care-dev.example.org"
+
+# Extra secrets to create, as env var name => roles that may read it.
+# optional_secrets = {
+#   EMAIL_PASSWORD = ["api", "worker"]
+#   SENTRY_DSN     = ["api", "worker", "init"]
+# }
