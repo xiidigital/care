@@ -34,10 +34,11 @@ The guide assumes:
 - task execution occurs in a private Cloud Run service;
 - periodic work uses Cloud Scheduler and Cloud Run Jobs;
 - PostgreSQL may provide cache and transient state;
-- rate limiting is Redis-backed in every profile today — a PostgreSQL rate
-  limiter is roadmap item RF2 and does not exist;
-- a Redis-compatible service is optional for caching, queueing, locking,
-  recent views and initialization, and required for rate limiting;
+- rate limiting is configurable — `redis` for strict atomic limits, `postgres`
+  for best-effort limits with no Redis, `disabled` for none (RF2);
+- a Redis-compatible service is optional throughout, and required only where a
+  Redis-backed capability is explicitly selected — the Celery broker, or strict
+  rate limiting;
 - infrastructure is managed using Terraform;
 - the same application image supports API, worker and job roles.
 
@@ -66,6 +67,66 @@ Cost reductions SHALL not disable:
 - required logs;
 - recovery procedures;
 - application health checks.
+
+---
+
+# 2A. Managed-Cloud Backend Profiles
+
+Two profiles are supported for a managed-cloud deployment. Both are current
+options; neither is a migration step toward the other. There is no
+`CARE_RUNTIME_PROFILE` variable and none is planned — a deployment is a
+composition of independently selected backends (ADR-0006), and these are two
+compositions worth naming.
+
+## 2A.1 Redis-free
+
+```text
+CARE_CACHE_BACKEND=postgres
+CARE_RATE_LIMIT_BACKEND=postgres
+CARE_TASK_BACKEND=cloud_tasks
+```
+
+No Redis-compatible service is provisioned or contacted. Recent views and
+distributed locking are PostgreSQL-backed in every profile and need no
+selection. Cache tables come from the existing `createcachetable` step in
+`scripts/initialize.sh`.
+
+**The trade, stated plainly.** Rate limiting is **best-effort**. PostgreSQL
+counter increments are not atomic, so a burst of concurrent requests is
+undercounted and more requests are admitted than the configured limit allows.
+Sequential traffic is counted exactly. See §33 and
+`07-configuration-reference.md` §26.1.2.
+
+Choose this when the cost and operational surface of a managed Redis is not
+justified, and rate limiting is one control among several rather than the
+primary defence.
+
+## 2A.2 Redis-enabled
+
+```text
+CARE_CACHE_BACKEND=redis
+CARE_RATE_LIMIT_BACKEND=redis
+```
+
+Rate limiting is **strict**: Redis `INCR` is a single server-side command, so
+concurrent requests cannot lose an increment and the configured rate is the
+rate. `CARE_TASK_BACKEND` is an independent choice — `celery` for a Redis
+broker, `cloud_tasks` for the managed queue.
+
+Choose this when limits must hold under concurrent bursts, or where a Redis
+service already exists and is already operated.
+
+## 2A.3 The selections are independent
+
+`CARE_CACHE_BACKEND` and `CARE_RATE_LIMIT_BACKEND` are never inferred from each
+other. Mixed compositions are valid and are not discouraged: PostgreSQL caching
+with strict Redis counters, or Redis caching with a deliberate refusal to depend
+on Redis for a security control. `07-configuration-reference.md` §26.1.4 lists
+the combinations.
+
+A third rate-limit value, `disabled`, turns CARE application rate limiting off.
+It is not part of either profile and requires an explicit exceptional decision
+in production (§26.3).
 
 ---
 
@@ -830,36 +891,48 @@ service.
 Celery queue-length health is a separate check and is unchanged. The ES-03
 finding that it is meaningless under Cloud Tasks remains open.
 
-## 31.2 Redis is still required for one capability
+## 31.2 Redis is optional, and required only where selected
 
-**Implemented, and stated so it is not misread.** Selecting `postgres` makes
-Redis optional **for ordinary caching only**. One alias is always Redis,
-regardless of `CARE_CACHE_BACKEND`:
+**Implemented, and stated so it is not misread.** As of RF2 (2026-08-11) nothing
+in `CACHES` requires Redis. Both aliases are selected:
 
 ```text
-ratelimit      limiter counters    needs an atomic INCR
+default        ordinary cache      CARE_CACHE_BACKEND
+ratelimit      limiter counters    CARE_RATE_LIMIT_BACKEND
 ```
 
-Verified by stopping Redis with `CARE_CACHE_BACKEND=postgres`: cache reads and
-writes succeed and cache health reports 200. A deployment that serves the API
-still needs a Redis-compatible service for that one capability.
+Verified with Redis genuinely unreachable and both selectors on `postgres`:
+system checks pass, `scripts/initialize.sh` completes, the API starts, `/health/`
+returns 200, and login rate limiting enforces its limit and returns 429 with the
+captcha challenge — with no Redis connection attempted on any of those paths.
 
-**Corrected 2026-08-09.** This section previously listed `locks`, then
-`recent_views`. Locking has not used Redis since ES-05 — it is a PostgreSQL
+**Two things still require Redis when selected, and only then:**
+
+| Capability | Selector | Note |
+| --- | --- | --- |
+| Celery broker | `CARE_TASK_BACKEND=celery` | RF2 did not touch this. A Redis-free deployment runs `cloud_tasks` |
+| Strict rate limiting | `CARE_RATE_LIMIT_BACKEND=redis` | The only mode with atomic counters |
+
+**The PostgreSQL rate-limit mode is deliberately weaker.** It counts exactly
+when requests arrive one at a time, and undercounts a concurrent burst, so more
+requests pass than the configured limit allows. That is documented in
+`07-configuration-reference.md` §26.1.2 and demonstrated in the test suite. It
+is a legitimate trade for a deployment that does not want a Redis line item; it
+is not equivalent to Redis, and it should not be presented as such to whoever
+signs off on the security posture. See §33.
+
+**Corrected 2026-08-09, superseded 2026-08-11.** This section previously listed
+`locks`, then `recent_views`, then `ratelimit` as the one remaining Redis
+requirement. Locking has not used Redis since ES-05 — it is a PostgreSQL
 transaction-scoped advisory lock. Recent views has not used Redis since RF1 — it
 is `emr.UserValueSetRecentView`, an ordinary table, with no Redis fallback and
-no backend selector. The `ratelimit` alias was added by the ES-04/L1 follow-up
-and is what remains.
-
-**That one is the whole gap to a Redis-free profile.** Its architectural
-direction is recorded as roadmap item RF2 (provider-neutral rate limiting) in
-`inventory/unresolved-items.md`, Part RF. It is not implemented, does not belong
-to any current phase, and a Redis-free deployment SHALL NOT be offered or
-planned for until it is delivered.
+no backend selector. Rate limiting stopped requiring it with RF2, which made the
+store selectable rather than replacing the library.
 
 Nothing here discourages Redis. A deployment that already operates a
-Redis-compatible service is running the supported, lowest-effort composition and
-has no reason to change.
+Redis-compatible service is running the lowest-effort composition, the
+best-performing one for counters, and the only one with strict limits. It has no
+reason to change.
 
 ---
 
@@ -885,19 +958,50 @@ The project SHALL not add complex cleanup before actual need is demonstrated.
 
 # 33. PostgreSQL Rate-Limit State
 
-If rate limiting uses explicit PostgreSQL models, operations SHALL define:
+Applies when `CARE_RATE_LIMIT_BACKEND=postgres`. Implemented by RF2; this
+section previously described what would be required if it ever were.
 
-- retention window;
-- cleanup cadence;
-- indexes;
-- concurrency semantics;
-- failure policy.
+| Concern | Disposition |
+| --- | --- |
+| Table | `care_ratelimit_cache`, its own, never the ADR-0004 cache table. Created by the existing `createcachetable` step in `scripts/initialize.sh` — no new command, no migration |
+| Retention | Entries carry an expiry; `DatabaseCache` deletes expired rows during its own culling. **No cleanup job to schedule** |
+| Indexes | Created with the table: primary key on `cache_key`, index on `expires` |
+| Growth | Bounded by `CARE_RATE_LIMIT_MAX_ENTRIES` (default 10000). Raised well above Django's default of 300, which would cull live counters under ordinary load |
+| Concurrency | **Best-effort.** Increments are not atomic; see below |
+| Failure policy | Fail closed with a captcha escape, same as Redis. A `DatabaseError` is caught and reported as limited, inside a savepoint so the request's transaction stays usable |
 
-Expired counter rows SHOULD be removed by a scheduled management command or
-normal application operation.
+## 33.1 What "best-effort" means operationally
+
+`DatabaseCache` increments with a read followed by a write and no row lock, so
+two requests that overlap can both read the same count and both write the same
+incremented value. One request is not counted.
+
+The consequence for an operator: **during a concurrent burst, more requests are
+admitted than the configured rate allows.** Sequential traffic is counted
+exactly. The overshoot is bounded by how many requests genuinely overlap, not by
+the limit.
+
+This is not a fault to raise. It is the documented semantic of the mode, and
+`CARE_RATE_LIMIT_BACKEND=redis` is the supported way to remove it.
+
+## 33.2 Security posture
+
+Rate limiting is **defense in depth**, in every mode. In `postgres` mode it
+SHALL NOT be treated as the sole control against:
+
+- credential stuffing;
+- brute-force authentication;
+- volumetric denial of service.
+
+A deployment relying on rate limiting as its primary protection against those
+SHOULD select `redis`, or place a deployment-layer control in front of the API.
+Which control, and how it is configured, is outside this guide.
 
 Security-sensitive rate limits SHALL not silently fail open without an explicit
-decision.
+decision. They do not: an unreachable store is reported as limited and the
+caller meets a captcha, in both counting modes. **An unreachable Redis does not
+fall back to PostgreSQL and does not disable rate limiting** — the mode is a
+deployment decision, never an inference from availability.
 
 ---
 

@@ -840,16 +840,21 @@ false so a failure cannot be read as success.
 with PostgreSQL advisory locks, removing `locks`; RF1 replaced the recent-views
 lists with `emr.UserValueSetRecentView`, removing `recent_views` along with the
 `build_redis_only_cache` helper that built both. A `ratelimit` alias was added by
-the ES-04/L1 follow-up and is Redis in every profile, with
+the ES-04/L1 follow-up; RF2 then made it selectable through
+`CARE_RATE_LIMIT_BACKEND` — Redis (strict, default), a dedicated `DatabaseCache`
+table (best-effort, Redis-free), or absent entirely. Under Redis it keeps
 `IGNORE_EXCEPTIONS: True` so an outage fails closed to captcha rather than to a
-500. `ratelimit` is therefore the only Redis-only alias; its architectural
-direction is roadmap item RF2 in `unresolved-items.md` Part RF.
+500; under PostgreSQL the wrapper reaches the same challenge by catching
+`DatabaseError`. No alias in `CACHES` is Redis-only any more.
 
 **verified end to end.** With Redis stopped and `CARE_CACHE_BACKEND=postgres`, a
 cache round trip succeeds and cache health reports 200. Re-verified for RF1 with
 the Redis container stopped: the recent-views suite is green and the recent-views
-endpoints serve normally. Redis is optional for ordinary caching and required
-only for rate limiting — the runtime says so rather than degrading quietly.
+endpoints serve normally. Re-verified for RF2 with `postgres` + `postgres` +
+`cloud_tasks` and every Redis URL unroutable: the API starts, `/health/` returns
+200, and the login limiter admits five attempts and returns 429 on the sixth,
+with no Redis connection attempted. Redis is optional throughout and required
+only where selected — the runtime says so rather than degrading quietly.
 
 ### 14.2 Initialization gained a step
 
@@ -973,18 +978,21 @@ exactly as before.
 and `CARE_TASK_BACKEND=cloud_tasks`: the whole sequence succeeds and the process
 exits 0. Nothing in initialization opens a Redis connection.
 
-**Honestly recorded:** since the ES-04/L1 follow-up the `ratelimit` alias is
-Redis in every configuration. It backs request handling rather than process
-startup, so its absence degrades the affected endpoints instead of preventing
-the API from serving. It is not a reason to block startup.
+**Honestly recorded, and now closed.** Between the ES-04/L1 follow-up and RF2,
+the `ratelimit` alias was Redis in every configuration. It backed request
+handling rather than process startup, so its absence degraded the affected
+endpoints instead of preventing the API from serving, which is why it was never
+a reason to block startup.
 
 The `recent_views` alias was in the same position until RF1 replaced it with a
-PostgreSQL model. Those endpoints now serve with no Redis at all.
+PostgreSQL model. `ratelimit` left the list with RF2, which made the store
+selectable rather than replacing the library.
 
-Startup is therefore Redis-conditional today, and the API's *capability* surface
-is down to one item. Removing that last dependency is roadmap work — RF2 for
-rate limiting, in `unresolved-items.md` Part RF, and not part of any current
-phase. A Redis-free deployment profile is a future option, not a current one.
+Startup is Redis-conditional and the API's *capability* surface no longer
+contains a mandatory Redis item. A Redis-free deployment profile is a current
+option: `CARE_CACHE_BACKEND=postgres` + `CARE_RATE_LIMIT_BACKEND=postgres` +
+`CARE_TASK_BACKEND=cloud_tasks`. Redis is still required by the Celery broker
+and by strict rate limiting, both of which are selections.
 
 ### 15.4 Route isolation
 
@@ -1116,11 +1124,14 @@ does not, and health reports database and cache only.
 internal task route resolves, no public route resolves, and health reports
 database, cache and task registry.
 
-**Blocked, and not by the role architecture.** Under
-`CARE_CACHE_BACKEND=postgres` no management command runs at all:
+**Blocked at the time, and not by the role architecture.** Under
+`CARE_CACHE_BACKEND=postgres` no management command ran at all:
 `django_ratelimit`'s `E003` system check rejects every non-Redis `default`
 cache, and the `init` role is management commands exclusively. Recorded as
-`unresolved-items.md` L1.
+`unresolved-items.md` L1 and fixed by the follow-up that gave rate limiting its
+own alias. RF2 later made that alias's backend selectable as well, and `E003` is
+now silenced only under `CARE_RATE_LIMIT_BACKEND=postgres`, where CARE knowingly
+accepts what it reports.
 
 ### 15.10 Regression result
 

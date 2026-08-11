@@ -520,8 +520,9 @@ Redis MAY remain required by selected capabilities.
 
 Capabilities that require Redis today:
 
-- rate limiting, in every profile (`django-ratelimit` needs an atomic `INCR`);
 - Celery as the dispatcher, in traditional and local deployments;
+- **strict** rate limiting — `CARE_RATE_LIMIT_BACKEND=redis`, the only mode
+  whose counters are atomic and therefore hold under concurrent bursts;
 - external plugins or future optional capabilities.
 
 Capabilities that no longer require Redis:
@@ -529,6 +530,10 @@ Capabilities that no longer require Redis:
 - distributed locking — PostgreSQL advisory locks (ADR-0005);
 - `recent_views` — a PostgreSQL model, in every profile (RF1);
 - the ordinary application cache — configurable (ADR-0004);
+- rate limiting — configurable since RF2 (2026-08-11). `postgres` counts into a
+  dedicated `DatabaseCache` table with no Redis at all, at the cost of
+  best-effort rather than strict semantics; `disabled` counts nothing. The
+  library is unchanged in both counting modes;
 - asynchronous dispatch — configurable (ADR-0003).
 
 The presence of Redis is therefore capability-specific.
@@ -540,6 +545,7 @@ The absence of Redis SHALL NOT prevent:
 - explicit initialization;
 - Cloud Tasks execution;
 - ordinary PostgreSQL-backed cache;
+- PostgreSQL-backed rate limiting, with its weaker guarantee stated;
 
 when the selected configuration does not otherwise require it.
 
@@ -555,26 +561,38 @@ Three statements are distinct and all three are true.
 **Compatibility.** Redis is fully supported and is a first-class deployment
 choice. A deployment MAY deliberately select Redis for the default cache, rate
 limiting and the Celery broker. Nothing here discourages Redis where it already
-exists — a deployment that operates Redis SHOULD use it. Recent views is the one
-capability where Redis is *not* offered: RF1 made it PostgreSQL-only, with no
-backend selector and no fallback.
+exists — a deployment that operates Redis SHOULD use it, and it remains the only
+way to get strict rate limiting. Recent views is the one capability where Redis
+is *not* offered: RF1 made it PostgreSQL-only, with no backend selector and no
+fallback.
 
 **Portability.** CARE SHALL NOT depend architecturally on Redis. Redis-dependent
 capabilities SHALL remain isolated behind explicit seams — the cache alias, the
 rate limit wrapper, the recent views service and the async dispatcher. Business
 code SHALL NOT know whether Redis exists. RF1 exercised that property: the
-recent views seam changed storage engines without any caller changing.
+recent views seam changed storage engines without any caller changing. RF2
+exercised it again, and harder: the rate-limit wrapper gained three backends
+with three different guarantees, and none of its six call sites changed a line.
 
-**Redis-free target.** A fully Redis-free deployment is a **future** supported
-profile. It is not implemented and SHALL NOT be described as if it were. One
-capability still requires redesign to reach it:
+**Redis-free target.** Delivered for the API by RF2 (2026-08-11). The profile is
+`CARE_CACHE_BACKEND=postgres` + `CARE_RATE_LIMIT_BACKEND=postgres` +
+`CARE_TASK_BACKEND=cloud_tasks`, verified with Redis unreachable: checks pass,
+init completes, the API serves, and login rate limiting returns 429 without a
+Redis connection being attempted.
 
-- **Rate Limiting** — replace `django-ratelimit` with a provider-neutral
-  implementation supporting PostgreSQL atomic counters.
+The claim stops there, and the boundary is the point of this ADR's
+capability-specific position. **Celery still requires Redis** — a Redis-free
+deployment runs `cloud_tasks`. **Strict rate limiting still requires Redis** —
+the PostgreSQL mode is best-effort and says so.
 
-That is recorded as roadmap item **RF2** in `inventory/unresolved-items.md`,
-Part RF. It belongs to no current phase; it is future modernization work and is
-not designed there or here.
+RF2 deliberately did *not* do what was planned for it — replacing
+`django-ratelimit` with a provider-neutral atomic counter. That would have meant
+writing a bespoke limiter on the login path to recover a guarantee Redis already
+provides. Naming the weaker guarantee costs less and hides less. The replacement
+remains available as future work and no caller would change.
+
+The original roadmap entry is **RF2** in `inventory/unresolved-items.md`,
+Part RF, and is now marked complete there.
 
 **Recent Views** was the second item, **RF1**, and it is delivered: Redis list
 operations replaced by `emr.UserValueSetRecentView`.
@@ -721,11 +739,17 @@ Cloud Scheduler and Cloud Tasks are managed services.
 
 PostgreSQL/Cloud SQL remains a persistent managed dependency and therefore represents a baseline cost.
 
-A Redis-compatible service also represents a baseline cost wherever rate
-limiting is used, which today is every profile serving the API. That cost was
-the practical motivation for RF1 and RF2; RF1 has removed recent views from the
-bill, and RF2 would remove the rest. It is not a reason to describe the current
-deployment as Redis-free, and it is not a reason to disable rate limiting.
+A Redis-compatible service represented a baseline cost wherever rate limiting
+was used, which was every profile serving the API. That cost was the practical
+motivation for RF1 and RF2, and both have now removed their share of it: recent
+views became a PostgreSQL model, and rate limiting became selectable. A
+managed-cloud deployment on `postgres` + `postgres` + `cloud_tasks` carries no
+Redis line at all.
+
+It remains a cost for deployments that select Redis — for the Celery broker, or
+for strict rate limiting, which is the only mode whose counters hold under
+concurrent bursts. Choosing `postgres` to avoid the cost is a legitimate trade
+with a stated consequence; it is still not a reason to disable rate limiting.
 
 The architecture SHALL NOT describe the entire deployment as:
 
@@ -1075,9 +1099,10 @@ Implemented by ES-06 on `feature/runtime-roles`, 2026-08-09.
       command through `django_ratelimit.E003` — was outside this architecture and
       has since been resolved by the ES-04 follow-up: rate limiting reads a
       dedicated `ratelimit` cache alias instead of `default`. See
-      `unresolved-items.md` L1. Redis remains required for rate limiting, which
-      is consistent with this ADR's position that Redis is capability-specific
-      rather than a blanket runtime dependency.
+      `unresolved-items.md` L1. Redis remained required for rate limiting at the
+      time, which was consistent with this ADR's position that Redis is
+      capability-specific rather than a blanket runtime dependency. RF2 has
+      since made that dependency a selection too.
 - [x] Same-image multi-role execution verified. All four roles run from
       `care_local`; no role needs a distinct image.
 - [x] Production worker IAM requirement carried into infrastructure phase.
@@ -1090,7 +1115,8 @@ Not addressed, and deliberately so:
   the orchestrator selects the role by command;
 - the Celery Beat container probe remains a start marker (`unresolved-items.md`
   L3);
-- the rate-limiting Redis capability dependency remains; its architectural
-  direction is recorded as RF2 in Part RF of the same document, and it is not
-  ES-07 work. The `recent_views` dependency (`unresolved-items.md` L5) is gone —
-  RF1 closed it after this ADR was written.
+- the rate-limiting Redis capability dependency remained at the time of writing;
+  it is gone as of RF2, which made the counter store selectable rather than
+  replacing the library. The `recent_views` dependency
+  (`unresolved-items.md` L5) is gone too — RF1 closed it. Both were closed after
+  this ADR was written and neither was ES-07 work.
