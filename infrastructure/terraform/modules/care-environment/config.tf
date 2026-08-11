@@ -1,0 +1,125 @@
+# The application environment, assembled once and split by role.
+#
+# Every name here is one the application actually reads. Where the
+# configuration reference documents a variable that no code reads —
+# CARE_ENVIRONMENT is the notable one — it is omitted rather than set, so that
+# nothing in this file implies an effect it does not have (ES-07 section 5).
+
+locals {
+  # Cloud Run hostnames end in .run.app. Django reads a leading dot as a
+  # subdomain wildcard, which is what lets a service be reachable at its
+  # generated URL without that URL being knowable before the service exists.
+  # Custom domains are added through the variable.
+  allowed_hosts = concat(var.django_allowed_hosts, [".run.app"])
+
+  csrf_trusted_origins = concat(var.csrf_trusted_origins, ["https://*.run.app"])
+
+  # Shared by api, worker and init. Backend selections and infrastructure
+  # facts; no credentials.
+  common_env = merge(
+    {
+      DJANGO_SETTINGS_MODULE = "config.settings.deployment"
+
+      DJANGO_DEBUG               = var.django_debug ? "true" : "false"
+      DJANGO_ALLOWED_HOSTS       = jsonencode(local.allowed_hosts)
+      CSRF_TRUSTED_ORIGINS       = jsonencode(local.csrf_trusted_origins)
+      CORS_ALLOWED_ORIGINS       = jsonencode(var.cors_allowed_origins)
+      DJANGO_SECURE_SSL_REDIRECT = var.django_secure_ssl_redirect ? "true" : "false"
+
+      # ---------------------------------------------------------------------
+      # The Redis-free composition (ADR-0007, ES-07 section 72).
+      #
+      # Four independent selections, none of which names Redis, and no Redis
+      # variable is set anywhere in this configuration. scripts/wait_for_redis.sh
+      # reads the two backend values below and exits without waiting when
+      # neither selects Redis, so startup does not block on a service that
+      # does not exist.
+      # ---------------------------------------------------------------------
+      CARE_STORAGE_BACKEND    = "gcs"
+      CARE_TASK_BACKEND       = "cloud_tasks"
+      CARE_CACHE_BACKEND      = "postgres"
+      CARE_RATE_LIMIT_BACKEND = "postgres"
+
+      # Distinct tables, enforced by the application as well: config/caches.py
+      # refuses a configuration where both DatabaseCache aliases name the same
+      # one. Set explicitly so the separation is visible here too.
+      CARE_CACHE_TABLE      = "care_cache"
+      CARE_RATE_LIMIT_TABLE = "care_ratelimit_cache"
+
+      GCP_PROJECT_ID = var.project_id
+      GCS_PROJECT_ID = var.project_id
+
+      CARE_PATIENT_STORAGE_BUCKET  = local.patient_bucket
+      CARE_FACILITY_STORAGE_BUCKET = local.facility_bucket
+      CARE_REPORT_STORAGE_BUCKET   = local.report_bucket
+
+      CONN_MAX_AGE       = tostring(var.conn_max_age)
+      SENTRY_ENVIRONMENT = var.environment
+
+      # Payloads reference clinical data. Never true in a deployed environment.
+      CARE_TASK_LOG_PAYLOAD = "false"
+
+      # Identifies the running build at /app_version/, which is how the
+      # same-image requirement is checked from outside (ES-07 section 101).
+      APP_VERSION = var.image
+    },
+    var.current_domain != "" ? { CURRENT_DOMAIN = var.current_domain } : {},
+    var.extra_env,
+  )
+
+  # Cloud Tasks configuration. Required by every role that selects the
+  # cloud_tasks backend, because settings validate the backend rather than the
+  # role — so the worker carries these too even though it enqueues nothing.
+  cloud_tasks_env = {
+    GCP_TASKS_LOCATION        = var.region
+    GCP_TASKS_QUEUE           = google_cloud_tasks_queue.default.name
+    GCP_WORKER_URL            = local.worker_task_url
+    GCP_TASKS_SERVICE_ACCOUNT = google_service_account.tasks_invoker.email
+
+    # Cloud Run validates the audience against the service URL, so this is the
+    # worker's origin rather than the task path.
+    GCP_TASKS_OIDC_AUDIENCE = local.worker_base_url
+  }
+
+  # scripts/wait_for_db.sh runs before gunicorn in start.sh and start-worker.sh
+  # and connects with these rather than with DATABASE_URL. The host is the
+  # Cloud SQL socket directory; libpq treats a leading slash as a unix socket.
+  #
+  # The init role does not run wait_for_db.sh, so it receives none of these and
+  # no database password.
+  postgres_env = {
+    POSTGRES_HOST = local.cloudsql_socket_dir
+    POSTGRES_PORT = "5432"
+    POSTGRES_USER = var.database_user
+    POSTGRES_DB   = var.database_name
+  }
+
+  api_env = merge(
+    local.common_env,
+    local.cloud_tasks_env,
+    local.postgres_env,
+    {
+      GUNICORN_WORKERS = tostring(var.api_gunicorn_workers)
+    },
+  )
+
+  worker_env = merge(
+    local.common_env,
+    local.cloud_tasks_env,
+    local.postgres_env,
+    {
+      GUNICORN_WORKERS = tostring(var.worker_gunicorn_workers)
+
+      # Redundant with the role default in config/settings/base.py, and set
+      # anyway: this is the one flag that decides whether the private task route
+      # is registered, and it should not be inferred when reading the worker's
+      # own configuration.
+      CARE_TASK_HANDLER_ENDPOINT_ENABLED = "true"
+    },
+  )
+
+  init_env = merge(
+    local.common_env,
+    local.cloud_tasks_env,
+  )
+}
