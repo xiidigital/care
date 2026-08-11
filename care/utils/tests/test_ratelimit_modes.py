@@ -70,6 +70,7 @@ from config.caches import (
     ratelimit_silenced_checks,
     validate_rate_limit_backend,
 )
+from config.db_routers import RATELIMIT_DB_ALIAS
 from config.ratelimit import rate_limiting_enabled, ratelimit
 
 REDIS_URL = "redis://localhost:6379"
@@ -691,6 +692,164 @@ class PostgresFailurePolicyTests(TestCase):
             self.assertRaises(TypeError),
         ):
             ratelimit(auth_request(), "rf2-pg-bug", ["omicron"], RATE)
+
+
+class CounterSurvivesRequestRollbackTests(TransactionTestCase):
+    """
+    The counter must outlive the request that made it, even a failed one.
+
+    `DATABASES["default"]["ATOMIC_REQUESTS"]` is True, and DRF's exception
+    handler calls `set_rollback()` for every `APIException` it turns into a
+    response. A failed login raises `AuthenticationFailed`, so the request
+    transaction is rolled back -- and with a `DatabaseCache` counter sitting
+    inside it, so is the increment that recorded the attempt.
+
+    That would leave a limiter which counts requests that succeeded and forgets
+    the ones that failed. On endpoints whose whole purpose is throttling
+    repeated failures, that is not a weaker guarantee, it is none. Redis was
+    never affected: its counters are not in the database.
+
+    `config/db_routers.py` gives the counter its own connection with
+    `ATOMIC_REQUESTS` off. These tests are why it exists, and the control below
+    is what keeps its removal from being silent.
+    """
+
+    databases = {"default", RATELIMIT_DB_ALIAS}
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        create_ratelimit_table()
+
+    @classmethod
+    def tearDownClass(cls):
+        drop_ratelimit_table()
+        super().tearDownClass()
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(self.clear_counters)
+        self.clear_counters()
+
+    def clear_counters(self):
+        with connections[RATELIMIT_DB_ALIAS].cursor() as cursor:
+            cursor.execute(f"DELETE FROM {RATELIMIT_TEST_TABLE}")  # noqa: S608
+
+    def routed_postgres_mode(self, routers=("config.db_routers.RateLimitCacheRouter",)):
+        # CARE_RATE_LIMIT_TABLE is what the router matches on, so it has to name
+        # this suite's table rather than production's.
+        return override_settings(
+            CARE_RATE_LIMIT_BACKEND=POSTGRES_RATE_LIMIT_BACKEND,
+            CARE_RATE_LIMIT_TABLE=RATELIMIT_TEST_TABLE,
+            DATABASE_ROUTERS=list(routers),
+            DISABLE_RATELIMIT=False,
+            CACHES={
+                "default": build_default_cache("locmem"),
+                RATELIMIT_CACHE_ALIAS: postgres_ratelimit_alias(),
+            },
+        )
+
+    def count_rows(self):
+        with connections[RATELIMIT_DB_ALIAS].cursor() as cursor:
+            cursor.execute(f"SELECT count(*) FROM {RATELIMIT_TEST_TABLE}")  # noqa: S608
+            return cursor.fetchone()[0]
+
+    def failed_requests(self, group, count=3):
+        """Count `count` requests, each rolled back the way a failed login is.
+
+        `transaction.set_rollback(True)` is called directly rather than through
+        DRF's `set_rollback()` helper. The helper is a no-op unless the
+        connection has `ATOMIC_REQUESTS` set, and the test profile's DATABASES
+        does not -- it replaces base's wholesale. Calling the underlying
+        operation reproduces what production actually does; that DRF reaches it
+        on every APIException, and that production turns ATOMIC_REQUESTS on, are
+        asserted separately below.
+        """
+        with patch("config.ratelimit.validatecaptcha", return_value=False):
+            for _ in range(count):
+                with transaction.atomic():  # stands in for ATOMIC_REQUESTS
+                    ratelimit(auth_request(), group, ["rollback"], RATE)
+                    transaction.set_rollback(True)  # what the 401 causes
+
+    def test_the_preconditions_for_this_are_real(self):
+        # Neither half of the interaction is hypothetical, and neither is
+        # visible from the other's file.
+        from rest_framework.views import exception_handler
+
+        from config.settings import base
+
+        self.assertTrue(base.DATABASES["default"]["ATOMIC_REQUESTS"])
+        self.assertIn("set_rollback", exception_handler.__code__.co_names)
+
+    def test_the_counter_survives_a_rolled_back_request(self):
+        with self.routed_postgres_mode():
+            self.failed_requests("rf2-pg-rollback")
+            self.assertEqual(self.count_rows(), 1)
+
+    def test_failed_attempts_accumulate_towards_the_limit(self):
+        # The consequence, stated the way an attacker would experience it: ten
+        # failed logins is over a 10/h limit, and the eleventh is challenged.
+        with self.routed_postgres_mode():
+            self.failed_requests("rf2-pg-rollback-limit", count=11)
+            with patch("config.ratelimit.validatecaptcha", return_value=False):
+                self.assertTrue(
+                    ratelimit(
+                        auth_request(), "rf2-pg-rollback-limit", ["rollback"], RATE
+                    )
+                )
+
+    def test_without_the_router_the_counter_is_discarded(self):
+        # The control, and the reason the router is not decoration. Same code,
+        # same rollback, routing removed: the counter goes with the transaction
+        # and the limiter learns nothing from three failed attempts.
+        with self.routed_postgres_mode(routers=()):
+            self.failed_requests("rf2-pg-unrouted")
+            self.assertEqual(self.count_rows(), 0)
+
+    def test_the_router_leaves_the_ordinary_cache_alone(self):
+        # Scope check. Only the rate-limit table is routed; the default cache
+        # keeps whatever behaviour ADR-0004 gave it, which is not RF2's to
+        # change.
+        from types import SimpleNamespace
+
+        from config.db_routers import RateLimitCacheRouter
+
+        def cache_entry(table):
+            # The shape `DatabaseCache` hands the router: a stub carrying a
+            # `_meta` that quacks like a model's, one per configured table.
+            return SimpleNamespace(
+                _meta=SimpleNamespace(app_label="django_cache", db_table=table)
+            )
+
+        router = RateLimitCacheRouter()
+        with self.routed_postgres_mode():
+            self.assertIsNone(router.db_for_write(cache_entry("care_cache")))
+            self.assertEqual(
+                router.db_for_write(cache_entry(RATELIMIT_TEST_TABLE)),
+                RATELIMIT_DB_ALIAS,
+            )
+
+    def test_the_router_has_no_opinion_on_migrations(self):
+        # `createcachetable` asks the router before creating a table, on the
+        # "default" alias. An opinion here would break scripts/initialize.sh,
+        # which RF2 section 9 requires to keep working untouched.
+        from config.db_routers import RateLimitCacheRouter
+
+        router = RateLimitCacheRouter()
+        self.assertIsNone(router.allow_migrate("default", "django_cache"))
+        self.assertIsNone(router.allow_migrate(RATELIMIT_DB_ALIAS, "emr"))
+
+    def test_the_routed_alias_is_not_wrapped_in_request_transactions(self):
+        from django.conf import settings
+
+        with self.routed_postgres_mode():
+            self.assertFalse(settings.DATABASES[RATELIMIT_DB_ALIAS]["ATOMIC_REQUESTS"])
+            # Same database. The separation is transactional, not physical --
+            # no second server, no replication, nothing to keep in sync.
+            self.assertEqual(
+                settings.DATABASES[RATELIMIT_DB_ALIAS]["NAME"],
+                settings.DATABASES["default"]["NAME"],
+            )
 
 
 class PostgresBestEffortConcurrencyTests(TransactionTestCase):

@@ -18,6 +18,7 @@ from config.caches import (
     DEFAULT_RATELIMIT_CACHE_TIMEOUT,
     DEFAULT_RATELIMIT_KEY_PREFIX,
     DEFAULT_RATELIMIT_MAX_ENTRIES,
+    POSTGRES_RATE_LIMIT_BACKEND,
     RATELIMIT_CACHE_ALIAS,
     REDIS_CACHE_BACKEND,
     REDIS_RATE_LIMIT_BACKEND,
@@ -28,6 +29,7 @@ from config.caches import (
     validate_cache_backend,
     validate_rate_limit_backend,
 )
+from config.db_routers import RATELIMIT_DB_ALIAS
 from config.health import build_health_checks
 from config.runtime import (
     DEFAULT_PROCESS_ROLE,
@@ -167,6 +169,24 @@ CARE_RATE_LIMIT_CACHE_TIMEOUT = env.int(
 CARE_RATE_LIMIT_MAX_ENTRIES = env.int(
     "CARE_RATE_LIMIT_MAX_ENTRIES", default=DEFAULT_RATELIMIT_MAX_ENTRIES
 )
+
+# The PostgreSQL counter needs a connection that is not the request's.
+#
+# ATOMIC_REQUESTS is on, and DRF's exception handler calls set_rollback() for
+# every APIException it converts into a response. A failed login raises
+# AuthenticationFailed, so the request transaction -- and the counter increment
+# inside it -- is rolled back. The limiter would then count successful requests
+# and forget failed ones, which is the opposite of what it is for.
+#
+# Same database, separate connection, ATOMIC_REQUESTS off, so counter writes
+# commit on their own terms. Only the rate-limit table is routed here; see
+# config/db_routers.py for why the ordinary cache is left alone.
+if CARE_RATE_LIMIT_BACKEND == POSTGRES_RATE_LIMIT_BACKEND:
+    DATABASES[RATELIMIT_DB_ALIAS] = {
+        **DATABASES["default"],
+        "ATOMIC_REQUESTS": False,
+    }
+    DATABASE_ROUTERS = ["config.db_routers.RateLimitCacheRouter"]
 
 CACHES = {
     "default": build_default_cache(

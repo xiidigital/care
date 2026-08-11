@@ -9,6 +9,7 @@ from config.caches import (
     REDIS_RATE_LIMIT_BACKEND,
     build_ratelimit_cache,
 )
+from config.db_routers import RATELIMIT_DB_ALIAS
 
 from .base import *  # noqa
 from .base import BASE_DIR, REDIS_URL, TEMPLATES, env
@@ -43,6 +44,19 @@ EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 # ------------------------------------------------------------------------------
 
 DATABASES = {"default": env.db("DATABASE_URL", default="postgres:///care-test")}
+
+# The alias base.py adds only under CARE_RATE_LIMIT_BACKEND=postgres. The suite
+# runs in `redis` mode, so it would not exist here -- but the tests that select
+# postgres mode need the routed connection to be a *test* database rather than
+# the real one, and `override_settings` cannot retroactively enrol an alias in
+# the runner's database setup. It is declared here so the runner creates and
+# clones it like any other.
+#
+# Identical connection parameters to `default`, which is the point: the router
+# separates transactions, not data. The runner groups aliases by connection
+# signature, so this creates no second test database, and `--parallel` clones
+# once and points both aliases at the clone.
+DATABASES[RATELIMIT_DB_ALIAS] = {**DATABASES["default"], "ATOMIC_REQUESTS": False}
 
 # Cache isolation for the test suite -- this is the E7 fix.
 #
