@@ -1156,13 +1156,15 @@ CARE had simply never set it, so it defaulted to `default`. It is now set to a
 dedicated `ratelimit` alias built by `config.caches.build_ratelimit_cache`, and
 the ADR-0004 cache choice no longer has any bearing on whether CARE starts.
 
-**That alias is Redis in every profile, and option 3's premise was right.** No
+**That alias was Redis in every profile, and option 3's premise was right.**
+*(Superseded by RF2 — see the note at the end of this item. The paragraph is kept
+as written because the atomicity reasoning in it is still correct.)* No
 portable Django cache backend offers the atomic `INCR` the library needs; K4
 above proves `DatabaseCache` does not, and `LocMem` is not shared across
 processes at all. So Redis is optional for ordinary cache — ADR-0004 stands — and
-required for rate limiting. **CARE is not Redis-free.** It is Redis-optional for
-the `default` cache and Redis-required for rate limiting. (Recent views was in
-that sentence until RF1 removed it.) The
+was required for rate limiting. **CARE was not Redis-free.** It was
+Redis-optional for the `default` cache and Redis-required for rate limiting.
+(Recent views was in that sentence until RF1 removed it.) The
 claim in ADR-0006 that Redis is capability-specific is unchanged and in fact
 strengthened: rate limiting is now one of the named capabilities that requires
 it, instead of requiring it implicitly through a cache alias that had nothing to
@@ -1171,10 +1173,15 @@ do with it.
 **Scope of that constraint, stated so it is not read as permanent.** It binds
 `django-ratelimit` counting through the Django cache API — not PostgreSQL, which
 can increment atomically, and not CARE's architecture, which reaches the limiter
-through the `config/ratelimit.py` seam. Replacing the library with a
-provider-neutral limiter is roadmap item **RF2** in Part RF. Until that is
-scheduled and delivered, rate limiting needs Redis and this section describes
-the current state accurately.
+through the `config/ratelimit.py` seam.
+
+**Superseded by RF2 (2026-08-11).** Everything above remains factually correct
+about *atomicity* and is still tested. What is no longer correct is the
+conclusion drawn from it: rate limiting no longer needs Redis, because
+`CARE_RATE_LIMIT_BACKEND=postgres` offers the non-atomic store with the weakness
+named rather than refusing to offer it. Redis remains the only **strict** mode
+and the default. See RF2 in Part RF for what was built and how it deviates from
+the plan recorded there.
 
 **The `init` role no longer depends on Redis at all.** The check reads
 configuration, not connectivity, so an unreachable Redis in the rate-limit alias
@@ -1306,14 +1313,54 @@ the dependency.
 the alias no longer exists in any configuration and the recent-views endpoints
 serve normally with no Redis at all.
 
-**What remains on the API's capability list.** Rate limiting, and only rate
-limiting. Note the asymmetry, because it was previously stated too strongly:
-`recent_views` lacked a replacement because none had been built, and now one has
-(RF1). Rate limiting lacks one because the *current library* requires an atomic
-increment the Django cache API cannot express portably (RF2) — a constraint of
-`django-ratelimit`, not of PostgreSQL. A Redis-compatible service is therefore
-still required by the API role until RF2 is done. This does not change the
-`init` role, which needs none.
+**What remains on the API's capability list.** Nothing, as of RF2 (2026-08-11).
+The asymmetry noted here was real and the two capabilities were closed
+differently: `recent_views` lacked a replacement and RF1 built one, so it is
+PostgreSQL-only with no selector. Rate limiting lacked one because the *current
+library* requires an atomic increment the Django cache API cannot express
+portably — a constraint of `django-ratelimit`, not of PostgreSQL — and RF2
+resolved that by making the store selectable and documenting the PostgreSQL mode
+as best-effort, rather than by replacing the library.
+
+A Redis-compatible service is therefore no longer required by the API role. It
+is required when selected: for the Celery broker, or for strict rate limiting.
+The `init` role needed none before and needs none now.
+
+### L7. PostgreSQL `default` cache writes are discarded by DRF rollback
+
+**Status:** Open. Found during RF2, deliberately not fixed by it.
+**Category:** correctness / cache semantics under `CARE_CACHE_BACKEND=postgres`.
+**Related:** RF2 in Part RF, which fixed the same interaction for the rate-limit
+cache and scoped the fix there on purpose.
+
+**verified** `DATABASES["default"]["ATOMIC_REQUESTS"]` is True, so every request
+runs in a transaction, and DRF's `exception_handler` calls `set_rollback()` for
+every `APIException` it converts into a response. Any write made during that
+request is rolled back — including writes to a `DatabaseCache`.
+
+So with `CARE_CACHE_BACKEND=postgres`, a cache entry written during a request
+that ends in a 4xx is silently discarded. Under `redis` it is not: those writes
+never went through the database transaction.
+
+**Why RF2 did not fix it.** RF2's router is scoped to the rate-limit table by
+name. For the rate limiter the interaction was fatal — the counter for a failed
+login is exactly the counter that matters, so the limiter counted successes and
+forgot failures. For an ordinary cache, a lost write is a cache miss: a
+correctness-neutral performance loss, on a different risk profile, in a
+capability ADR-0004 owns. Widening the router to all `DatabaseCache` traffic
+would have changed ADR-0004 behaviour as a side effect of a rate-limiting change,
+which is not RF2's call to make.
+
+**What would be involved.** The same mechanism: route the `django_cache`
+app-label to the non-`ATOMIC_REQUESTS` alias unconditionally rather than
+matching on the rate-limit table. The router already exists
+(`config/db_routers.py`); the change is a predicate and a decision about whether
+cache writes *should* survive a rolled-back request. Arguably they should —
+Redis behaves that way — but that is an ADR-0004 question.
+
+**Impact today.** Low. It affects only `CARE_CACHE_BACKEND=postgres`, only
+requests that raise an `APIException`, and only as a reduced hit rate. No
+incorrect data is served: a miss recomputes.
 
 ### L6. Traditional deployments must now initialize explicitly
 
@@ -1343,9 +1390,8 @@ diff. Worth a dedicated cleanup commit.
 
 ## Part RF — Redis-free modernization roadmap
 
-Recorded 2026-08-09. **RF1 is implemented and closed; RF2 remains architectural
-direction only and is not implemented, planned into a current phase, or
-authorized to start.**
+Recorded 2026-08-09. **RF1 and RF2 are both implemented and closed** — RF1 on
+2026-08-09, RF2 on 2026-08-11. Part RF is complete.
 
 RF1 carries two recorded follow-ups, both below and both deliberately left open:
 "RF1 follow-up: concurrent trim can evict a just-bumped entry" (a known
@@ -1353,9 +1399,8 @@ low-severity divergence from the former Redis semantics) and "RF1 assumption:
 READ COMMITTED" (a constraint on database configuration, not a defect). Neither
 blocks RF1's closure.
 
-Neither item belongs to ES-04, ES-05, ES-06 or ES-07. RF1 was executed as a
-focused modernization of one capability. RF2 is future modernization work, to be
-specified in its own Engineering Specification if and when it is scheduled.
+Neither item belonged to ES-04, ES-05, ES-06 or ES-07. Each was executed as a
+focused modernization of one capability. ES-07 has not started.
 
 ### Why this part exists
 
@@ -1366,13 +1411,14 @@ them:
 | --- | --- |
 | **Compatibility** | Redis is fully supported and is a first-class deployment choice. A deployment that already operates Redis SHOULD use it. Nothing in the architecture discourages that. |
 | **Portability** | CARE SHALL NOT depend *architecturally* on Redis. Redis-dependent capabilities are isolated behind explicit seams, and business code does not know whether Redis exists. |
-| **Redis-free target** | A fully Redis-free deployment is a **future** supported profile, not a current one. Exactly one capability still requires redesign to reach it: rate limiting. Recent views was the other, and RF1 closed it. |
+| **Redis-free target** | Delivered for the API by RF2. Recent views was the other capability and RF1 closed it. The boundary is stated rather than blurred: Celery and *strict* rate limiting still require Redis **when selected**. |
 
 The seams that make portability real today are:
 
 ```text
 cache alias            config/caches.py, selected by CARE_CACHE_BACKEND
-rate limit wrapper     config/ratelimit.py
+rate limit wrapper     config/ratelimit.py, store selected by
+                       CARE_RATE_LIMIT_BACKEND (RF2)
 recent views service   care/emr/utils/recent_views.py (PostgreSQL, RF1)
 async dispatcher       ADR-0003 task backend selection
 ```
@@ -1562,39 +1608,79 @@ fails, the write path reworked (most likely with an explicit retry loop). The
 same caveat applies to any other `update_or_create` or `get_or_create` on a
 contended unique constraint; recent views is simply where it is documented.
 
-### RF2 — Redis-free Rate Limiting
+### RF2 — Redis-free Rate Limiting — **DONE**
 
-**Status:** Future work. Not scheduled. Not part of ES-04/05/06/07.
+**Status:** Complete, 2026-08-11.
 **Category:** portability / security control.
-**Related:** K4 (why `DatabaseCache` cannot carry the counters), L1 (why the
-counters moved to their own alias).
+**Related:** K4 (why `DatabaseCache` cannot carry the counters atomically), L1
+(why the counters moved to their own alias).
 
-**Goal:** replace `django-ratelimit` with a provider-neutral rate-limiting
-implementation that supports PostgreSQL atomic counter semantics, without
-weakening the limit.
+**Goal, as originally stated:** replace `django-ratelimit` with a
+provider-neutral implementation supporting PostgreSQL atomic counter semantics,
+without weakening the limit.
 
-**Direction only.** The constraint is not Redis; it is the current library.
-`django-ratelimit` counts through the Django cache API with `add()` then
-`incr()` and requires the increment to be atomic. Django's `DatabaseCache`
-inherits `BaseCache.incr`, an unlocked `get()`-then-`set()`, so concurrent
-requests lose increments — proved in K4 and asserted by
-`care/utils/tests/test_ratelimit_backend.py::WhyNotPostgresTests`. PostgreSQL
-itself can count atomically; the Django cache API is what cannot express it.
-The direction is therefore an implementation that can use a PostgreSQL atomic
-counter directly rather than through a cache backend, while keeping Redis as an
-equally supported store.
+**What was actually built, and why it differs.** `django-ratelimit` was **kept**,
+and the PostgreSQL mode **is** weaker. That is a deliberate deviation from the
+entry above, and it is the substance of RF2 rather than a shortcut around it.
 
-**Not designed here.** No table, no API, no counter algorithm, no window
-strategy, no library selection and no migration path is specified by this entry.
+Writing an atomic PostgreSQL counter would have meant a custom cache backend or
+raw SQL — a bespoke rate-limiting implementation on the login path — to recover
+a guarantee Redis already provides for any deployment that wants it. The cheaper
+and more honest option is to offer both stores and name the difference:
 
-**Behaviour to preserve:** the existing rate definitions and group/key shape;
-the fixed fail-closed-with-captcha-escape policy documented in
-`07-configuration-reference.md` §26.4; and counters shared across all instances
-of a role.
+```text
+CARE_RATE_LIMIT_BACKEND=redis       strict, atomic, default, recommended
+CARE_RATE_LIMIT_BACKEND=postgres    best-effort, non-atomic under concurrency
+CARE_RATE_LIMIT_BACKEND=disabled    no CARE application rate limiting
+```
 
-**Consequence while open:** rate limiting requires a Redis-compatible service in
-every deployment profile, including the managed-cloud one. This is the single
-capability that keeps a Redis-free deployment out of reach today.
+Both counting modes are the same library counting the same way into the same
+dedicated alias. No rate-limiting algorithm was written. The variable is
+independent of `CARE_CACHE_BACKEND` and every combination is valid.
+
+**K4 is not overturned.** It said `DatabaseCache.incr` loses concurrent
+increments, and that remains true and tested. RF2 changed what CARE does with
+that fact: `django_ratelimit.E003` is silenced under `postgres` and only there,
+as an *acceptance* of what the check correctly reports. `W001` is left
+unsilenced in every mode so the weaker guarantee stays audible on
+`manage.py check`, the startup summary reports
+`rate_limit_semantics=best_effort_non_atomic`, and
+`test_ratelimit_modes.py::PostgresBestEffortConcurrencyTests` demonstrates the
+undercount over independent PostgreSQL connections. A control in the same class
+runs the same requests without overlap and counts exactly, bounding the
+limitation to concurrency.
+
+**Behaviour preserved:** rate definitions and group/key shape unchanged; six
+call sites unchanged and still backend-agnostic; fail-closed-with-captcha-escape
+unchanged (§26.4) and now implemented for PostgreSQL too, since `DatabaseCache`
+raises where Redis returns `None`; counters still shared across all instances of
+a role, because the store is shared in both counting modes.
+
+**One defect was found and fixed.** With `ATOMIC_REQUESTS` on, DRF's exception
+handler calls `set_rollback()` for every `APIException`, so a failed login rolled
+back the request transaction and discarded the `DatabaseCache` counter with it.
+The limiter counted successes and forgot failures — on endpoints that exist to
+throttle repeated failures. The rate-limit table is now routed to a second
+`DATABASES` alias with `ATOMIC_REQUESTS` off, using the router hook Django's own
+`DatabaseCache` documents. Scoped by table name, so the ordinary cache is
+untouched. See the new open item "PostgreSQL `default` cache writes are
+discarded by DRF rollback" below.
+
+**Redis is not deprecated.** `django-redis`, the Redis alias implementation, the
+Redis environment variables and Celery's Redis broker all remain. Redis is the
+default and the only strict mode.
+
+**Consequence now that it is closed:** nothing in `CACHES` requires Redis. A
+Redis-free API deployment is `CARE_CACHE_BACKEND=postgres` +
+`CARE_RATE_LIMIT_BACKEND=postgres` + `CARE_TASK_BACKEND=cloud_tasks`, verified
+with Redis unreachable: checks pass, init completes, the API serves, `/health/`
+returns 200, and the login limiter returns 429 with the captcha challenge
+without a Redis connection being attempted. Celery still requires Redis when
+selected, and so does strict rate limiting.
+
+**Remaining as future work, not blocking:** a provider-neutral atomic PostgreSQL
+counter would remove the best-effort caveat. Nothing here forecloses it and no
+caller would change. It is not scheduled.
 
 ### What RF1 and RF2 do not cover
 
@@ -1602,5 +1688,8 @@ capability that keeps a Redis-free deployment out of reach today.
 - Ordinary caching. Already configurable (ADR-0004 / ES-04). No RF item needed.
 - Celery. Already one dispatcher among others (ADR-0003 / ES-03); a deployment
   that selects `cloud_tasks` needs no broker.
-- Any change to rate limiting. RF2 remains documentation of direction; RF1 did
-  not touch the limiter, the `ratelimit` alias, or `django-ratelimit`.
+- Replacing `django-ratelimit`. RF2 explicitly did not, and the reasoning is in
+  its entry above. RF1 did not touch the limiter at all.
+- Strict PostgreSQL counting. RF2 delivered best-effort PostgreSQL counting and
+  named it; an atomic PostgreSQL counter remains unscheduled future work.
+- Celery's Redis broker. Out of scope for both.

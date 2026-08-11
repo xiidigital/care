@@ -30,7 +30,18 @@ reads and writes `emr.UserValueSetRecentView` through the ORM. The
 `recent_views` cache alias, the `RECENT_VIEWS_CACHE_ALIAS` constant, the
 `build_redis_only_cache` builder and every `LPUSH`/`LTRIM`/`LREM`/`LRANGE` on
 this path are removed. There is no backend selector and no fallback: recent
-views is PostgreSQL-only. `ratelimit` is now the only Redis-only alias.
+views is PostgreSQL-only. `ratelimit` was left as the only Redis-only alias.
+
+## RF2 update (2026-08-11)
+
+`ratelimit` is no longer Redis-only. `CARE_RATE_LIMIT_BACKEND` selects `redis`
+(strict, atomic, default), `postgres` (best-effort, a dedicated `DatabaseCache`
+table, no Redis) or `disabled` (no alias, no counter, and the library's app not
+installed). `django-ratelimit` was **not** replaced; both counting modes are the
+same library counting into the same alias.
+
+Nothing in `CACHES` requires Redis any more. Redis remains required by the
+Celery broker when selected, and by strict rate limiting when selected.
 
 Every cache and Redis use in the repository, classified by role, with a
 backend-suitability assessment grounded in the semantics each site actually
@@ -104,26 +115,50 @@ after. Full parallel suite: 6 runs, 6 green, 2240 tests.
 | `default` | postgres / redis / locmem / dummy | `CARE_CACHE_BACKEND` | ADR-0004 cache |
 | ~~`locks`~~ | removed | — | distributed locking is PostgreSQL advisory locking (ES-05) |
 | ~~`recent_views`~~ | removed | — | bounded MRU list is `emr.UserValueSetRecentView` (RF1) |
-| `ratelimit` | Redis, always | not configurable | `django_ratelimit` counters |
+| `ratelimit` | redis / postgres / absent | `CARE_RATE_LIMIT_BACKEND` | `django_ratelimit` counters (RF2) |
 | `swagger_cache` | LocMem | not configurable | schema cache, unchanged |
 
-**verified** Redis is optional for ordinary caching and required only by
-`ratelimit`. Verified by stopping Redis with `CARE_CACHE_BACKEND=postgres`: a
-cache round trip succeeds and cache health reports 200. Re-verified for RF1 by
-running the recent-views suite with the Redis container stopped and `REDIS_URL`
-pointing at a dead port: 39 tests, all green.
+**verified** Redis is optional for every alias. Verified by stopping Redis with
+`CARE_CACHE_BACKEND=postgres`: a cache round trip succeeds and cache health
+reports 200. Re-verified for RF1 by running the recent-views suite with the
+Redis container stopped and `REDIS_URL` pointing at a dead port: 39 tests, all
+green. Re-verified for RF2 with `CARE_CACHE_BACKEND=postgres` +
+`CARE_RATE_LIMIT_BACKEND=postgres` + `CARE_TASK_BACKEND=cloud_tasks` and every
+Redis URL pointing at an unroutable address: checks pass, init completes, the
+API serves, and the login limiter returns 429 without a Redis connection being
+attempted.
 
 **`ratelimit` added 2026-08-09** by the L1 follow-up. Rate limiting previously
 read `default`, which made `CARE_CACHE_BACKEND=postgres` fail
-`django_ratelimit.E003` and abort every management command. It is Redis-only for
-the same class of reason as the other two: the library requires an atomic `INCR`,
-and `DatabaseCache` inherits `BaseCache.incr`, an unlocked `get()`-then-`set()`
-that loses concurrent increments. Selected through `settings.RATELIMIT_USE_CACHE`
-and configured by `REDIS_RATE_LIMIT_URL` / `REDIS_RATE_LIMIT_PREFIX`.
+`django_ratelimit.E003` and abort every management command. Selected through
+`settings.RATELIMIT_USE_CACHE`, which CARE points at this alias.
 
-It sets `IGNORE_EXCEPTIONS: True`, so an outage becomes a fail-closed captcha
-challenge rather than a 500 on the login path. It is now the only Redis-only
-alias, so there is no longer a second policy to contrast it with.
+**Made selectable 2026-08-11** by RF2. The atomicity constraint that had kept it
+Redis-only is unchanged and still true — `DatabaseCache` inherits
+`BaseCache.incr`, an unlocked `get()`-then-`set()` that loses concurrent
+increments. What changed is that CARE now offers the weaker mode with the
+weakness named, rather than refusing to offer it:
+
+| Mode | Store | Guarantee | Configured by |
+| --- | --- | --- | --- |
+| `redis` | `django_redis.cache.RedisCache` | strict, atomic | `REDIS_RATE_LIMIT_URL` / `REDIS_RATE_LIMIT_PREFIX` |
+| `postgres` | `DatabaseCache` on `care_ratelimit_cache` | best-effort, undercounts concurrent bursts | `CARE_RATE_LIMIT_TABLE`, `CARE_RATE_LIMIT_CACHE_TIMEOUT`, `CARE_RATE_LIMIT_MAX_ENTRIES` |
+| `disabled` | none | none; no alias configured | — |
+
+`django_ratelimit.E003` is silenced under `postgres` and only there, as an
+acceptance of what it correctly reports. `W001` is left unsilenced in every mode.
+
+Under `redis` the alias sets `IGNORE_EXCEPTIONS: True`, so an outage becomes a
+fail-closed captcha challenge rather than a 500 on the login path. Under
+`postgres` the wrapper catches `DatabaseError` and reaches the same challenge by
+a different route, since `DatabaseCache` raises where Redis returns `None`.
+
+**A second `DATABASES` alias exists under `postgres`.** The rate-limit table is
+routed to a connection with `ATOMIC_REQUESTS` off, because DRF's exception
+handler rolls back the request transaction on every `APIException` — which
+discarded the counter for exactly the failed logins the limiter exists to
+throttle. Same database, separate connection, scoped to the rate-limit table by
+name. See `config/db_routers.py`.
 
 ### Redis compatibility, portability and the Redis-free target (2026-08-09)
 
@@ -136,13 +171,14 @@ distinct and all three hold:
 | --- | --- | --- |
 | **Compatibility** | Redis is fully supported and is a first-class deployment choice — default cache, rate limiting, Celery broker. A deployment that already operates Redis SHOULD use it. Recent views is the exception: RF1 made it PostgreSQL-only and no Redis option is offered. | `CARE_CACHE_BACKEND=redis` is the default; the `ratelimit` alias falls back to `REDIS_URL` |
 | **Portability** | CARE does not depend *architecturally* on Redis. Redis-dependent capabilities sit behind explicit seams and business code does not know whether Redis exists. | the four seams below |
-| **Redis-free target** | A fully Redis-free deployment is a **future** supported profile. One capability still requires redesign. | RF2, `unresolved-items.md` Part RF (RF1 is done) |
+| **Redis-free target** | Delivered for the API by RF2 (2026-08-11): `postgres` + `postgres` + `cloud_tasks`, verified with Redis unreachable. Celery and strict rate limiting still require Redis **when selected**. | `unresolved-items.md` Part RF (RF1 and RF2 both done) |
 
 The seams:
 
 ```text
 cache alias            config/caches.py, selected by CARE_CACHE_BACKEND
-rate limit wrapper     config/ratelimit.py
+rate limit wrapper     config/ratelimit.py, store selected by
+                       CARE_RATE_LIMIT_BACKEND (RF2)
 recent views service   care/emr/utils/recent_views.py (PostgreSQL, RF1)
 async dispatcher       ADR-0003 task backend selection
 ```
@@ -152,7 +188,7 @@ earlier roll-ups in §5 and §7, which describe the pre-ES-04 repository:
 
 | Responsibility | Requires Redis today | Disposition |
 | --- | --- | --- |
-| rate limiting | **yes**, every profile | RF2 — provider-neutral limiter with PostgreSQL atomic counters |
+| rate limiting | only when `CARE_RATE_LIMIT_BACKEND=redis` | selectable since RF2. `postgres` is Redis-free and best-effort; `disabled` counts nothing |
 | Celery broker | only when `CARE_TASK_BACKEND=celery` | already selectable (ADR-0003) |
 | `default` cache | only when `CARE_CACHE_BACKEND=redis` | already selectable (ADR-0004) |
 | `recent_views` | no | `emr.UserValueSetRecentView` (RF1) |
@@ -160,13 +196,13 @@ earlier roll-ups in §5 and §7, which describe the pre-ES-04 repository:
 | pattern invalidation | no | explicit key registry (ES-04) |
 | initialization | no | verified with an unreachable Redis |
 
-RF2 belongs to no current phase — not ES-04, ES-05, ES-06 or ES-07. It is future
-modernization work and is not designed in this inventory. RF1 was executed as a
-focused modernization of the recent-views capability and is closed.
+RF1 and RF2 were both executed as focused modernizations of a single capability
+and are closed. Neither belonged to ES-04, ES-05, ES-06 or ES-07.
 
-So: Redis-free is **not impossible**, and it is **not already implemented**. One
-bounded capability stands between the current state and that profile, and the
-seams above are what keep it a change to that capability rather than to the
+So: Redis-free is **implemented for the API**, and its boundary is stated rather
+than blurred — Celery and strict rate limiting still require Redis when
+selected. The seams above are what kept each change a change to one capability
+rather than to the
 application.
 
 ---
@@ -550,6 +586,24 @@ implements atomic `incr`.
 
 **verified** `config/settings/test.py:58` silences `django_ratelimit.E003`, the
 system check that warns when the cache backend is unsuitable for rate limiting.
+
+**Superseded — RF2, 2026-08-11.** The table and findings above are the
+pre-modernization snapshot and are kept as the record of what was surveyed. What
+changed since:
+
+- the counter store is selected by `CARE_RATE_LIMIT_BACKEND`, not fixed;
+- the "viable but weaker" PostgreSQL assessment above was **adopted, with the
+  weakness named** rather than rejected. The `inferred` doubt about MFA limits
+  is answered by configuration, not by argument: a deployment that needs strict
+  limits on those endpoints selects `redis`, and the reference says so
+  (`07-configuration-reference.md` §26.1.2, §16 security wording);
+- the LocMem assessment is unchanged and LocMem is still refused — `E003` fires
+  for it in every mode, and RF2's suppression is scoped to `postgres`;
+- `config/settings/test.py` no longer silences `E003`. Nothing is silenced under
+  `redis`, which is the mode the suite runs in;
+- the six call sites are unchanged and still route through
+  `config/ratelimit.py`, which is now also where the backend decision and the
+  PostgreSQL failure policy live.
 
 ### 4.9 Health checks
 

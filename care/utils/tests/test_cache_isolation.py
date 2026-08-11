@@ -123,10 +123,21 @@ class ProductionKeySemanticsTests(SimpleTestCase):
     """
 
     def test_production_settings_do_not_use_the_worker_scoped_key_function(self):
-        from config.caches import build_ratelimit_cache
+        from config.caches import (
+            POSTGRES_RATE_LIMIT_BACKEND,
+            REDIS_RATE_LIMIT_BACKEND,
+            build_ratelimit_cache,
+        )
 
-        production_ratelimit = build_ratelimit_cache("redis://localhost:6379")
-        self.assertNotIn("KEY_FUNCTION", production_ratelimit)
+        # Both counting modes, since RF2 gave the alias a second backend and
+        # neither may pick up the test profile's per-worker namespacing.
+        for backend, kwargs in (
+            (REDIS_RATE_LIMIT_BACKEND, {"redis_url": "redis://localhost:6379"}),
+            (POSTGRES_RATE_LIMIT_BACKEND, {}),
+        ):
+            with self.subTest(backend=backend):
+                production_ratelimit = build_ratelimit_cache(backend, **kwargs)
+                self.assertNotIn("KEY_FUNCTION", production_ratelimit)
 
     def test_default_cache_key_function_is_djangos_own(self):
         production = build_default_cache("postgres", table="care_cache")

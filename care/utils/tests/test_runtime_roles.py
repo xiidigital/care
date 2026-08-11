@@ -579,9 +579,22 @@ class StartupLoggingTests(SimpleTestCase):
         summary = runtime_summary()
         self.assertEqual(
             set(summary),
-            {"process_role", "storage_backend", "task_backend", "cache_backend"},
+            {
+                "process_role",
+                "storage_backend",
+                "task_backend",
+                "cache_backend",
+                # RF2. The backend name alone would not tell a reader whether
+                # the limits are actually enforced under load, so the guarantee
+                # is stated next to it.
+                "rate_limit_backend",
+                "rate_limit_semantics",
+            },
         )
         self.assertEqual(summary["process_role"], settings.CARE_PROCESS_ROLE)
+        self.assertEqual(
+            summary["rate_limit_backend"], settings.CARE_RATE_LIMIT_BACKEND
+        )
 
     def test_the_summary_carries_no_credential_or_connection_string(self):
         values = " ".join(runtime_summary().values())

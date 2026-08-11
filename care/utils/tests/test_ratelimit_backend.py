@@ -12,14 +12,19 @@ rate-limits nothing. `django_ratelimit` read `settings.RATELIMIT_USE_CACHE`,
 CARE never set it, and it therefore defaulted to `default`. The ADR-0004 cache
 choice was deciding whether CARE could start.
 
-The fix is the alias the library already supports: `RATELIMIT_USE_CACHE` now
-names a dedicated `ratelimit` cache, and that alias is always Redis. These tests
-cover both halves -- that the coupling is gone, and that the Redis requirement
-is a real constraint rather than a preference (`unresolved-items.md` K4).
+The fix is the alias the library already supports: `RATELIMIT_USE_CACHE` names a
+dedicated `ratelimit` cache. These tests cover the decoupling itself -- that the
+ADR-0004 cache choice no longer reaches rate limiting, whatever either side is
+set to.
 
-Nothing here silences a check. `SILENCED_SYSTEM_CHECKS` was removed from the
-test profile in the same change, so the suite now sees the same check results a
-production process does.
+What backs the alias became a separate question in RF2, and is answered in
+`test_ratelimit_modes.py`. This file therefore asserts the *seam*: a dedicated
+alias, keys that do not land in `default`, counters shared across connections,
+windows that expire, and a store outage that fails closed. It runs under the
+suite's default `redis` mode, which is also the mode these guarantees describe.
+
+Nothing here silences a check. Under `redis` the profile silences nothing at
+all, so the suite sees the same check results a production process does.
 """
 
 import time
@@ -40,10 +45,19 @@ from django_ratelimit.core import EXPIRATION_FUDGE, _get_window, _make_cache_key
 from care.utils.tests.ratelimit import reset_ratelimit_counters
 from config.caches import (
     RATELIMIT_CACHE_ALIAS,
+    REDIS_RATE_LIMIT_BACKEND,
     build_default_cache,
     build_ratelimit_cache,
 )
 from config.ratelimit import ratelimit
+
+
+def redis_ratelimit_cache(url=None, legacy=None):
+    """The `redis` mode alias, which is what every test in this file assumes."""
+    return build_ratelimit_cache(
+        REDIS_RATE_LIMIT_BACKEND, redis_url=url, legacy_redis_url=legacy
+    )
+
 
 REDIS_URL = settings.REDIS_URL
 
@@ -71,20 +85,23 @@ class AliasSelectionTests(SimpleTestCase):
         self.assertEqual(settings.RATELIMIT_USE_CACHE, RATELIMIT_CACHE_ALIAS)
         self.assertNotEqual(settings.RATELIMIT_USE_CACHE, "default")
 
-    def test_the_alias_is_redis_whatever_the_cache_backend_is(self):
+    def test_the_alias_is_redis_under_the_suites_default_mode(self):
+        self.assertEqual(settings.CARE_RATE_LIMIT_BACKEND, REDIS_RATE_LIMIT_BACKEND)
         self.assertEqual(
             settings.CACHES[RATELIMIT_CACHE_ALIAS]["BACKEND"],
             "django_redis.cache.RedisCache",
         )
 
     def test_the_alias_is_not_selected_by_care_cache_backend(self):
-        # Every CARE_CACHE_BACKEND value produces the same rate-limit config.
-        # If this ever stops holding, L1 has been reintroduced.
+        # Every CARE_CACHE_BACKEND value produces the same rate-limit config for
+        # a given CARE_RATE_LIMIT_BACKEND. If this ever stops holding, L1 has
+        # been reintroduced. RF2 kept the two selections orthogonal precisely so
+        # that this stays true in both directions.
         for backend in ("postgres", "redis", "locmem", "dummy"):
             with self.subTest(backend=backend):
                 caches_config = {
                     "default": build_default_cache(backend, redis_url=REDIS_URL),
-                    RATELIMIT_CACHE_ALIAS: build_ratelimit_cache(REDIS_URL),
+                    RATELIMIT_CACHE_ALIAS: redis_ratelimit_cache(REDIS_URL),
                 }
                 self.assertEqual(
                     caches_config[RATELIMIT_CACHE_ALIAS]["BACKEND"],
@@ -94,25 +111,29 @@ class AliasSelectionTests(SimpleTestCase):
     def test_building_the_alias_opens_no_connection(self):
         # Settings import must not touch Redis: the `init` role imports settings
         # with no Redis reachable and has to survive it.
-        config = build_ratelimit_cache(UNREACHABLE_REDIS)
+        config = redis_ratelimit_cache(UNREACHABLE_REDIS)
         self.assertEqual(config["LOCATION"], UNREACHABLE_REDIS)
 
     def test_a_missing_redis_url_is_refused_rather_than_defaulted(self):
         from django.core.exceptions import ImproperlyConfigured
 
         with self.assertRaises(ImproperlyConfigured) as ctx:
-            build_ratelimit_cache("", "")
-        self.assertIn("REDIS_RATE_LIMIT_URL", str(ctx.exception))
+            redis_ratelimit_cache("", "")
+        message = str(ctx.exception)
+        self.assertIn("REDIS_RATE_LIMIT_URL", message)
+        # RF2: the error now names the way out, because there is one. Selecting
+        # a Redis backend without a URL is a mistake; needing no Redis is not.
+        self.assertIn("postgres", message)
 
     def test_the_url_falls_back_to_the_legacy_redis_url(self):
         # The local compose profile sets only REDIS_URL and must keep working.
-        config = build_ratelimit_cache("", REDIS_URL)
+        config = redis_ratelimit_cache("", REDIS_URL)
         self.assertEqual(config["LOCATION"], REDIS_URL)
 
     def test_production_keys_are_not_worker_scoped(self):
         # The test profile adds KEY_FUNCTION for parallel isolation. Production
         # must keep the plain KEY_PREFIX:version:key form.
-        self.assertNotIn("KEY_FUNCTION", build_ratelimit_cache(REDIS_URL))
+        self.assertNotIn("KEY_FUNCTION", redis_ratelimit_cache(REDIS_URL))
 
 
 class SystemCheckTests(SimpleTestCase):
@@ -123,7 +144,7 @@ class SystemCheckTests(SimpleTestCase):
     def caches_with_default(self, backend):
         return {
             "default": build_default_cache(backend, redis_url=REDIS_URL),
-            RATELIMIT_CACHE_ALIAS: build_ratelimit_cache(REDIS_URL),
+            RATELIMIT_CACHE_ALIAS: redis_ratelimit_cache(REDIS_URL),
         }
 
     def test_checks_pass_with_a_postgres_default_cache(self):
@@ -151,10 +172,13 @@ class SystemCheckTests(SimpleTestCase):
         # library's supported list either.
         self.assertIn("django_ratelimit.E003", [issue.id for issue in issues])
 
-    def test_nothing_about_django_ratelimit_is_silenced(self):
+    def test_nothing_is_silenced_under_the_redis_mode(self):
+        # RF2 introduced a suppression, and confined it to `postgres`. Under the
+        # suite's `redis` profile the list must still be empty -- a suppression
+        # that leaked into the strict mode would hide a real defect there.
+        self.assertEqual(settings.CARE_RATE_LIMIT_BACKEND, REDIS_RATE_LIMIT_BACKEND)
         silenced = getattr(settings, "SILENCED_SYSTEM_CHECKS", [])
-        self.assertNotIn("django_ratelimit.E003", silenced)
-        self.assertNotIn("django_ratelimit.W001", silenced)
+        self.assertEqual(list(silenced), [])
 
     def test_the_full_check_suite_passes_with_a_postgres_default_cache(self):
         # `manage.py check` is what `init` actually runs into, so run the whole
@@ -168,14 +192,22 @@ class SystemCheckTests(SimpleTestCase):
         self.assertEqual(errors, [])
 
 
-class WhyNotPostgresTests(TestCase):
+class WhyPostgresIsBestEffortTests(TestCase):
     """
     E003 is a statement of fact about `DatabaseCache`, not excess caution.
 
     ES-04 §17 recorded this as K4 and declined to implement an approximation.
-    Adopting the PostgreSQL cache for rate limiting would have required proving
-    the counter is safe under concurrency; these tests prove the opposite, which
-    is why the alias is Redis.
+    These tests establish the fact itself: the PostgreSQL cache cannot increment
+    safely under concurrency, and Redis can.
+
+    RF2 did not overturn that. It changed what CARE does with it. The fact used
+    to justify a hard requirement -- Redis or nothing -- and now justifies a
+    label: `postgres` mode exists, works, and is documented as best-effort
+    exactly because of what is demonstrated here. The suppression of E003 in
+    that mode is an acceptance of this evidence, not a disagreement with it.
+
+    `test_ratelimit_modes.PostgresBestEffortConcurrencyTests` carries the same
+    demonstration through the real limiter over independent connections.
     """
 
     @classmethod
@@ -428,7 +460,7 @@ class BackendUnavailableTests(SimpleTestCase):
         return override_settings(
             CACHES={
                 **settings.CACHES,
-                RATELIMIT_CACHE_ALIAS: build_ratelimit_cache(UNREACHABLE_REDIS),
+                RATELIMIT_CACHE_ALIAS: redis_ratelimit_cache(UNREACHABLE_REDIS),
             }
         )
 
@@ -477,7 +509,7 @@ class InitRoleWithoutRedisTests(SimpleTestCase):
         with override_settings(
             CACHES={
                 "default": build_default_cache("postgres", table="care_cache"),
-                RATELIMIT_CACHE_ALIAS: build_ratelimit_cache(UNREACHABLE_REDIS),
+                RATELIMIT_CACHE_ALIAS: redis_ratelimit_cache(UNREACHABLE_REDIS),
             }
         ):
             self.assertEqual(check_caches(None), [])
@@ -495,7 +527,7 @@ class InitRoleWithoutRedisTests(SimpleTestCase):
         with override_settings(
             CACHES={
                 "default": build_default_cache("locmem"),
-                RATELIMIT_CACHE_ALIAS: build_ratelimit_cache(UNREACHABLE_REDIS),
+                RATELIMIT_CACHE_ALIAS: redis_ratelimit_cache(UNREACHABLE_REDIS),
             }
         ):
             call_command("createcachetable", verbosity=0)

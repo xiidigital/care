@@ -108,16 +108,31 @@ def runtime_summary() -> dict[str, str]:
 
     Every value is a backend *name* chosen by configuration -- never a URL,
     credential or connection string. Accidental deployment misconfiguration is
-    usually visible in these four values alone.
+    usually visible in these few values alone.
+
+    ``rate_limit_semantics`` is the exception to "these are just names": it
+    states the guarantee rather than the technology, because the technology does
+    not imply it to a reader. RF2 permits a PostgreSQL rate-limit store whose
+    increments are not atomic, and a deployment that ends up there by accident
+    should be able to see it in one startup line rather than infer it from a
+    backend name. Absent under ``disabled``, where there is no counter to
+    characterise.
     """
     from django.conf import settings
 
-    return {
+    from config.caches import rate_limit_semantics
+
+    summary = {
         "process_role": settings.CARE_PROCESS_ROLE,
         "storage_backend": settings.CARE_STORAGE_BACKEND,
         "task_backend": settings.CARE_TASK_BACKEND,
         "cache_backend": settings.CARE_CACHE_BACKEND,
+        "rate_limit_backend": settings.CARE_RATE_LIMIT_BACKEND,
     }
+    semantics = rate_limit_semantics(settings.CARE_RATE_LIMIT_BACKEND)
+    if semantics is not None:
+        summary["rate_limit_semantics"] = semantics
+    return summary
 
 
 def log_runtime_summary() -> None:

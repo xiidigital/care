@@ -17,15 +17,21 @@ Separate concerns live here, and keeping them apart is the point:
     ``django.core.cache`` and may use only the portable Django cache API.
 
 ``ratelimit``
-    Not cache. It needs an atomic ``INCR``, which the portable API does not
-    offer, so it is not selected by ``CARE_CACHE_BACKEND`` and is listed
-    explicitly -- the remaining Redis dependencies should be enumerable rather
-    than discovered when something breaks. It is now the only such alias.
+    Not cache. It counts, and counting wants an atomic ``INCR`` that the
+    portable API does not offer. It is therefore never selected by
+    ``CARE_CACHE_BACKEND``; RF2 gives it its own variable,
+    ``CARE_RATE_LIMIT_BACKEND``, with its own supported values and its own
+    documented guarantees. The two selections are orthogonal and every
+    combination of them is valid.
 
 Distributed locking is not configured here: ES-05 uses PostgreSQL
 transaction-scoped advisory locks directly. Recent views are not configured
 here either: RF1 moved them to a PostgreSQL model
 (``care/emr/utils/recent_views.py``), so they need no cache alias at all.
+
+After RF2 no alias here requires Redis. Redis remains fully supported and is
+still the strongest option for rate limiting, but it is now selected rather than
+assumed.
 """
 
 from django.core.exceptions import ImproperlyConfigured
@@ -44,19 +50,61 @@ SUPPORTED_CACHE_BACKENDS = (
 )
 
 #: The one alias for a responsibility that is *not* ADR-0004 cache and is
-#: therefore never selected by ``CARE_CACHE_BACKEND``. It still requires Redis,
-#: and is named here so the remaining Redis dependency can be enumerated rather
-#: than discovered at runtime.
-#:
-#: ``ratelimit``
-#:     ``django_ratelimit`` -- needs an atomic ``INCR``. See
-#:     :func:`build_ratelimit_cache` for why no portable backend qualifies.
+#: therefore never selected by ``CARE_CACHE_BACKEND``. ``CARE_RATE_LIMIT_BACKEND``
+#: selects it instead, so that rate limiting keeps its own store and its own
+#: failure policy even when both selections name the same technology.
 RATELIMIT_CACHE_ALIAS = "ratelimit"
+
+POSTGRES_RATE_LIMIT_BACKEND = "postgres"
+REDIS_RATE_LIMIT_BACKEND = "redis"
+DISABLED_RATE_LIMIT_BACKEND = "disabled"
+
+#: Values accepted by ``CARE_RATE_LIMIT_BACKEND``, strongest first.
+SUPPORTED_RATE_LIMIT_BACKENDS = (
+    REDIS_RATE_LIMIT_BACKEND,
+    POSTGRES_RATE_LIMIT_BACKEND,
+    DISABLED_RATE_LIMIT_BACKEND,
+)
+
+#: What each mode actually promises, for the startup summary. These strings are
+#: the honest short form of section 15 of the RF2 brief and are deliberately not
+#: interchangeable: ``postgres`` must never be reported as strict.
+STRICT_ATOMIC_SEMANTICS = "strict_atomic"
+BEST_EFFORT_SEMANTICS = "best_effort_non_atomic"
+
+#: ``django_ratelimit``'s check that a cache backend cannot increment atomically.
+#: Suppressed under -- and only under -- ``CARE_RATE_LIMIT_BACKEND=postgres``.
+#: See :func:`ratelimit_silenced_checks`.
+RATELIMIT_NON_ATOMIC_CHECK = "django_ratelimit.E003"
 
 DEFAULT_CACHE_TABLE = "care_cache"
 DEFAULT_CACHE_KEY_PREFIX = "care"
 DEFAULT_CACHE_TIMEOUT = 300
 DEFAULT_RATELIMIT_KEY_PREFIX = "care-ratelimit"
+
+#: Its own table, never ``DEFAULT_CACHE_TABLE``. Rate limiting is a distinct
+#: responsibility with a distinct retention profile, and sharing a table would
+#: put ordinary cache entries and security counters under one ``MAX_ENTRIES``
+#: cull budget.
+DEFAULT_RATELIMIT_CACHE_TABLE = "care_ratelimit_cache"
+
+#: Entry lifetime for the PostgreSQL rate-limit alias, and not a cosmetic
+#: default. ``django_ratelimit`` seeds a counter with the window's own TTL, but
+#: every subsequent increment goes through ``BaseCache.incr``, which re-``set``s
+#: the key using the *alias* timeout instead of the remaining window. Leaving
+#: Django's 300s default would silently expire the counter for any window longer
+#: than five minutes -- CARE's own limits include ``10/h`` -- and an expired
+#: counter restarts at zero, which admits traffic. A day comfortably outlives
+#: every window CARE configures; keys are namespaced by window, so an entry that
+#: outlives its window is never read again, only culled.
+DEFAULT_RATELIMIT_CACHE_TIMEOUT = 86400
+
+#: ``DatabaseCache`` culls a third of the table whenever the row count passes
+#: ``MAX_ENTRIES``, and it does not care which rows. At Django's default of 300
+#: that would drop live rate-limit counters under ordinary load, which is a
+#: sharper failure than the non-atomic increment RF2 does accept. Raised so that
+#: culling stays a housekeeping event rather than a limiter defect.
+DEFAULT_RATELIMIT_MAX_ENTRIES = 10000
 
 _DB_BACKEND = "django.core.cache.backends.db.DatabaseCache"
 _REDIS_BACKEND = "django_redis.cache.RedisCache"
@@ -95,6 +143,159 @@ def validate_cache_backend(backend: str) -> str:
         )
         raise ImproperlyConfigured(msg)
     return backend
+
+
+def validate_rate_limit_backend(backend: str) -> str:
+    """Return ``backend`` if supported, otherwise raise ``ImproperlyConfigured``.
+
+    Deliberately independent of :func:`validate_cache_backend`. The rate-limit
+    store is not inferred from ``CARE_CACHE_BACKEND`` and never has been: a
+    deployment may want PostgreSQL caching with strict Redis counters, or Redis
+    caching with best-effort PostgreSQL counters, and both are valid.
+    """
+    if backend not in SUPPORTED_RATE_LIMIT_BACKENDS:
+        supported = ", ".join(SUPPORTED_RATE_LIMIT_BACKENDS)
+        msg = (
+            f"Invalid CARE_RATE_LIMIT_BACKEND: {backend!r}. "
+            f"Supported values are: {supported}."
+        )
+        raise ImproperlyConfigured(msg)
+    return backend
+
+
+def validate_cache_table_isolation(
+    cache_backend: str,
+    rate_limit_backend: str,
+    *,
+    cache_table: str,
+    rate_limit_table: str,
+) -> None:
+    """Refuse a configuration where both DatabaseCache aliases share one table.
+
+    The guard applies to exactly the case where the collision is real: both
+    ``CARE_CACHE_BACKEND`` and ``CARE_RATE_LIMIT_BACKEND`` select PostgreSQL, so
+    both aliases are a ``DatabaseCache`` and both read ``LOCATION`` as a table
+    name. If either alias is Redis, LocMem, Dummy or absent, the matching
+    variable is inert -- ``CARE_CACHE_TABLE`` names nothing under
+    ``CARE_CACHE_BACKEND=redis`` -- and refusing the configuration would reject a
+    deployment in which nothing is shared.
+
+    Sharing the table is not a naming preference; it breaks four things at once:
+
+    * the dedicated rate-limit alias loses the isolation it exists to provide,
+      and ordinary cache entries sit in the security counters' table;
+    * :class:`config.db_routers.RateLimitCacheRouter` distinguishes the two
+      caches by table name and nothing else -- every ``DatabaseCache`` alias
+      shares one model stub and one app label -- so an identical name makes the
+      router match both;
+    * consequently ``default`` cache traffic is routed to
+      :data:`config.db_routers.RATELIMIT_DB_ALIAS`, a connection deliberately
+      running with ``ATOMIC_REQUESTS`` off, which is not where ADR-0004 cache
+      traffic belongs;
+    * ``MAX_ENTRIES`` is per table, so the rate-limit alias's raised cull budget
+      would be spent on ordinary cache entries and a cull could drop live
+      counters.
+
+    Neither table is renamed here. Picking a name on the operator's behalf would
+    silently move data they may already have created, and the two variables are
+    exactly the place to express the intent.
+    """
+    validate_cache_backend(cache_backend)
+    validate_rate_limit_backend(rate_limit_backend)
+
+    if cache_backend != POSTGRES_CACHE_BACKEND:
+        return
+    if rate_limit_backend != POSTGRES_RATE_LIMIT_BACKEND:
+        return
+    if cache_table != rate_limit_table:
+        return
+
+    msg = (
+        f"CARE_CACHE_TABLE and CARE_RATE_LIMIT_TABLE are both {cache_table!r}. "
+        f"CARE_CACHE_BACKEND={POSTGRES_CACHE_BACKEND!r} and "
+        f"CARE_RATE_LIMIT_BACKEND={POSTGRES_RATE_LIMIT_BACKEND!r} put both the "
+        "default cache and the rate-limit counters in a PostgreSQL "
+        "DatabaseCache, and the two tables must be distinct. Sharing one table "
+        "removes the isolation the rate-limit alias exists to provide, makes "
+        "config.db_routers.RateLimitCacheRouter -- which identifies the "
+        "rate-limit cache by table name -- route default cache traffic through "
+        "the rate-limit database alias, and puts ordinary cache entries and "
+        "security counters under a single MAX_ENTRIES cull budget. Set "
+        "CARE_CACHE_TABLE and CARE_RATE_LIMIT_TABLE to different table names "
+        f"(the defaults, {DEFAULT_CACHE_TABLE!r} and "
+        f"{DEFAULT_RATELIMIT_CACHE_TABLE!r}, already are)."
+    )
+    raise ImproperlyConfigured(msg)
+
+
+def rate_limit_semantics(backend: str) -> str | None:
+    """The guarantee ``backend`` provides, for the startup summary.
+
+    ``None`` for ``disabled``: there is no counter, so there is nothing to
+    characterise.
+    """
+    validate_rate_limit_backend(backend)
+    if backend == REDIS_RATE_LIMIT_BACKEND:
+        return STRICT_ATOMIC_SEMANTICS
+    if backend == POSTGRES_RATE_LIMIT_BACKEND:
+        return BEST_EFFORT_SEMANTICS
+    return None
+
+
+def ratelimit_installed_apps(backend: str) -> tuple[str, ...]:
+    """The ``django_ratelimit`` entry for ``INSTALLED_APPS``, if it belongs there.
+
+    The app contributes no models, no URLs and no middleware CARE uses. Its
+    entire effect is ``ready()`` registering ``check_caches``, which validates
+    the *rate-limit cache alias*. Under ``disabled`` there is no such alias --
+    that is the whole point of the mode -- so the check would report ``E002``
+    against a configuration that is exactly right.
+
+    Not installing it is the only resolution that keeps three things true at
+    once: ``manage.py check`` is clean, nothing is silenced, and disabled mode
+    requires neither Redis nor a cache table. Silencing the check instead would
+    have spent a suppression on a mode that has nothing to suppress, and RF2
+    section 5 confines suppression to ``postgres``.
+
+    ``django_ratelimit`` itself stays installed in the project and imported by
+    the wrapper; only the app registration is conditional.
+    """
+    validate_rate_limit_backend(backend)
+    if backend == DISABLED_RATE_LIMIT_BACKEND:
+        return ()
+    return ("django_ratelimit",)
+
+
+def ratelimit_silenced_checks(backend: str) -> list[str]:
+    """System checks CARE deliberately accepts, for ``SILENCED_SYSTEM_CHECKS``.
+
+    Exactly one entry, in exactly one mode.
+
+    ``django_ratelimit.E003`` is correct: ``DatabaseCache`` inherits
+    ``BaseCache.incr``, a ``get()`` then a ``set()`` with no row lock, so two
+    concurrent requests can both read *n* and both write *n+1*. The check is
+    stating that fact, and RF2 does not dispute it -- ``postgres`` mode accepts
+    the resulting undercount as the price of a Redis-free deployment, documents
+    it as best-effort, and proves it in
+    ``care/utils/tests/test_ratelimit_modes.py``.
+
+    What is *not* silenced, in any mode:
+
+    ``django_ratelimit.W001``
+        "not officially supported". Left to fire under ``postgres`` on purpose.
+        It is a warning, so ``manage.py check`` still exits clean, and it keeps
+        the weaker guarantee visible to whoever runs it -- which is the same
+        thing the startup summary does, from the other end.
+    ``django_ratelimit.E001``/``E002``
+        Genuine misconfiguration. Silencing these would hide a rate limiter
+        pointed at nothing.
+
+    Redis mode silences nothing and must keep passing the check on its merits.
+    """
+    validate_rate_limit_backend(backend)
+    if backend == POSTGRES_RATE_LIMIT_BACKEND:
+        return [RATELIMIT_NON_ATOMIC_CHECK]
+    return []
 
 
 def resolve_redis_cache_url(
@@ -187,52 +388,89 @@ def build_default_cache(
 
 
 def build_ratelimit_cache(
+    backend: str,
+    *,
     redis_url: str | None = None,
     legacy_redis_url: str | None = None,
-    *,
     key_prefix: str = DEFAULT_RATELIMIT_KEY_PREFIX,
-) -> dict:
+    table: str = DEFAULT_RATELIMIT_CACHE_TABLE,
+    timeout: int = DEFAULT_RATELIMIT_CACHE_TIMEOUT,
+    max_entries: int = DEFAULT_RATELIMIT_MAX_ENTRIES,
+) -> dict | None:
     """
-    Build the ``CACHES["ratelimit"]`` entry. Always Redis, never ``default``.
+    Build the ``CACHES["ratelimit"]`` entry for ``backend``, or ``None``.
 
-    **Why this alias exists.** ``django_ratelimit`` counts with ``cache.add()``
-    followed by ``cache.incr()``, and its ``E003`` system check rejects any
-    backend whose ``incr`` is not atomic. Before this alias it read ``default``,
-    so ``CARE_CACHE_BACKEND=postgres`` made *every management command* abort --
-    including the whole `init` role, which never rate-limits anything. Rate
-    limiting now names its own alias through ``RATELIMIT_USE_CACHE``, so the
-    ADR-0004 cache choice no longer decides whether CARE can start
-    (`unresolved-items.md` L1).
+    Never ``default``, in any mode. ``django_ratelimit`` counts with
+    ``cache.add()`` followed by ``cache.incr()``, and its ``E003`` check rejects
+    any backend whose ``incr`` is not atomic. While rate limiting read
+    ``default``, ``CARE_CACHE_BACKEND=postgres`` therefore aborted *every*
+    management command -- including the whole `init` role, which rate-limits
+    nothing (`unresolved-items.md` L1). Naming its own alias through
+    ``RATELIMIT_USE_CACHE`` decoupled the two, and RF2 keeps that separation
+    even when both selections happen to name PostgreSQL: the responsibilities
+    differ, and so do the table, the retention and the failure policy.
 
-    **Why not PostgreSQL.** ``DatabaseCache`` does not override ``incr``; it
-    inherits ``BaseCache.incr``, which is a ``get()`` then a ``set()`` on two
-    separate statements with no row lock. Two concurrent requests both read *n*
-    and both write *n+1*, so the limit overshoots. ``E003`` is stating a fact,
-    not being cautious, and silencing it would convert a startup error into a
-    silent limiter defect (`unresolved-items.md` K4). Redis ``INCR`` is a single
-    atomic command, which is the guarantee actually required.
+    **redis** -- strict. ``INCR`` is one command executed by Redis rather than a
+    read-modify-write in the caller, so concurrent requests cannot lose an
+    increment. This is the mode to choose when the limit is meant to be an
+    actual limit, and it is the default.
 
-    So Redis stays mandatory *for rate limiting* even though ADR-0004 made it
-    optional for ordinary cache. CARE is not Redis-free; it is Redis-optional
-    for the `default` cache and Redis-required here.
-
-    **Failure policy.** ``IGNORE_EXCEPTIONS`` is True here, deliberately.
-    An unreachable Redis makes ``add()`` and ``incr()`` return None,
-    which ``django_ratelimit`` reads as an unknown count; with
-    ``RATELIMIT_FAIL_OPEN`` left False it then reports ``should_limit`` and CARE
-    falls through to captcha validation. That is fail-closed with a captcha
-    escape, which is what 07-configuration-reference.md §26.4 asks for. Letting
-    the exception propagate instead would fail closed as an unhandled 500 on the
+    ``IGNORE_EXCEPTIONS`` is True here, deliberately. An unreachable Redis makes
+    ``add()`` and ``incr()`` return None, which ``django_ratelimit`` reads as an
+    unknown count; with ``RATELIMIT_FAIL_OPEN`` left False it then reports
+    ``should_limit`` and CARE falls through to captcha validation. That is
+    fail-closed with a captcha escape (07-configuration-reference.md §26.4).
+    Letting the exception propagate would fail closed as an unhandled 500 on the
     login and password-reset paths, which is a worse way to say the same thing.
 
-    Opens no connection: this only builds a dict.
+    **postgres** -- best-effort, and labelled that way everywhere. ``E003`` is
+    right about ``DatabaseCache``: two concurrent requests can both read *n* and
+    both write *n+1*, so a burst is undercounted and more requests get through
+    than the configured rate allows. RF2 accepts that in exchange for a
+    deployment that needs no Redis at all, and accepts it *explicitly* -- the
+    check is suppressed only in this mode, the startup summary says
+    ``best_effort_non_atomic``, and a test demonstrates the undercount rather
+    than papering over it. It is not equivalent to Redis and must not be
+    described as though it were.
+
+    Two options carry real weight here rather than being tuning. ``TIMEOUT``
+    outlives the longest window because ``BaseCache.incr`` re-``set``s the key
+    with the alias timeout instead of the remaining window, and ``MAX_ENTRIES``
+    is raised because ``DatabaseCache`` culls a third of the table at the
+    threshold without regard for what it drops. See the constants above.
+
+    **disabled** -- ``None``. No alias is configured, because none is needed:
+    the wrapper returns "not limited" without reaching a backend. A missing
+    alias is the honest representation of that, and it is why
+    :func:`ratelimit_installed_apps` also drops the app.
+
+    Opens no connection in any mode: this only builds a dict.
     """
+    validate_rate_limit_backend(backend)
+
+    if backend == DISABLED_RATE_LIMIT_BACKEND:
+        return None
+
+    if backend == POSTGRES_RATE_LIMIT_BACKEND:
+        # LOCATION is the table name, created by the explicit `createcachetable`
+        # step in scripts/initialize.sh -- which walks CACHES and picks up every
+        # DatabaseCache alias, so this one needs no command of its own.
+        return {
+            "BACKEND": _DB_BACKEND,
+            "LOCATION": table,
+            "KEY_PREFIX": key_prefix,
+            "TIMEOUT": timeout,
+            "OPTIONS": {"MAX_ENTRIES": max_entries},
+        }
+
     url = (redis_url or "").strip() or (legacy_redis_url or "").strip()
     if not url:
         msg = (
-            "Rate limiting requires REDIS_RATE_LIMIT_URL (or the legacy "
-            "REDIS_URL). It is not part of CARE_CACHE_BACKEND: django_ratelimit "
-            "needs an atomic INCR, which no portable cache backend provides."
+            f"CARE_RATE_LIMIT_BACKEND={REDIS_RATE_LIMIT_BACKEND!r} requires "
+            "REDIS_RATE_LIMIT_URL (or the legacy REDIS_URL). Set "
+            f"CARE_RATE_LIMIT_BACKEND={POSTGRES_RATE_LIMIT_BACKEND!r} for "
+            "best-effort rate limiting without Redis, or "
+            f"{DISABLED_RATE_LIMIT_BACKEND!r} to turn rate limiting off."
         )
         raise ImproperlyConfigured(msg)
     return {
@@ -244,6 +482,20 @@ def build_ratelimit_cache(
             "IGNORE_EXCEPTIONS": True,
         },
     }
+
+
+def build_ratelimit_caches(backend: str, **kwargs) -> dict:
+    """The ``CACHES`` fragment for ``backend``: one alias, or none at all.
+
+    Spread into ``CACHES`` so that ``disabled`` contributes nothing rather than
+    contributing a placeholder. ``createcachetable``, ``check_caches`` and the
+    wrapper all read ``CACHES``, and all three behave correctly given an absent
+    alias -- provided the app is not installed either.
+    """
+    config = build_ratelimit_cache(backend, **kwargs)
+    if config is None:
+        return {}
+    return {RATELIMIT_CACHE_ALIAS: config}
 
 
 # ``build_redis_only_cache`` used to live here, building a Redis alias for
