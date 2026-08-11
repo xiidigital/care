@@ -1,0 +1,32 @@
+# OpenTofu / Terraform working files.
+
+# Provider plugins and module caches.
+.terraform/
+
+# State, and anything derived from it. State is sensitive infrastructure
+# metadata (ADR-0007 "State") and belongs in the remote backend, never in git.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+
+# Real variable values. Only the *.example files are tracked.
+# Project IDs and sizing are not secret, but tfvars is where a secret would end
+# up by accident, so the whole class is excluded.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Saved plans. A plan file contains every value the plan touched, including
+# ones marked sensitive.
+*.tfplan
+*.tfplan.*
+
+# Override files are for local experiments.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Lock files ARE tracked (.terraform.lock.hcl) — they pin provider versions.

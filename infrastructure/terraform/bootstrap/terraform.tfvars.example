@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars and set project_id.
+#
+# terraform.tfvars is gitignored. Nothing secret belongs here regardless —
+# this file holds infrastructure identifiers only.
+
+project_id = "your-gcp-project-id"
+
+region = "us-central1"
+
+# Defaults to care-tfstate-<project_id>, which is globally unique.
+# state_bucket_name = ""
+
+# noncurrent_version_retention_days = 90
+
+# Leave false until CI/CD exists (ES-08).
+# create_deployer_service_account = false
