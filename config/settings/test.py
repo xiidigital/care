@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 
 from authlib.jose import JsonWebKey
 
@@ -10,6 +11,27 @@ from config.caches import (
     build_ratelimit_cache,
 )
 from config.db_routers import RATELIMIT_DB_ALIAS
+
+# The suite's rate-limit backend is a property of the suite, not of the shell it
+# was started from. A developer or CI job that exports
+# CARE_RATE_LIMIT_BACKEND=postgres -- to run the app that way, which is a
+# legitimate thing to do -- would otherwise change what the tests mean:
+# base.py would install DATABASE_ROUTERS, and config/ratelimit.py would open the
+# postgres path's `transaction.atomic()` inside SimpleTestCase subclasses that
+# have declared no databases, failing unrelated tests with
+# DatabaseOperationForbidden. The three modes are covered on purpose in
+# care/utils/tests/test_ratelimit_modes.py, each selected explicitly by the test
+# that wants it; inheriting one by accident from the environment is not
+# coverage.
+#
+# Pinned in the environment rather than reassigned after the import because base
+# derives five settings from this one value -- DATABASES, DATABASE_ROUTERS,
+# CACHES, INSTALLED_APPS and SILENCED_SYSTEM_CHECKS. Restating them here would
+# duplicate that derivation and drift from it; giving base a fixed input lets it
+# compute exactly what it computes in production. Nothing else is pinned: the
+# subprocess tests that run a real `manage.py check` per mode pass the variable
+# explicitly and still get the mode they asked for.
+os.environ["CARE_RATE_LIMIT_BACKEND"] = REDIS_RATE_LIMIT_BACKEND
 
 from .base import *  # noqa
 from .base import BASE_DIR, REDIS_URL, TEMPLATES, env

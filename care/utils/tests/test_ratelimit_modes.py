@@ -1646,3 +1646,120 @@ class CacheTableIsolationTests(SimpleTestCase):
             CARE_RATE_LIMIT_TABLE="care_ratelimit_cache",
         )
         self.assertEqual(result.returncode, 0, output)
+
+
+#: Read the settings a profile actually resolves to, in a fresh process. Printed
+#: as JSON because the interesting values are the derived ones, and they have to
+#: cross a process boundary to be worth reading at all.
+RESOLVED_RATELIMIT_SETTINGS = """
+import json
+
+from django.conf import settings
+
+print(json.dumps({
+    "backend": settings.CARE_RATE_LIMIT_BACKEND,
+    "routers": list(settings.DATABASE_ROUTERS),
+    "silenced": list(settings.SILENCED_SYSTEM_CHECKS),
+    "ratelimit_cache_backend": settings.CACHES["ratelimit"]["BACKEND"],
+    "ratelimit_app_installed": "django_ratelimit" in settings.INSTALLED_APPS,
+    "database_aliases": sorted(settings.DATABASES),
+}))
+"""
+
+
+class TestSettingsIgnoreTheAmbientBackendTests(SimpleTestCase):
+    """
+    The suite's rate-limit backend comes from the suite, not from the shell.
+
+    A developer running the app in the Redis-free profile exports
+    `CARE_RATE_LIMIT_BACKEND=postgres` and leaves it exported; a CI job that
+    builds the same profile does the same. Before this was pinned, that one
+    variable rewrote the test profile underneath the suite: `base.py` installed
+    `DATABASE_ROUTERS`, and `config/ratelimit.py` took the postgres branch --
+    whose `transaction.atomic()` opens a connection -- inside `SimpleTestCase`
+    subclasses that had declared no databases, so eleven tests in
+    `test_ratelimit_backend.py` failed with `DatabaseOperationForbidden` for
+    reasons that had nothing to do with what they assert.
+
+    Tests are supposed to fail because the code changed. These assert that the
+    resolved profile is a function of `config/settings/test.py` alone, which is
+    what makes the three modes below opt-in rather than ambient.
+    """
+
+    def resolved_settings(self, **extra_env):
+        import json
+
+        result, output = run_settings_process(
+            ["-c", RESOLVED_RATELIMIT_SETTINGS],
+            settings_module="config.settings.test",
+            **extra_env,
+        )
+        self.assertEqual(result.returncode, 0, output)
+        return json.loads(result.stdout)
+
+    def test_the_profile_is_identical_whatever_the_environment_says(self):
+        baseline = self.resolved_settings()
+        for backend in SUPPORTED_RATE_LIMIT_BACKENDS:
+            with self.subTest(backend=backend):
+                self.assertEqual(
+                    self.resolved_settings(CARE_RATE_LIMIT_BACKEND=backend),
+                    baseline,
+                )
+
+    def test_the_pinned_backend_is_redis(self):
+        # Not merely stable -- stable at the strongest mode, so a test that
+        # wants weaker semantics has to say so.
+        resolved = self.resolved_settings(
+            CARE_RATE_LIMIT_BACKEND=POSTGRES_RATE_LIMIT_BACKEND
+        )
+        self.assertEqual(resolved["backend"], REDIS_RATE_LIMIT_BACKEND)
+        self.assertEqual(
+            resolved["ratelimit_cache_backend"], "django_redis.cache.RedisCache"
+        )
+        self.assertTrue(resolved["ratelimit_app_installed"])
+
+    def test_routers_are_not_installed_by_the_ambient_environment(self):
+        # The requirement that DATABASE_ROUTERS is active only where the routed
+        # alias is actually wanted. `CounterSurvivesRequestRollbackTests` turns
+        # it on itself, under `override_settings`, and is the only place it is
+        # on.
+        for backend in SUPPORTED_RATE_LIMIT_BACKENDS:
+            with self.subTest(backend=backend):
+                self.assertEqual(
+                    self.resolved_settings(CARE_RATE_LIMIT_BACKEND=backend)["routers"],
+                    [],
+                )
+
+    def test_nothing_is_silenced_by_the_ambient_environment(self):
+        # `SILENCED_SYSTEM_CHECKS` is derived from the backend, so an inherited
+        # `postgres` would have suppressed E003 for the whole suite -- including
+        # the tests that assert the strict mode suppresses nothing.
+        self.assertEqual(
+            self.resolved_settings(CARE_RATE_LIMIT_BACKEND=POSTGRES_RATE_LIMIT_BACKEND)[
+                "silenced"
+            ],
+            [],
+        )
+
+    def test_the_routed_alias_is_declared_regardless(self):
+        # Unconditional on purpose, and not the same question as whether the
+        # router is installed: the runner has to create and clone the alias
+        # before any test can `override_settings` its way into postgres mode.
+        for backend in SUPPORTED_RATE_LIMIT_BACKENDS:
+            with self.subTest(backend=backend):
+                self.assertIn(
+                    RATELIMIT_DB_ALIAS,
+                    self.resolved_settings(CARE_RATE_LIMIT_BACKEND=backend)[
+                        "database_aliases"
+                    ],
+                )
+
+    def test_the_live_suite_is_running_the_pinned_profile(self):
+        # The subprocesses above prove the settings module is deterministic.
+        # This proves the process actually executing these tests is the one they
+        # describe.
+        from django.conf import settings
+
+        self.assertEqual(settings.CARE_RATE_LIMIT_BACKEND, REDIS_RATE_LIMIT_BACKEND)
+        self.assertEqual(list(settings.DATABASE_ROUTERS), [])
+        self.assertEqual(list(settings.SILENCED_SYSTEM_CHECKS), [])
