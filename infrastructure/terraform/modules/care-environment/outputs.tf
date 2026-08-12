@@ -25,7 +25,7 @@ output "worker_service_name" {
 
 output "worker_task_endpoint" {
   description = "The URL Cloud Tasks dispatches to, and the value of GCP_WORKER_URL."
-  value       = local.worker_task_url
+  value       = "${module.worker.uri}/internal/tasks/execute/"
 }
 
 output "artifact_registry_repository" {

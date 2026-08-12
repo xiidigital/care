@@ -46,3 +46,9 @@ variable "labels" {
   type    = map(string)
   default = {}
 }
+
+variable "worker_url_override" {
+  description = "The worker's own GCP_WORKER_URL, when Cloud Run's assigned URL is not the derivable form. The check block prints the value to use. Nothing dispatches with it; see the module variable."
+  type        = string
+  default     = ""
+}

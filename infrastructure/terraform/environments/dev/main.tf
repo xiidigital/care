@@ -102,6 +102,10 @@ module "care" {
 
   optional_secrets = var.optional_secrets
 
+  # Cloud Run issued this project the older URL form, which the module cannot
+  # derive. Set from the check block's message; see the variable's description.
+  worker_url_override = var.worker_url_override
+
   # --- Monitoring ----------------------------------------------------------
   # Policies exist in the module but are not created here. In an environment
   # that scales to zero and has no traffic, every one of them would fire on

@@ -42,15 +42,37 @@ resource "google_sql_database_instance" "this" {
     }
 
     ip_configuration {
-      # No public IP and no authorized networks. Cloud Run reaches the instance
-      # over the native integration's unix socket, which needs neither
-      # (ES-07 section 31). Adding a public IP here would create an
-      # internet-reachable database to save nothing.
-      ipv4_enabled = false
+      # A public IP with **no authorized networks**.
+      #
+      # Cloud SQL requires at least one of public IP, private IP or PSC; an
+      # instance with none is rejected at creation. Private IP and PSC both
+      # require a VPC, a Private Service Access peering range, and Direct VPC
+      # egress or a Serverless VPC Access connector on every Cloud Run service —
+      # which is precisely what ADR-0007 ("Networking") forbids introducing
+      # unless a selected dependency needs it.
+      #
+      # So the connectivity path is the native Cloud Run integration, and this
+      # is what that path requires. Reading "public IP" as "database on the
+      # internet" would be wrong here:
+      #
+      #   authorized_networks is empty, so no host anywhere may open a direct
+      #   IP connection — there is no address-based allowance to abuse;
+      #
+      #   the Cloud SQL connector, which is what the socket mount actually
+      #   speaks, authenticates with IAM (roles/cloudsql.client) and an
+      #   ephemeral client certificate, not with network position;
+      #
+      #   the database user and password are still required on top of that, and
+      #   neither is in OpenTofu state.
+      #
+      # An attacker therefore needs a compromised identity holding
+      # cloudsql.client *and* the credential. Private IP would not change that;
+      # it would substitute VPC membership for one of the two, and add a
+      # connector this deployment otherwise has no use for.
+      ipv4_enabled = true
 
-      # Private Service Access would require a VPC and a peering range.
-      # ADR-0007 forbids introducing that unless a dependency actually needs it,
-      # and with ipv4_enabled false plus the socket mount, nothing does.
+      # Reject any unencrypted connection, including one that somehow arrives
+      # outside the connector.
       ssl_mode = "ENCRYPTED_ONLY"
     }
 

@@ -87,7 +87,24 @@ random_urlsafe() {
   # Alphanumeric only. The database password ends up inside a URL, and a value
   # containing /, + or = would need percent-encoding that something downstream
   # would eventually get wrong. 48 alphanumeric characters is ~285 bits.
-  LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-48}"
+  #
+  # Deliberately not `tr -dc ... </dev/urandom | head -c N`. That reads an
+  # endless stream, so when head has taken its N bytes and exits, tr is killed
+  # by SIGPIPE and reports failure — which under `set -o pipefail` aborts the
+  # script *after* the value was generated and used. Bounding the input instead
+  # means every stage runs to completion and the exit status means what it says.
+  local length="${1:-48}"
+  local generated
+  # Base64 of length*3 bytes yields well over `length` alphanumerics even after
+  # discarding +, / and =.
+  generated="$(openssl rand -base64 "$((length * 3))" | LC_ALL=C tr -dc 'A-Za-z0-9')"
+
+  if [ "${#generated}" -lt "$length" ]; then
+    echo "error: random generation produced ${#generated} usable characters, needed ${length}" >&2
+    exit 1
+  fi
+
+  printf '%s' "${generated:0:length}"
 }
 
 add_secret_version() {

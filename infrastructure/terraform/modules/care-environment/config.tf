@@ -10,7 +10,16 @@ locals {
   # subdomain wildcard, which is what lets a service be reachable at its
   # generated URL without that URL being knowable before the service exists.
   # Custom domains are added through the variable.
-  allowed_hosts = concat(var.django_allowed_hosts, [".run.app"])
+  #
+  # 127.0.0.1 is required, not incidental. Cloud Run's startup and liveness
+  # probes connect to the container directly and send `Host: 127.0.0.1`, so
+  # without it Django's CommonMiddleware raises DisallowedHost and answers the
+  # probe with 400 — the container serves correctly and is killed anyway.
+  #
+  # It grants nothing externally. The only requests carrying that Host header
+  # are the platform's own loopback probes; an internet request arrives through
+  # the Cloud Run front end, which sets the real hostname.
+  allowed_hosts = concat(var.django_allowed_hosts, [".run.app", "127.0.0.1"])
 
   csrf_trusted_origins = concat(var.csrf_trusted_origins, ["https://*.run.app"])
 
@@ -70,16 +79,30 @@ locals {
   # Cloud Tasks configuration. Required by every role that selects the
   # cloud_tasks backend, because settings validate the backend rather than the
   # role — so the worker carries these too even though it enqueues nothing.
-  cloud_tasks_env = {
+  cloud_tasks_env_common = {
     GCP_TASKS_LOCATION        = var.region
     GCP_TASKS_QUEUE           = google_cloud_tasks_queue.default.name
-    GCP_WORKER_URL            = local.worker_task_url
     GCP_TASKS_SERVICE_ACCOUNT = google_service_account.tasks_invoker.email
-
-    # Cloud Run validates the audience against the service URL, so this is the
-    # worker's origin rather than the task path.
-    GCP_TASKS_OIDC_AUDIENCE = local.worker_base_url
   }
+
+  # For the roles that actually dispatch, read straight off the created service.
+  # These are the values Cloud Tasks uses, so they are the ones that must be
+  # exactly right, and reading them back is what guarantees it.
+  #
+  # Cloud Run validates an OIDC audience against the service URL, so the
+  # audience is the worker's origin rather than the task path.
+  cloud_tasks_env_dispatcher = merge(local.cloud_tasks_env_common, {
+    GCP_WORKER_URL          = "${module.worker.uri}/internal/tasks/execute/"
+    GCP_TASKS_OIDC_AUDIENCE = module.worker.uri
+  })
+
+  # For the worker's own environment, which cannot reference the worker. See the
+  # long note in main.tf: this satisfies validation and nothing dispatches with
+  # it.
+  cloud_tasks_env_self = merge(local.cloud_tasks_env_common, {
+    GCP_WORKER_URL          = "${local.worker_self_url}/internal/tasks/execute/"
+    GCP_TASKS_OIDC_AUDIENCE = local.worker_self_url
+  })
 
   # scripts/wait_for_db.sh runs before gunicorn in start.sh and start-worker.sh
   # and connects with these rather than with DATABASE_URL. The host is the
@@ -96,7 +119,7 @@ locals {
 
   api_env = merge(
     local.common_env,
-    local.cloud_tasks_env,
+    local.cloud_tasks_env_dispatcher,
     local.postgres_env,
     {
       GUNICORN_WORKERS = tostring(var.api_gunicorn_workers)
@@ -105,7 +128,7 @@ locals {
 
   worker_env = merge(
     local.common_env,
-    local.cloud_tasks_env,
+    local.cloud_tasks_env_self,
     local.postgres_env,
     {
       GUNICORN_WORKERS = tostring(var.worker_gunicorn_workers)
@@ -120,6 +143,6 @@ locals {
 
   init_env = merge(
     local.common_env,
-    local.cloud_tasks_env,
+    local.cloud_tasks_env_dispatcher,
   )
 }

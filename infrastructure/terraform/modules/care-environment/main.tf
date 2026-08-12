@@ -43,20 +43,37 @@ locals {
   cloudsql_socket_dir = "/cloudsql/${google_sql_database_instance.this.connection_name}"
 
   # ---------------------------------------------------------------------------
-  # The worker URL, computed rather than read back
+  # The worker URL, and why there are two of them
   #
-  # The worker's own settings validate the Cloud Tasks variables, GCP_WORKER_URL
-  # among them, because validation follows the selected backend and not the
-  # role. Reading google_cloud_run_v2_service.worker.uri to build the worker's
-  # own environment would be a self-reference, so the URL is derived from the
-  # service name and project number instead — Cloud Run's deterministic form.
+  # Cloud Run assigns a service's URL at creation. Everything that *dispatches*
+  # to the worker — the API, and the init Job — reads it back from the resource,
+  # so those values are always exactly right (local.worker_public_url below).
   #
-  # Derived values that must equal a real one are a standing invitation to drift,
-  # so it is asserted against the actual uri after apply. See the check block in
-  # run.tf.
+  # The worker itself is the awkward case. Its own settings validate the six
+  # Cloud Tasks variables, GCP_WORKER_URL among them, because validation follows
+  # the selected backend and not the role: a task_worker running
+  # CARE_TASK_BACKEND=cloud_tasks must supply them even though no registered
+  # handler enqueues anything. Referencing the service's uri to build the
+  # service's own environment is a dependency cycle, so it cannot read it back.
+  #
+  # So the worker gets a derived value: Cloud Run's newer
+  # <service>-<project-number>.<region>.run.app form.
+  #
+  # Measured during ES-07, and worth stating because it is not obvious: Cloud
+  # Run answers on **both** URL forms for the same service. This project's
+  # services report the older <service>-<hash>-<region-code>.a.run.app as their
+  # canonical `uri`, and both hostnames return 200 from the same revision. The
+  # derived value is therefore a working address even when it differs from the
+  # reported one, and a mismatch is a cosmetic inconsistency rather than a
+  # broken dispatch target.
+  #
+  # worker_url_override exists to make the two agree exactly, and the check
+  # block in run.tf prints the value to use. Nothing dispatches with this today
+  # in any case — no registered handler enqueues a follow-up task.
   # ---------------------------------------------------------------------------
-  worker_base_url = "https://${local.worker_service_name}-${data.google_project.this.number}.${var.region}.run.app"
-  worker_task_url = "${local.worker_base_url}/internal/tasks/execute/"
+  worker_derived_url = "https://${local.worker_service_name}-${data.google_project.this.number}.${var.region}.run.app"
+
+  worker_self_url = var.worker_url_override != "" ? var.worker_url_override : local.worker_derived_url
 
   patient_bucket  = "${local.name_prefix}-patient-${local.bucket_suffix}"
   facility_bucket = "${local.name_prefix}-facility-${local.bucket_suffix}"

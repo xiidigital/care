@@ -55,6 +55,27 @@ variable "name_prefix_override" {
   default     = ""
 }
 
+variable "worker_url_override" {
+  description = <<-EOT
+    The worker's own GCP_WORKER_URL, for the one value that cannot be read back
+    from the service that provides it.
+
+    Cloud Run issues a service's URL at creation, and the worker's settings
+    validate GCP_WORKER_URL because validation follows the selected task backend
+    rather than the role. A service cannot reference its own uri, so the module
+    derives one from the service name and project number — correct for projects
+    on Cloud Run's newer URL form, wrong for projects still issued the older
+    per-service-hash form.
+
+    Leave empty on the first apply. If the check block reports a mismatch, set
+    this to the value it prints and apply again. Everything that actually
+    dispatches to the worker — the API and the init Job — reads the real uri and
+    is unaffected either way.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "sql_instance_name_suffix" {
   description = <<-EOT
     Appended to the Cloud SQL instance name. Cloud SQL reserves a deleted

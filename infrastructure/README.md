@@ -1,0 +1,347 @@
+# CARE on Google Cloud Platform
+
+Infrastructure as code for the managed GCP deployment, implementing ADR-0007
+and ES-07.
+
+The primary composition is **Redis-free**. No Memorystore instance, no Redis VM,
+no managed Redis-compatible service, and no Redis variable in any runtime
+environment. Redis remains fully supported by the application; it is simply not
+selected here.
+
+```
+Artifact Registry ──> one immutable CARE image
+                          │
+                          ├── Cloud Run  care-<env>-api      CARE_PROCESS_ROLE=api
+                          ├── Cloud Run  care-<env>-worker   CARE_PROCESS_ROLE=task_worker   (private)
+                          └── Cloud Run Jobs                 CARE_PROCESS_ROLE=init
+
+Cloud SQL PostgreSQL   application data, Django cache, rate-limit counters,
+                       recent views, advisory locks
+Cloud Storage          patient / facility / report objects, private
+Cloud Tasks            authenticated dispatch to the private worker
+Cloud Scheduler        the two operations Celery Beat used to fire
+Secret Manager         runtime secrets
+Cloud Logging          container stdout and stderr
+```
+
+---
+
+## 1. Tool
+
+**OpenTofu**, not Terraform.
+
+ADR-0007 originally selected Terraform. It was amended on 2026-08-11 to select
+OpenTofu instead; the HCL is unchanged, and only the CLI and the
+`required_version` constraint differ. See the ADR's *Decision* and *Alternatives
+Considered* sections.
+
+Everywhere below, `tofu` is the command.
+
+## 2. Prerequisites
+
+| Tool | Why |
+| --- | --- |
+| `tofu` ≥ 1.8 | applies the configuration |
+| `gcloud` | authentication, image push, secret provisioning, verification |
+| `docker` | builds the application image |
+| a GCP project with billing | everything |
+
+No `kubectl`. No Redis. No local PostgreSQL.
+
+Authenticate once:
+
+```bash
+gcloud auth application-default login
+```
+
+Application Default Credentials, for both the operator and the runtime. No
+service-account JSON key is created, downloaded or committed anywhere in this
+repository (ADR-0007, ES-07 section 113).
+
+## 3. Permissions
+
+### Operator, for bootstrap
+
+- `roles/storage.admin`
+- `roles/serviceusage.serviceUsageAdmin`
+
+### Operator, for an environment apply
+
+- `roles/run.admin`
+- `roles/cloudsql.admin`
+- `roles/storage.admin`
+- `roles/cloudtasks.admin`
+- `roles/cloudscheduler.admin`
+- `roles/secretmanager.admin`
+- `roles/artifactregistry.admin`
+- `roles/iam.serviceAccountAdmin`
+- `roles/resourcemanager.projectIamAdmin` — the module grants
+  `roles/cloudsql.client` at project level
+- `roles/monitoring.editor` — only when `alerts_enabled` is true
+
+`roles/owner` covers all of it and is what a single-maintainer project usually
+has. It is broader than required, and ES-07 section 115 asks that the
+*long-term* deployment identity be narrower than the bootstrap one — so when
+CI/CD arrives (ES-08), grant the list above rather than Owner.
+
+No organisation-level or folder-level permission is needed. Everything here
+works in an ordinary project (ES-07 section 116).
+
+## 4. Layout
+
+```
+infrastructure/
+  README.md                      this file
+  scripts/
+    publish-image.sh             build and push; prints the digest
+    provision-secrets.sh         generate secret values; never prints one
+  terraform/
+    bootstrap/                   the state bucket. Once per project.
+    modules/
+      care-environment/          one complete CARE environment
+      cloud-run-service/         a role-aware Cloud Run service
+    environments/
+      dev/  staging/  prod/      one root each, one state prefix each
+```
+
+Two modules, not ten. `care-environment` is a meaningful reusable boundary —
+three environments instantiate it — and `cloud-run-service` is used twice and
+is where the "the worker cannot be public" guard lives. Nothing else is grouped
+into a module merely because it could be (ADR-0007 *Terraform structure*).
+
+## 5. State
+
+Remote, in GCS, one bucket per project and one prefix per environment.
+
+- versioning on, for recovery from a bad apply
+- uniform bucket-level access
+- public access prevention enforced
+- superseded generations deleted after 90 days; the live object never is
+- `prevent_destroy`
+
+Runtime service accounts receive no access to it. The prefix is fixed in each
+root's `backend` block and cannot be passed on the command line, so a
+cross-environment apply requires editing a tracked file.
+
+## 6. Bootstrap, once per project
+
+State cannot live in a bucket that state has to create. That circularity is
+resolved explicitly rather than by an undocumented console step:
+
+```bash
+cd infrastructure/terraform/bootstrap
+```
+
+```bash
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Set `project_id`, then:
+
+```bash
+tofu init && tofu plan
+```
+
+```bash
+tofu apply
+```
+
+Full detail, including how to migrate this root's own state into the bucket
+afterwards, is in `terraform/bootstrap/README.md`.
+
+**Bootstrap once; apply an environment repeatedly.** They are separate
+operations with separate state and separate lifetimes.
+
+## 7. Deploying an environment
+
+Cloud Run needs an image, and the registry that holds the image is created by
+the same configuration. ES-07 section 131 requires that this be handled
+explicitly rather than hidden, so the first deployment is staged.
+
+### 7.1 Configure
+
+```bash
+cd infrastructure/terraform/environments/dev
+```
+
+```bash
+cp backend.hcl.example backend.hcl && cp terraform.tfvars.example terraform.tfvars
+```
+
+Set the bucket in `backend.hcl`, and `project_id` and `image` in
+`terraform.tfvars`. Both are gitignored.
+
+```bash
+tofu init -backend-config=backend.hcl
+```
+
+### 7.2 Create the registry
+
+Set `image` to the tag you are about to publish — it need not exist yet — and
+create the repository alone:
+
+```bash
+tofu apply -target=module.care.google_artifact_registry_repository.care
+```
+
+This is the one legitimate use of `-target` in the workflow. It is a
+bootstrapping step, not routine.
+
+### 7.3 Publish the image
+
+```bash
+infrastructure/scripts/publish-image.sh --project <project> --repository care-dev
+```
+
+It prints an immutable digest reference. Put that in `terraform.tfvars` as
+`image`. One image serves the API, the worker and every Job.
+
+### 7.4 Apply
+
+```bash
+tofu plan
+```
+
+Read it. Then:
+
+```bash
+tofu apply
+```
+
+### 7.5 Provision secrets
+
+The apply created the secret containers and their IAM. It created no values:
+OpenTofu never holds a secret, so none can reach state.
+
+```bash
+infrastructure/scripts/provision-secrets.sh --env dev --project <project> --image <image>
+```
+
+This generates `DJANGO_SECRET_KEY`, `JWKS_BASE64`, the database password and
+`DATABASE_URL`, creates the Cloud SQL user, and pipes every value directly into
+Secret Manager. Nothing is printed or written to disk.
+
+### 7.6 Initialize the database
+
+**Before serving traffic.** API and worker instances never migrate — several
+start concurrently, and none may race the schema.
+
+```bash
+gcloud run jobs execute care-dev-init --region us-central1 --project <project> --wait
+```
+
+It runs the committed `scripts/initialize.sh`:
+
+```
+migrate
+createcachetable        creates care_cache and care_ratelimit_cache
+compilemessages
+sync_permissions_roles  under a PostgreSQL advisory lock
+sync_valueset
+```
+
+`--wait` returns non-zero on failure, and the Job has `max_retries = 0`, so a
+failed initialization fails the deployment procedure instead of being retried
+into an apparent success.
+
+### 7.7 Restart the services
+
+The services were created before the schema existed and may have unhealthy
+revisions. Force a new revision now that initialization has completed:
+
+```bash
+gcloud run services update care-dev-api --region us-central1 --project <project> --update-env-vars=CARE_INIT_GENERATION=1
+```
+
+Repeat for `care-dev-worker`. On subsequent deployments this is unnecessary:
+change the image, and the ordinary sequence in section 9 applies.
+
+## 8. Verifying
+
+```bash
+curl -sS "$(tofu output -raw api_url)/ping/"
+```
+
+The worker must reject anonymous callers:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' "$(tofu output -raw worker_task_endpoint)"
+```
+
+`403` is correct — Cloud Run IAM rejected it before Django saw it. Anything in
+the 2xx range means the boundary is broken and the deployment is invalid.
+
+Confirm no Redis exists:
+
+```bash
+gcloud redis instances list --project <project> --region us-central1
+```
+
+## 9. Ordinary deployment sequence
+
+```
+1. tofu apply                          infrastructure
+2. publish-image.sh                    new digest
+3. update `image` in terraform.tfvars
+4. tofu apply                          updates the init Job to the new image
+5. gcloud run jobs execute ...-init --wait
+6. require success                     stop here if it failed
+7. tofu apply already updated API and worker; verify their revisions are ready
+8. verify health and the worker IAM boundary
+```
+
+Step 6 is the one that matters. An API revision that depends on an unapplied
+migration must not take traffic.
+
+## 10. Cost
+
+Cloud SQL is the only resource that costs money while nothing is happening.
+Everything else scales to zero.
+
+| Resource | dev | Note |
+| --- | --- | --- |
+| Cloud SQL `db-f1-micro` | ~USD 8/month | shared core, 614 MiB, plus 10 GB SSD |
+| Cloud Run API / worker | ~0 idle | `min_instances = 0` |
+| Cloud Run Jobs | ~0 idle | compute only while executing |
+| Cloud Storage | usage | Standard, regional |
+| Cloud Tasks | usage | first million operations/month free |
+| Artifact Registry | ~0.10/GB/month | one image |
+| Logging | usage | first 50 GiB/month free |
+| **Redis** | **none** | none is provisioned |
+
+Raising `api_min_instances` above zero is the single easiest way to turn this
+into a continuous cost, which is why production requires the decision explicitly.
+
+## 11. Teardown
+
+Dev is designed to be destroyable: `sql_deletion_protection` and
+`bucket_force_destroy` are set for it.
+
+```bash
+cd infrastructure/terraform/environments/dev && tofu destroy
+```
+
+Two things survive on purpose:
+
+- **Secrets.** `prevent_destroy` is set. Delete them deliberately with
+  `gcloud secrets delete` if the environment is really gone.
+- **APIs.** `disable_on_destroy = false`; disabling a project API can cascade
+  into unrelated resources.
+
+Cloud SQL reserves a deleted instance name for about a week. To rebuild sooner,
+set `sql_instance_name_suffix` in `terraform.tfvars`.
+
+Staging and production have both deletion guards on. Destroying either means
+deliberately turning them off first, which is a reviewable change to a tracked
+file — not something a routine plan can do.
+
+`tofu destroy` is not a rollback mechanism. To roll back, deploy the previous
+image digest and run the init Job.
+
+## 12. Related documents
+
+- `docs/xii/adr/ADR-0007-terraform-for-GCP.md` — the decision
+- `docs/xii/implementation/ES-07-GCP-infrastructur-and-deployment.md` — this phase
+- `docs/xii/architecture/06-operations.md` — operating the deployment
+- `docs/xii/architecture/07-configuration-reference.md` — every environment variable
+- `docs/xii/architecture/inventory/gcp-configuration.md` — which role gets which value

@@ -61,15 +61,24 @@ module "worker" {
   ]
 }
 
-# The worker's environment is built from a derived URL rather than read back
-# from the service, because the service cannot reference itself. This asserts
-# the derivation was right. It runs after apply and on every plan; a failure
-# means Cloud Run's URL format changed and GCP_WORKER_URL is pointing at
-# nothing.
-check "worker_url_derivation" {
+# The one value that cannot be read back from the resource that provides it:
+# the worker's own copy of GCP_WORKER_URL. See the note in main.tf.
+#
+# Cloud Run has two URL forms in circulation — the newer
+# <service>-<project-number>.<region>.run.app and the older
+# <service>-<hash>-<region-code>.a.run.app — and which one a service reports as
+# its canonical uri is not derivable. So this asserts rather than assumes, and
+# names the fix.
+#
+# A warning here does not mean the deployment is broken, for two independent
+# reasons. Task dispatch reads module.worker.uri directly, so the API and the
+# init Job are unaffected either way; and Cloud Run answers on both hostnames
+# for the same service, verified during ES-07, so the derived value addresses
+# the right revision regardless. The warning is about exactness, not reachability.
+check "worker_self_url_matches" {
   assert {
-    condition     = module.worker.uri == local.worker_base_url
-    error_message = "Derived worker URL ${local.worker_base_url} does not match the deployed service URL ${module.worker.uri}. GCP_WORKER_URL and GCP_TASKS_OIDC_AUDIENCE are built from the derived value, so task dispatch and OIDC audience validation are both wrong until this is reconciled."
+    condition     = module.worker.uri == local.worker_self_url
+    error_message = "The worker's own GCP_WORKER_URL is built from ${local.worker_self_url}, but the deployed service URL is ${module.worker.uri}. Nothing dispatches with this value today -- the API and init Job read the service URL directly -- so the deployment is functional. To make it exact, set worker_url_override = \"${module.worker.uri}\" and apply again."
   }
 }
 
