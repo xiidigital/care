@@ -1,10 +1,31 @@
 # ADR-0007: Terraform for GCP Infrastructure as Code
 
-- **Status:** Accepted
+- **Status:** Accepted, amended 2026-08-11
 - **Date:** 2026-08-06
 - **Decision Makers:** CARE Fork Maintainers
 - **Supersedes:** None
 - **Superseded by:** None
+
+> **Amendment, 2026-08-11 — the tool is OpenTofu.**
+>
+> This ADR originally selected Terraform. During ES-07 the maintainers chose
+> OpenTofu instead: it is a fork of Terraform under the Linux Foundation, with
+> an open source licence rather than the BUSL, and it consumes the same HCL and
+> the same providers.
+>
+> The change is narrow and the rest of this document stands unaltered. The
+> configuration language, the resource model, the `hashicorp/google` provider
+> and every requirement stated below are identical. What differs is the CLI
+> (`tofu` rather than `terraform`), the registry the provider is fetched from,
+> and the `required_version` constraint.
+>
+> Read every "Terraform SHALL" below as "OpenTofu SHALL". The word is retained
+> throughout because the requirements are about infrastructure as code and not
+> about a vendor, and rewriting them would create churn without changing
+> meaning. The file name is likewise unchanged, so existing references still
+> resolve.
+>
+> Recorded as the sole deviation in the ES-07 final report.
 
 ## Context
 
@@ -43,7 +64,10 @@ behavior is implemented.
 
 ## Decision
 
-Terraform SHALL be the infrastructure-as-code tool for the initial GCP profile.
+A Terraform-compatible infrastructure-as-code tool SHALL manage the initial GCP
+profile. **As amended on 2026-08-11, that tool is OpenTofu**; the original
+decision named Terraform, and the two are interchangeable at the level every
+requirement in this document is written.
 
 Terraform SHALL manage the lifecycle and configuration of supported GCP
 infrastructure.
@@ -663,11 +687,39 @@ Rejected.
 
 It is not reproducible or sufficiently auditable.
 
+### Terraform
+
+Originally selected; superseded by the 2026-08-11 amendment.
+
+It remains entirely viable, and the configuration in this repository would run
+under it unmodified — that is the point of choosing a fork rather than a
+different tool. What decided it against Terraform was the licence: HashiCorp
+moved Terraform to the Business Source License, and CARE is a Digital Public
+Good whose infrastructure definition should be reproducible by anyone under an
+open source licence.
+
+Reverting is a one-line change to `required_version` and a different CLI.
+
+### OpenTofu
+
+Selected, 2026-08-11.
+
+A Linux Foundation fork of Terraform under MPL-2.0. It reads the same HCL, uses
+the same `hashicorp/google` provider, and has the same state format, so nothing
+in this ADR needed to be reconsidered on technical grounds.
+
+The trade-off is that it is a smaller ecosystem with less third-party
+documentation, and provider releases reach its registry slightly later. Neither
+affects this deployment, which uses one provider and no third-party modules.
+
 ### Pulumi
 
 Not selected.
 
-Terraform has broad GCP support and matches the current project plan.
+The HCL ecosystem has broad GCP support and matches the current project plan.
+Pulumi would also put infrastructure definition in a general-purpose language,
+which weakens the boundary this ADR is drawing between infrastructure lifecycle
+and application behaviour.
 
 ### Kubernetes manifests
 
@@ -738,24 +790,23 @@ This ADR does not define:
 ## Implementation Status
 
 - [x] Decision accepted.
-- [ ] Terraform implementation created.
-- [ ] Remote state bootstrap documented and verified.
-- [ ] Environment layout implemented.
-- [ ] Required GCP APIs declared.
-- [ ] Artifact Registry declared.
-- [ ] Runtime service accounts and IAM declared.
-- [ ] Cloud SQL declared and protected.
-- [ ] Cloud Storage declared and protected.
-- [ ] Cloud Tasks queues declared.
-- [ ] Cloud Run API declared.
-- [ ] Private Cloud Run task worker declared.
-- [ ] Worker IAM/OIDC boundary verified.
-- [ ] Initialization Cloud Run Job declared and executed successfully.
-- [ ] Cloud Scheduler resources declared.
-- [ ] Secret Manager resources and bindings declared.
-- [ ] Role-aware health behavior verified.
-- [ ] Redis-free GCP composition verified end to end.
+- [x] OpenTofu implementation created (amendment above).
+- [x] Remote state bootstrap documented and verified.
+- [x] Environment layout implemented.
+- [x] Required GCP APIs declared.
+- [x] Artifact Registry declared.
+- [x] Runtime service accounts and IAM declared.
+- [x] Cloud SQL declared and protected.
+- [x] Cloud Storage declared and protected.
+- [x] Cloud Tasks queues declared.
+- [x] Cloud Run API declared.
+- [x] Private Cloud Run task worker declared.
+- [x] Worker IAM/OIDC boundary verified.
+- [x] Initialization Cloud Run Job declared and executed successfully.
+- [x] Cloud Scheduler resources declared.
+- [x] Secret Manager resources and bindings declared.
+- [x] Role-aware health behavior verified.
+- [x] Redis-free GCP composition verified through infrastructure, initialization and runtime deployment.
 - [ ] GCS application transport verified end to end.
-- [ ] Development environment applied successfully.
-- [ ] Destructive-change protections tested.
-- [ ] Destructive-change protections tested.
+- [x] Development environment applied successfully.
+- [x] Destructive-change protections tested.

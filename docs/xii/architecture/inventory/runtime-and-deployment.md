@@ -381,10 +381,12 @@ returns matches in `config/storage.py`, `config/settings/base.py`,
 `care/utils/tests/test_storage_config.py` and `Pipfile` — the `gcs` backend
 option and its tests.
 
-The conclusion still holds for everything outside storage: there is still no
-Terraform, no Cloud Build config, no `app.yaml`, no `service.yaml` and no GCP
-credentials handling. Storage is the one axis where GCP is now selectable, and
-selecting it is a settings change rather than a code change.
+**Superseded by ES-07 (2026-08-11).** Infrastructure now lives under
+`infrastructure/terraform/` and deploys the Redis-free GCP profile with
+OpenTofu. Cloud Run uses attached service accounts and ADC; no GCP credential
+file is committed or injected. The application boundary remains unchanged:
+GCP-specific lifecycle logic is infrastructure configuration, while storage is
+selected through the existing `CARE_STORAGE_BACKEND=gcs` setting.
 
 ---
 

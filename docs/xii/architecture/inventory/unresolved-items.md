@@ -1275,7 +1275,8 @@ a platform scheduler, so this probe is a traditional-deployment concern.
 
 ### L4. The task worker is unsafe to expose publicly
 
-**Status:** Open by design. **Carried to ES-07 as a production blocker.**
+**Status:** Resolved in ES-07 (2026-08-11). The application design remains
+intentional; the deployment boundary that it requires is now enforced.
 
 **verified** `POST /internal/tasks/execute/` has no application-layer
 authentication: no shared secret, no bearer token, no HMAC. This is the ES-03
@@ -1287,7 +1288,7 @@ mechanism.
 route is registered only under `CARE_PROCESS_ROLE=task_worker`, so an API
 service does not route it at all, and a worker serves no public API.
 
-**Unchanged requirement for ES-07**, stated so it cannot be lost:
+**Deployment invariant:**
 
 ```text
 the task_worker service SHALL reject unauthenticated invocation at the
@@ -1297,6 +1298,11 @@ granted to the Cloud Tasks service account alone, and no allUsers binding
 
 `scripts/start-worker.sh` states the same requirement at the point where a
 deployment would use it.
+
+**ES-07 verification.** `care-dev-worker` grants `roles/run.invoker` only to
+the Cloud Tasks OIDC service account. An unauthenticated invocation is rejected
+by Cloud Run before Django; the public API role returns 404 for the worker-only
+route.
 
 ### L5. `recent_views` keeps Redis on the API's capability list — CLOSED by RF1
 
@@ -1400,7 +1406,8 @@ READ COMMITTED" (a constraint on database configuration, not a defect). Neither
 blocks RF1's closure.
 
 Neither item belonged to ES-04, ES-05, ES-06 or ES-07. Each was executed as a
-focused modernization of one capability. ES-07 has not started.
+focused modernization of one capability. ES-07 subsequently deployed the
+resulting Redis-free composition; it did not redesign either capability.
 
 ### Why this part exists
 

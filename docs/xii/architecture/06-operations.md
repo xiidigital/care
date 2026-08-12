@@ -2629,8 +2629,9 @@ Before first production use:
 - [ ] PostgreSQL cache works when selected.
 - [ ] Redis is not required for caching, queueing, locking or initialization in
       the default profile.
-- [ ] A Redis-compatible service is provisioned for rate limiting and recent
-      views, which every profile still requires (§31.2).
+- [ ] PostgreSQL-backed, best-effort rate limiting is verified when selected;
+      Redis is operated only for a profile that selects strict rate limiting or
+      Celery.
 - [ ] Logs exclude sensitive payloads.
 - [ ] Alerts are configured.
 - [ ] Restore procedure is documented.
@@ -2936,7 +2937,8 @@ everywhere either. It is required per capability:
 
 | Selection or capability | Needs Redis |
 | --- | --- |
-| rate limiting | yes, always — see §31.2, `unresolved-items.md` L1 and RF2 |
+| `CARE_RATE_LIMIT_BACKEND=redis` | yes — and it is the only strict, atomic mode |
+| `CARE_RATE_LIMIT_BACKEND=postgres` | no — best-effort, non-atomic under concurrency (RF2) |
 | `CARE_CACHE_BACKEND=redis` | yes, to serve the cache |
 | `CARE_TASK_BACKEND=celery` | yes, as the broker |
 | `recent_views` API endpoints | no — PostgreSQL model (RF1) |
@@ -2962,9 +2964,26 @@ reached through a seam — the cache alias, the rate limit wrapper, the recent
 views service, the async dispatcher — and no business code knows whether Redis
 exists.
 
-*Redis-free.* A fully Redis-free deployment is a **future** profile, not a
-current one. It needs roadmap item RF2 (provider-neutral rate limiting) in
-`inventory/unresolved-items.md` Part RF, which belongs to no current phase. RF1
-(PostgreSQL recent views) was the other requirement and is delivered. Until RF2
-lands CARE does not claim to be Redis-free — and it is not blocked from becoming
-so.
+*Redis-free.* **Corrected 2026-08-11.** This section previously said a fully
+Redis-free deployment was a future profile requiring roadmap item RF2. RF2 has
+shipped — `CARE_RATE_LIMIT_BACKEND` exists with a `postgres` mode — and ES-07
+deployed the resulting composition to a real GCP environment. The profile is
+current:
+
+```text
+CARE_CACHE_BACKEND=postgres
+CARE_RATE_LIMIT_BACKEND=postgres
+CARE_TASK_BACKEND=cloud_tasks
+CARE_STORAGE_BACKEND=gcs
+```
+
+No row in the table above then selects Redis, `wait_for_redis.sh` exits without
+waiting, and the managed GCP environment provisions no Redis-compatible service
+of any kind.
+
+What has *not* changed is the guarantee. `postgres` rate limiting is
+best-effort: `DatabaseCache` inherits `BaseCache.incr`, a read-modify-write with
+no row lock, so a burst of concurrent requests is undercounted and more requests
+pass than the configured limit. Sequentially the count is exact. A deployment
+that needs limits to hold should select `redis` and operate one; that
+composition remains fully supported and is the only strict mode.
