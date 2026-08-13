@@ -317,6 +317,40 @@ variable "job_timeout_seconds" {
   default = 1800
 }
 
+variable "enable_fixture_loader" {
+  description = <<-EOT
+    Create a manually invoked Job that runs `manage.py load_fixtures`, seeding
+    the database with synthetic accounts and clinical data.
+
+    Development tooling, and the one Job here that is not part of a deployment.
+    It exists because ES-07 section 93 requires authenticating to CARE "through
+    an appropriate dev path" to prove the GCS transport end to end, and a
+    greenfield environment has no account to authenticate as.
+
+    Never true outside dev. The fixtures create known-credential users, and the
+    command is destructive to existing data. The module refuses it elsewhere.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "fixture_image" {
+  description = <<-EOT
+    Image for the fixture Job, built by `docker/fixtures.Dockerfile` FROM the
+    runtime image.
+
+    This is the single deliberate exception to the same-image rule, and it does
+    not weaken it: no runtime role uses this image, and the deployment does not
+    contain it. `load_fixtures` imports Faker, a development dependency the
+    production image correctly omits, so a fixture Job on the runtime image
+    fails at import.
+
+    Empty means "use var.image", which works only if that image carries Faker.
+  EOT
+  type        = string
+  default     = ""
+}
+
 # ---------------------------------------------------------------------------
 # Cloud Tasks
 # ---------------------------------------------------------------------------

@@ -102,6 +102,11 @@ module "care" {
 
   optional_secrets = var.optional_secrets
 
+  # Development data. The Job is created but never executed by an apply — it is
+  # invoked by hand, because it is destructive to whatever is already there.
+  enable_fixture_loader = var.enable_fixture_loader
+  fixture_image         = var.fixture_image
+
   # Cloud Run issued this project the older URL form, which the module cannot
   # derive. Set from the check block's message; see the variable's description.
   worker_url_override = var.worker_url_override

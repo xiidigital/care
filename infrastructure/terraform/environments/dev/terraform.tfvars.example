@@ -30,3 +30,12 @@ image = "us-central1-docker.pkg.dev/your-gcp-project-id/care-dev/care:REPLACE_ME
 #   EMAIL_PASSWORD = ["api", "worker"]
 #   SENTRY_DSN     = ["api", "worker", "init"]
 # }
+
+# Development data. Creates a Job that seeds synthetic accounts and clinical
+# records; you execute it by hand, and it is destructive to what is already
+# there. Dev only — the module rejects it elsewhere. See README section 7.8.
+#
+# The image is a thin layer over the runtime image that adds Faker:
+#   publish-image.sh --fixtures-from <runtime-image@sha256:...>
+# enable_fixture_loader = true
+# fixture_image = "us-central1-docker.pkg.dev/your-gcp-project-id/care-dev/care-fixtures@sha256:<digest>"

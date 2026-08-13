@@ -36,6 +36,10 @@ locals {
 
   sql_instance_name = "${local.name_prefix}-db${var.sql_instance_name_suffix}"
 
+  # Falls back to the deployment image, which is correct only where that image
+  # carries Faker. See var.fixture_image.
+  fixture_image = var.fixture_image != "" ? var.fixture_image : var.image
+
   bucket_location = var.bucket_location != "" ? var.bucket_location : var.region
 
   # The Cloud SQL unix socket the native Cloud Run integration mounts. No VPC

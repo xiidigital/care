@@ -6,17 +6,17 @@
 
 resource "google_project_service" "required" {
   for_each = toset([
-    "run.googleapis.com",             # Cloud Run services and Jobs
-    "sqladmin.googleapis.com",        # Cloud SQL
-    "storage.googleapis.com",         # Cloud Storage
-    "cloudtasks.googleapis.com",      # Cloud Tasks
-    "cloudscheduler.googleapis.com",  # Cloud Scheduler
-    "secretmanager.googleapis.com",   # Secret Manager
-    "artifactregistry.googleapis.com" # container images
-    ,
-    "iam.googleapis.com",            # service accounts
-    "iamcredentials.googleapis.com", # OIDC token minting for Cloud Tasks
-    "serviceusage.googleapis.com",   # this resource itself
+    "run.googleapis.com",                  # Cloud Run services and Jobs
+    "sqladmin.googleapis.com",             # Cloud SQL
+    "storage.googleapis.com",              # Cloud Storage
+    "cloudtasks.googleapis.com",           # Cloud Tasks
+    "cloudscheduler.googleapis.com",       # Cloud Scheduler
+    "secretmanager.googleapis.com",        # Secret Manager
+    "artifactregistry.googleapis.com",     # container images
+    "iam.googleapis.com",                  # service accounts
+    "iamcredentials.googleapis.com",       # OIDC token minting for Cloud Tasks
+    "serviceusage.googleapis.com",         # this resource itself
+    "cloudresourcemanager.googleapis.com", # project-level IAM, and the google_project data source
     "logging.googleapis.com",
     "monitoring.googleapis.com",
   ])

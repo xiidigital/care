@@ -52,3 +52,15 @@ variable "worker_url_override" {
   type        = string
   default     = ""
 }
+
+variable "enable_fixture_loader" {
+  description = "Create the manually invoked load_fixtures Job. Development tooling: it seeds synthetic accounts and clinical data so there is something to authenticate as. Not part of any deployment, and rejected by the module outside dev."
+  type        = bool
+  default     = false
+}
+
+variable "fixture_image" {
+  description = "Image for the fixture Job, built by docker/fixtures.Dockerfile FROM the runtime image because load_fixtures imports Faker. Empty uses var.image, which fails unless that image carries Faker."
+  type        = string
+  default     = ""
+}

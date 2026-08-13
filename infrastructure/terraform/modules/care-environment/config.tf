@@ -145,4 +145,31 @@ locals {
     local.common_env,
     local.cloud_tasks_env_dispatcher,
   )
+
+  # The fixture Job (dev only). Three deliberate departures from init_env, each
+  # forced by how `load_fixtures` works rather than chosen: it builds its data
+  # by calling CARE's own viewsets through DRF's APIClient, in-process, so that
+  # every side effect a real request has also happens here.
+  #
+  # That in-process client is what the three overrides are for:
+  #
+  #   DJANGO_DEBUG               care/fixtures/context.py refuses to run at all
+  #                              unless settings.DEBUG, a guard against seeding
+  #                              synthetic patients into a real deployment.
+  #   DJANGO_ALLOWED_HOSTS       APIClient sends Host: testserver; without it
+  #                              CommonMiddleware raises DisallowedHost.
+  #   DJANGO_SECURE_SSL_REDIRECT APIClient requests are HTTP, so a redirect to
+  #                              HTTPS would turn every fixture call into a 301.
+  #
+  # None of them reaches a serving role. This map is consumed by one Job that
+  # is created only when var.enable_fixture_loader is true, which the module
+  # permits only in dev.
+  fixture_env = merge(
+    local.init_env,
+    {
+      DJANGO_DEBUG               = "true"
+      DJANGO_SECURE_SSL_REDIRECT = "false"
+      DJANGO_ALLOWED_HOSTS       = jsonencode(concat(local.allowed_hosts, ["testserver"]))
+    },
+  )
 }

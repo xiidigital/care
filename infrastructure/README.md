@@ -256,6 +256,39 @@ gcloud run services update care-dev-api --region us-central1 --project <project>
 Repeat for `care-dev-worker`. On subsequent deployments this is unnecessary:
 change the image, and the ordinary sequence in section 9 applies.
 
+### 7.8 Development data (dev only, optional)
+
+A greenfield environment has no account to log in as. The fixture Job creates
+one, along with synthetic facilities, patients and clinical records.
+
+It is **development tooling and not part of any deployment**: it is never
+executed by an apply, it seeds users whose passwords are published, and the
+module refuses to create it for any environment but `dev`.
+
+Build the fixture image — a thin layer over the runtime image that adds Faker,
+which the production image correctly omits:
+
+```bash
+infrastructure/scripts/publish-image.sh --project <project> --repository care-dev --fixtures-from <runtime-image@sha256:...>
+```
+
+Set both values in `terraform.tfvars`, apply, then execute it by hand:
+
+```
+enable_fixture_loader = true
+fixture_image         = "us-central1-docker.pkg.dev/<project>/care-dev/care-fixtures@sha256:..."
+```
+
+```bash
+gcloud run jobs execute care-dev-load-fixtures --region us-central1 --project <project> --wait
+```
+
+`load_fixtures` is destructive to data already present and runs inside one
+transaction. Set `scheduler_jobs_enabled = false` first if the data is meant to
+survive — the cleanup schedules are indifferent to whether data is synthetic.
+
+Credentials are in `care/fixtures/fixtures.md`.
+
 ## 8. Verifying
 
 ```bash

@@ -16,6 +16,12 @@
 #       [--region us-central1] \
 #       [--tag <tag>]
 #
+#   # the dev-only fixture image, built FROM a published runtime image:
+#   infrastructure/scripts/publish-image.sh \
+#       --project <gcp-project> \
+#       --repository <artifact-registry-repo> \
+#       --fixtures-from <runtime-image@sha256:...>
+#
 # Prints the immutable digest reference on stdout. That is the value to put in
 # the environment's `image` variable: a tag can be moved, and then nobody can
 # say afterwards which build was serving.
@@ -26,24 +32,43 @@ REGION="us-central1"
 TAG=""
 PROJECT=""
 REPOSITORY=""
-IMAGE_NAME="care"
+IMAGE_NAME=""
+FIXTURES_FROM=""
 
 usage() {
-  sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-1}"
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --project)    PROJECT="$2"; shift 2 ;;
-    --repository) REPOSITORY="$2"; shift 2 ;;
-    --region)     REGION="$2"; shift 2 ;;
-    --tag)        TAG="$2"; shift 2 ;;
-    --name)       IMAGE_NAME="$2"; shift 2 ;;
-    -h|--help)    usage 0 ;;
+    --project)       PROJECT="$2"; shift 2 ;;
+    --repository)    REPOSITORY="$2"; shift 2 ;;
+    --region)        REGION="$2"; shift 2 ;;
+    --tag)           TAG="$2"; shift 2 ;;
+    --name)          IMAGE_NAME="$2"; shift 2 ;;
+    --fixtures-from) FIXTURES_FROM="$2"; shift 2 ;;
+    -h|--help)       usage 0 ;;
     *) echo "Unknown argument: $1" >&2; usage ;;
   esac
 done
+
+# Two builds, one script, because they must stay in step: the fixture image is
+# a thin layer over a specific runtime image and is worthless without it.
+#
+# It is the single exception to "one image serves every role" (ADR-0007 "Runtime
+# roles"), and it does not weaken the rule, because no role uses it. It exists
+# only so `manage.py load_fixtures` can import Faker, a development dependency
+# that the production image is right to omit.
+if [ -n "$FIXTURES_FROM" ]; then
+  DOCKERFILE="docker/fixtures.Dockerfile"
+  BUILD_ARGS=(--build-arg "BASE_IMAGE=${FIXTURES_FROM}")
+  : "${IMAGE_NAME:=care-fixtures}"
+else
+  DOCKERFILE="docker/prod.Dockerfile"
+  BUILD_ARGS=()
+  : "${IMAGE_NAME:=care}"
+fi
 
 [ -n "$PROJECT" ]    || { echo "--project is required" >&2; exit 1; }
 [ -n "$REPOSITORY" ] || { echo "--repository is required" >&2; exit 1; }
@@ -72,12 +97,13 @@ IMAGE="${REGISTRY}/${PROJECT}/${REPOSITORY}/${IMAGE_NAME}"
 echo "==> Configuring docker credentials for ${REGISTRY}" >&2
 gcloud auth configure-docker "$REGISTRY" --quiet >&2
 
-echo "==> Building ${IMAGE}:${TAG}" >&2
-# The production Dockerfile, unmodified. ES-07 section 132 asks not to redesign
-# the build; APP_VERSION is the one build argument, and it is informational.
+echo "==> Building ${IMAGE}:${TAG} from ${DOCKERFILE}" >&2
+# The Dockerfile, unmodified. ES-07 section 132 asks not to redesign the build;
+# APP_VERSION is the one build argument, and it is informational.
 docker build \
-  --file docker/prod.Dockerfile \
+  --file "$DOCKERFILE" \
   --build-arg APP_VERSION="${TAG}" \
+  "${BUILD_ARGS[@]}" \
   --tag "${IMAGE}:${TAG}" \
   . >&2
 

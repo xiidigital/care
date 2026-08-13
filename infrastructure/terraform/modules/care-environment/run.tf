@@ -142,23 +142,63 @@ module "api" {
 # ---------------------------------------------------------------------------
 
 locals {
-  jobs = {
-    init = {
-      name    = local.init_job_name
-      command = ["./initialize.sh"]
-      args    = []
-    }
-    cleanup-expired-token-slots = {
-      name    = "${local.name_prefix}-cleanup-token-slots"
-      command = ["python"]
-      args    = ["manage.py", "cleanup_expired_token_slots"]
-    }
-    cleanup-incomplete-file-uploads = {
-      name    = "${local.name_prefix}-cleanup-uploads"
-      command = ["python"]
-      args    = ["manage.py", "cleanup_incomplete_file_uploads"]
-    }
+  # What the three deployment Jobs share: the deployment image, the init
+  # identity, the init environment. Only the command differs between them.
+  deployment_job = {
+    image           = var.image
+    service_account = google_service_account.init.email
+    process_role    = "init"
+    env             = local.init_env
+    secret_env      = local.secret_env_by_role["init"]
   }
+
+  # Development only, and not part of any deployment. Seeds synthetic accounts
+  # and clinical data so that a greenfield environment has something to
+  # authenticate as — which ES-07 section 93 requires in order to prove the GCS
+  # transport through CARE rather than against the bucket.
+  #
+  # It differs from the deployment Jobs in three ways, all consequences of
+  # load_fixtures driving CARE's viewsets through an in-process DRF client:
+  #
+  #   image            carries Faker, which the runtime image correctly omits
+  #   service account  api, not init: it writes objects to the buckets, which
+  #                    the init identity has no storage permission for
+  #   env              fixture_env; see the note in config.tf
+  #
+  # CARE_PROCESS_ROLE=api follows from the same thing. The command exercises the
+  # API's own code paths, so it must be configured as the API is.
+  fixture_jobs = var.enable_fixture_loader ? {
+    load-fixtures = merge(local.deployment_job, {
+      name            = "${local.name_prefix}-load-fixtures"
+      command         = ["python"]
+      args            = ["manage.py", "load_fixtures"]
+      image           = local.fixture_image
+      service_account = google_service_account.api.email
+      process_role    = "api"
+      env             = local.fixture_env
+    })
+  } : {}
+
+  jobs = merge(
+    {
+      init = merge(local.deployment_job, {
+        name    = local.init_job_name
+        command = ["./initialize.sh"]
+        args    = []
+      })
+      cleanup-expired-token-slots = merge(local.deployment_job, {
+        name    = "${local.name_prefix}-cleanup-token-slots"
+        command = ["python"]
+        args    = ["manage.py", "cleanup_expired_token_slots"]
+      })
+      cleanup-incomplete-file-uploads = merge(local.deployment_job, {
+        name    = "${local.name_prefix}-cleanup-uploads"
+        command = ["python"]
+        args    = ["manage.py", "cleanup_incomplete_file_uploads"]
+      })
+    },
+    local.fixture_jobs,
+  )
 }
 
 resource "google_cloud_run_v2_job" "jobs" {
@@ -172,7 +212,7 @@ resource "google_cloud_run_v2_job" "jobs" {
 
   template {
     template {
-      service_account = google_service_account.init.email
+      service_account = each.value.service_account
       timeout         = "${var.job_timeout_seconds}s"
 
       # No retries. A failed initialization must fail the deployment
@@ -188,7 +228,7 @@ resource "google_cloud_run_v2_job" "jobs" {
       }
 
       containers {
-        image   = var.image
+        image   = each.value.image
         command = each.value.command
         args    = each.value.args
 
@@ -201,11 +241,11 @@ resource "google_cloud_run_v2_job" "jobs" {
 
         env {
           name  = "CARE_PROCESS_ROLE"
-          value = "init"
+          value = each.value.process_role
         }
 
         dynamic "env" {
-          for_each = local.init_env
+          for_each = each.value.env
           content {
             name  = env.key
             value = env.value
@@ -213,7 +253,7 @@ resource "google_cloud_run_v2_job" "jobs" {
         }
 
         dynamic "env" {
-          for_each = local.secret_env_by_role["init"]
+          for_each = each.value.secret_env
           content {
             name = env.key
             value_source {
@@ -230,6 +270,17 @@ resource "google_cloud_run_v2_job" "jobs" {
           mount_path = "/cloudsql"
         }
       }
+    }
+  }
+
+  # `load_fixtures` creates users whose passwords are published in the fixture
+  # documentation and writes synthetic patients through the real viewsets. The
+  # application refuses to run it without DEBUG; this refuses to build the Job
+  # that would carry DEBUG anywhere but dev, so neither guard stands alone.
+  lifecycle {
+    precondition {
+      condition     = !var.enable_fixture_loader || var.environment == "dev"
+      error_message = "enable_fixture_loader is true for environment '${var.environment}'. The fixture Job seeds known-credential accounts and synthetic clinical data, and runs with DJANGO_DEBUG=true. It is a development tool and cannot be created outside dev."
     }
   }
 
