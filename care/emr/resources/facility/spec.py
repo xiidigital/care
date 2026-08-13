@@ -6,6 +6,7 @@ from pydantic import UUID4, BaseModel, Field, field_validator, model_validator
 from pydantic_core.core_schema import ValidationInfo
 from pydantic_extra_types.coordinate import Latitude, Longitude
 
+from care.emr.geography.postal_codes import validate_postal_code
 from care.emr.models import Organization
 from care.emr.models.facility_config import FacilityMonetoryConfig
 from care.emr.models.patient import PatientIdentifierConfigCache
@@ -24,6 +25,7 @@ from care.facility.models import (
     REVERSE_FACILITY_TYPES,
     REVERSE_REVERSE_FACILITY_TYPES,
     Facility,
+    FacilityFeature,
 )
 
 
@@ -94,12 +96,15 @@ class FacilityBaseSpec(FacilityBareMinimumSpec):
     description: str
     longitude: Longitude | None = None
     latitude: Latitude | None = None
-    pincode: int
+    pincode: str
     address: str
     phone_number: str
     middleware_address: str | None = None
     facility_type: str
     is_public: bool
+    region_id: int | None = None
+    subregion_id: int | None = None
+    city_id: int | None = None
 
 
 DISCOUNT_CODE_COUNT_LIMIT = 100
@@ -135,6 +140,59 @@ class FacilityCreateSpec(FacilityBaseSpec):
             raise ValueError(err)
         return v
 
+    @field_validator("features")
+    @classmethod
+    def validate_features(cls, features):
+        valid_feature_ids = {feature.value for feature in FacilityFeature}
+        invalid_feature_ids = sorted(set(features) - valid_feature_ids)
+        if invalid_feature_ids:
+            valid = ", ".join(str(feature_id) for feature_id in sorted(valid_feature_ids))
+            invalid = ", ".join(str(feature_id) for feature_id in invalid_feature_ids)
+            message = f"Invalid facility feature ID(s): {invalid}. Valid IDs are: {valid}"
+            raise ValueError(message)
+        return features
+
+    @model_validator(mode="after")
+    def validate_geography_and_postal_code(self):
+        from cities_light.models import City, Region, SubRegion
+
+        organization = Organization.objects.filter(
+            external_id=self.geo_organization, org_type="govt"
+        ).first()
+        if organization is None:
+            raise ValueError("Geo Organization does not exist")
+
+        country = organization.get_country()
+        country_code = country.code2 if country else None
+        self.pincode = validate_postal_code(self.pincode, country_code)
+
+        if country and (not self.region_id or not self.subregion_id):
+            raise ValueError(
+                "Region and subregion are required when the jurisdiction has a country"
+            )
+
+        region = Region.objects.filter(id=self.region_id).first() if self.region_id else None
+        subregion = (
+            SubRegion.objects.filter(id=self.subregion_id).first()
+            if self.subregion_id
+            else None
+        )
+        city = City.objects.filter(id=self.city_id).first() if self.city_id else None
+
+        if self.region_id and region is None:
+            raise ValueError("Geographic region not found")
+        if self.subregion_id and subregion is None:
+            raise ValueError("Geographic subregion not found")
+        if self.city_id and city is None:
+            raise ValueError("Geographic city not found")
+        if region and country and region.country_id != country.id:
+            raise ValueError("Region does not belong to the organization's country")
+        if subregion and (not region or subregion.region_id != region.id):
+            raise ValueError("Subregion does not belong to the selected region")
+        if city and (not subregion or city.subregion_id != subregion.id):
+            raise ValueError("City does not belong to the selected subregion")
+        return self
+
     @field_validator("name")
     @classmethod
     def validate_name_uniqueness(cls, v, info: ValidationInfo):
@@ -160,10 +218,13 @@ class FacilityCreateSpec(FacilityBaseSpec):
         return v
 
     def perform_extra_deserialization(self, is_update, obj):
-        obj.geo_organization = Organization.objects.filter(
+        obj.geo_organization = Organization.objects.get(
             external_id=self.geo_organization, org_type="govt"
-        ).first()
+        )
         obj.facility_type = REVERSE_REVERSE_FACILITY_TYPES[self.facility_type]
+        obj.region_id = self.region_id
+        obj.subregion_id = self.subregion_id
+        obj.city_id = self.city_id
 
 
 class FacilityReadSpec(FacilityBaseSpec):
@@ -171,6 +232,7 @@ class FacilityReadSpec(FacilityBaseSpec):
     cover_image_url: str
     read_cover_image_url: str
     geo_organization: dict = {}
+    location: dict = {}
     created_by: dict | None = None
 
     @classmethod
@@ -180,10 +242,22 @@ class FacilityReadSpec(FacilityBaseSpec):
         mapping["id"] = obj.external_id
         mapping["read_cover_image_url"] = obj.read_cover_image_url()
         mapping["facility_type"] = REVERSE_FACILITY_TYPES[obj.facility_type]
+        mapping["region_id"] = obj.region_id
+        mapping["subregion_id"] = obj.subregion_id
+        mapping["city_id"] = obj.city_id
         if obj.geo_organization:
             mapping["geo_organization"] = OrganizationReadSpec.serialize(
                 obj.geo_organization
             ).to_json()
+        mapping["location"] = {
+            "region": {"id": obj.region_id, "name": obj.region.name}
+            if obj.region_id
+            else None,
+            "subregion": {"id": obj.subregion_id, "name": obj.subregion.name}
+            if obj.subregion_id
+            else None,
+            "city": {"id": obj.city_id, "name": obj.city.name} if obj.city_id else None,
+        }
         if obj.created_by_id:
             mapping["created_by"] = model_from_cache(UserSpec, id=obj.created_by_id)
 
@@ -293,13 +367,26 @@ class FacilityMinimalReadSpec(FacilityBaseSpec):
     cover_image_url: str
     read_cover_image_url: str
     geo_organization: dict = {}
+    location: dict = {}
 
     @classmethod
     def perform_extra_serialization(cls, mapping, obj):
         mapping["id"] = obj.external_id
         mapping["read_cover_image_url"] = obj.read_cover_image_url()
         mapping["facility_type"] = REVERSE_FACILITY_TYPES[obj.facility_type]
+        mapping["region_id"] = obj.region_id
+        mapping["subregion_id"] = obj.subregion_id
+        mapping["city_id"] = obj.city_id
         if obj.geo_organization:
             mapping["geo_organization"] = OrganizationReadSpec.serialize(
                 obj.geo_organization
             ).to_json()
+        mapping["location"] = {
+            "region": {"id": obj.region_id, "name": obj.region.name}
+            if obj.region_id
+            else None,
+            "subregion": {"id": obj.subregion_id, "name": obj.subregion.name}
+            if obj.subregion_id
+            else None,
+            "city": {"id": obj.city_id, "name": obj.city.name} if obj.city_id else None,
+        }

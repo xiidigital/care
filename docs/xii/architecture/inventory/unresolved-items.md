@@ -1,14 +1,14 @@
 ---
 title: Unresolved Items
 document: inventory/unresolved-items
-version: 0.4.0
+version: 0.4.1
 status: Draft
 phase: 3
 source_repository: https://github.com/ohcnetwork/care
 source_branch: gcp
 source_commit: 6a2976dc2512c2c532fcc70628c5690fbbbe3f3d
 baseline_commit: 2fe40cd16
-reviewed: 2026-08-07
+reviewed: 2026-08-11
 ---
 
 # Unresolved Items
@@ -1693,3 +1693,84 @@ caller would change. It is not scheduled.
 - Strict PostgreSQL counting. RF2 delivered best-effort PostgreSQL counting and
   named it; an atomic PostgreSQL counter remains unscheduled future work.
 - Celery's Redis broker. Out of scope for both.
+
+---
+
+## Part M — Firebase frontend deployment follow-up
+
+### M1. Verify that Firebase does not cache `build-meta.json`
+
+**Status:** Open; deployment verification pending.
+**Category:** frontend deployment / update reliability.
+**Detected while reviewing:** Volunteer profile > Software update & cache.
+**Affected repository:** `care_fe`; no backend change is currently indicated.
+
+**verified in code** Every frontend build generates
+`public/build-meta.json` with a new UUID and build timestamp through
+`scripts/generate-build-version.js`.
+
+**verified in code** The frontend requests `/build-meta.json` using
+`cache: "no-store"` plus `Cache-Control: no-cache` and `Pragma: no-cache` in
+`src/lib/appVersion.ts`.
+
+**unknown in the deployed environment** The repository does not contain the
+Firebase Hosting configuration used by the XII deployment. Therefore, it has
+not been verified that the Firebase CDN response for `/build-meta.json` uses a
+non-cacheable policy. Browser request directives alone do not document or
+guarantee the intended CDN configuration.
+
+**Risk:** if Firebase or another intermediary serves stale build metadata, the
+application can report that no update is available even though a new frontend
+has already been deployed. Users may continue using stale cached assets until
+the CDN entry expires or they manually clear the cache.
+
+**Required review:**
+
+1. Inspect the real response headers for the production and staging URLs:
+   `curl -I https://<frontend-host>/build-meta.json`.
+2. Locate the authoritative Firebase Hosting configuration used by CI/CD.
+3. Configure an explicit header for `/build-meta.json`, preferably
+   `Cache-Control: no-store, max-age=0`, or approve and document an equivalent
+   policy that always revalidates.
+4. Confirm that Firebase does not override the intended header.
+5. Deploy two consecutive frontend builds and verify that each request returns
+   the newest UUID without waiting for CDN expiration.
+6. Verify that `Check for Update` detects the second build and that
+   `Update Now` loads it successfully.
+
+**Acceptance criteria:**
+
+- [ ] Production and staging response headers are recorded.
+- [ ] `/build-meta.json` cannot be served as a stale long-lived CDN object.
+- [ ] Two consecutive deployments return different, current UUIDs immediately.
+- [ ] The in-app update check detects the newer deployment.
+- [ ] The Firebase Hosting rule is tracked in the repository or its external
+  source of truth is documented.
+- [ ] If no backend work is required, that conclusion remains recorded here.
+
+### M2. Add a build-wide Developer Mode feature flag
+
+**Status:** Open; product behavior decided, implementation pending.
+**Category:** frontend build configuration.
+**Affected repository:** `care_fe`; no backend change is required.
+
+Developer Mode availability must be configured globally for each Firebase
+frontend build, not derived from a CARE user role or permission.
+
+Required behavior:
+
+- a disabled build hides the profile section for every user, does not render
+  the production warning banner and ignores `?debug=true`;
+- an enabled build exposes the function consistently to every user of that
+  build;
+- the build flag defaults to disabled when absent or invalid;
+- the local on/off selection may remain browser-and-origin-specific;
+- the Firebase build pipeline records the value used for every environment.
+
+The final configuration name must follow `care.config.ts` conventions. The
+candidate `REACT_ENABLE_DEVELOPER_MODE` is documented in the Volunteer review
+but is not considered final until implementation verifies the existing config
+and deployment-variable conventions.
+
+See `docs/xii/access-control/roles/volunteer.md`, VOL-004, for detailed
+acceptance criteria.

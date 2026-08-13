@@ -251,6 +251,7 @@ THIRD_PARTY_APPS = [
     "rest_framework.authtoken",
     "drf_spectacular",
     "django_filters",
+    "cities_light",
     # Present unless CARE_RATE_LIMIT_BACKEND=disabled, where there is no
     # rate-limit cache alias for its system check to validate. See
     # config/caches.ratelimit_installed_apps.
@@ -262,6 +263,12 @@ THIRD_PARTY_APPS = [
     "healthy_django",
     "import_export",
 ]
+
+# Import only the countries where the deployment operates by default. Expand
+# this comma-separated setting before importing another country's localities.
+CITIES_LIGHT_INCLUDE_COUNTRIES = env.list(
+    "CITIES_LIGHT_INCLUDE_COUNTRIES", default=["MX"]
+)
 LOCAL_APPS = [
     "care.security",
     "care.facility",

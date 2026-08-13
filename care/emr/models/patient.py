@@ -27,7 +27,7 @@ class Patient(EMRBaseModel):
     address = models.TextField(default="")
     permanent_address = models.TextField(default="")
 
-    pincode = models.IntegerField(default=0, blank=True, null=True)
+    pincode = models.CharField(max_length=16, default=None, blank=True, null=True)
 
     date_of_birth = models.DateField(default=None, null=True)
     year_of_birth = models.IntegerField(validators=[MinValueValidator(1900)], null=True)
@@ -37,6 +37,18 @@ class Patient(EMRBaseModel):
 
     geo_organization = models.ForeignKey(
         "emr.Organization", on_delete=models.SET_NULL, null=True, blank=True
+    )
+
+    # The country is inherited from ``geo_organization``. These fields retain
+    # the patient's address detail inside that country.
+    region = models.ForeignKey(
+        "cities_light.Region", on_delete=models.PROTECT, null=True, blank=True
+    )
+    subregion = models.ForeignKey(
+        "cities_light.SubRegion", on_delete=models.PROTECT, null=True, blank=True
+    )
+    city = models.ForeignKey(
+        "cities_light.City", on_delete=models.PROTECT, null=True, blank=True
     )
 
     organization_cache = ArrayField(models.IntegerField(), default=list)
