@@ -95,6 +95,13 @@ module "care" {
   django_debug               = false # never true, even here: this is a real deployment
   django_secure_ssl_redirect = true
 
+  # Dev has no mail relay. Without this the application default is SMTP to
+  # localhost:587, nothing answers it inside a Cloud Run container, and every
+  # email-sending task fails after Cloud Tasks has already delivered it — the
+  # queue then retries a failure that cannot succeed. The console backend
+  # writes the message to stdout, where Cloud Logging keeps it.
+  django_email_backend = "django.core.mail.backends.console.EmailBackend"
+
   django_allowed_hosts = var.django_allowed_hosts
   csrf_trusted_origins = var.csrf_trusted_origins
   cors_allowed_origins = var.cors_allowed_origins

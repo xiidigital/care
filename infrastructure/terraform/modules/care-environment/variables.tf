@@ -468,6 +468,25 @@ variable "django_secure_ssl_redirect" {
   default = true
 }
 
+variable "django_email_backend" {
+  description = <<-EOT
+    DJANGO_EMAIL_BACKEND. Empty leaves the application default, which is SMTP
+    to EMAIL_HOST — and that defaults to localhost:587.
+
+    A Cloud Run container runs no SMTP server, so leaving this empty without
+    also setting EMAIL_HOST makes every email-sending task fail with a refused
+    connection. The failure is in the handler, after Cloud Tasks has delivered
+    the request, so the queue retries it to exhaustion.
+
+    dev uses the console backend: the message is written to stdout and arrives
+    in Cloud Logging, which is the email test sink ES-07 section 99 accepts as
+    observable evidence. staging and prod need a real relay configured through
+    EMAIL_HOST and the optional EMAIL_PASSWORD secret.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "conn_max_age" {
   description = "Django persistent connection lifetime. Longer reduces setup cost and holds more Cloud SQL connections open; see the connection budget in the operations guide."
   type        = number

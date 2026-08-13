@@ -73,6 +73,12 @@ locals {
       APP_VERSION = var.image
     },
     var.current_domain != "" ? { CURRENT_DOMAIN = var.current_domain } : {},
+
+    # Set only when chosen. Empty leaves the application default rather than
+    # asserting one here — but see the variable: the default is SMTP to
+    # localhost, which no Cloud Run container answers.
+    var.django_email_backend != "" ? { DJANGO_EMAIL_BACKEND = var.django_email_backend } : {},
+
     var.extra_env,
   )
 
