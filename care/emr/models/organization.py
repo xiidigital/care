@@ -105,6 +105,59 @@ class FacilityOrganization(OrganizationCommonBase):
 
 class Organization(OrganizationCommonBase):
     managing_organizations = ArrayField(models.IntegerField(), default=list)
+    # An organization represents CARE's operational and access scope.  These
+    # links identify its *direct* node in the geographic catalogue; ancestors
+    # are derived from the catalogue instead of being copied into every row.
+    country = models.ForeignKey(
+        "cities_light.Country",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="care_country_organizations",
+    )
+    region = models.ForeignKey(
+        "cities_light.Region",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="care_region_organizations",
+    )
+    subregion = models.ForeignKey(
+        "cities_light.SubRegion",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="care_subregion_organizations",
+    )
+    city = models.ForeignKey(
+        "cities_light.City",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="care_city_organizations",
+    )
+
+    def get_direct_geography(self):
+        """Return this organization's directly assigned catalogue node."""
+        for level in ("city", "subregion", "region", "country"):
+            node = getattr(self, level, None)
+            if node is not None:
+                return level, node
+        return None, None
+
+    def get_country(self):
+        """Resolve country from the direct node or the operational parent."""
+        if self.country_id:
+            return self.country
+        if self.region_id:
+            return self.region.country
+        if self.subregion_id:
+            return self.subregion.country
+        if self.city_id:
+            return self.city.country
+        if self.parent_id:
+            return self.parent.get_country()
+        return None
 
 
 class OrganizationUser(EMRBaseModel):

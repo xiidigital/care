@@ -52,7 +52,7 @@ class TestPatientViewSet(CareAPITestBase):
             "gender": choice(list(GenderChoices)),
             "address": self.fake.address(),
             "permanent_address": self.fake.address(),
-            "pincode": self.fake.random_int(min=100000, max=999999),
+            "pincode": str(self.fake.random_int(min=100000, max=999999)),
             "blood_group": choice(list(BloodGroupChoices)),
             "phone_number": generate_random_valid_phone_number(),
             "emergency_phone_number": generate_random_valid_phone_number(),

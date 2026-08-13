@@ -1,7 +1,10 @@
 from django.urls import reverse
 from rest_framework import status
 
-from care.facility.models.facility import REVERSE_FACILITY_TYPES
+from care.facility.models.facility import (
+    REVERSE_FACILITY_TYPES,
+    FacilityFeature,
+)
 from care.utils.tests.base import CareAPITestBase
 
 
@@ -15,7 +18,7 @@ class TestFacilityViewSet(CareAPITestBase):
             user=self.superuser,
             name="Test Facility",
             facility_type=2,
-            pincode=123456,
+            pincode="123456",
         )
         self.client.force_authenticate(user=self.superuser)
         self.base_url = reverse("facility-list")
@@ -32,7 +35,7 @@ class TestFacilityViewSet(CareAPITestBase):
             "description": "Test desc",
             "facility_type": REVERSE_FACILITY_TYPES[2],
             "address": "Test Address",
-            "pincode": 123456,
+            "pincode": "123456",
             "phone_number": "+911234567890",
             "is_public": True,
             "geo_organization": str(self.geo_organization.external_id),
@@ -46,6 +49,23 @@ class TestFacilityViewSet(CareAPITestBase):
         response = self.client.post(self.base_url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["name"], "New Facility")
+
+    def test_create_facility_with_all_declared_features(self):
+        features = [feature.value for feature in FacilityFeature]
+        data = self._get_facility_data(features=features)
+
+        response = self.client.post(self.base_url, data, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["features"], features)
+
+    def test_create_facility_rejects_unknown_feature(self):
+        data = self._get_facility_data(features=[999])
+
+        response = self.client.post(self.base_url, data, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Invalid facility feature ID", str(response.data))
 
     def test_create_facility_duplicate_name(self):
         data = self._get_facility_data(name="Test Facility")

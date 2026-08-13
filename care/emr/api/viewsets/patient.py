@@ -14,6 +14,7 @@ from rest_framework.response import Response
 from care.emr.api.viewsets.base import EMRModelViewSet
 from care.emr.locks.billing import PatientCreateLock
 from care.emr.models import Organization, PatientUser, TokenBooking
+from care.emr.models.organization import FacilityOrganizationUser, OrganizationUser
 from care.emr.models.patient import Patient, PatientIdentifier, PatientIdentifierConfig
 from care.emr.models.scheduling.token import Token
 from care.emr.resources.patient.spec import (
@@ -61,10 +62,29 @@ class PatientViewSet(EMRModelViewSet):
             "can_write_patient_obj", self.request.user, model_instance
         ):
             raise PermissionDenied("Cannot Update Patient")
+        self.authorize_registration_facility(request_obj)
 
     def authorize_create(self, request_obj):
         if not AuthorizationController.call("can_create_patient", self.request.user):
             raise PermissionDenied("Cannot Create Patient")
+        self.authorize_registration_facility(request_obj)
+
+    def authorize_registration_facility(self, request_obj):
+        if request_obj.registration_facility:
+            facility = get_object_or_404(
+                Facility, external_id=request_obj.registration_facility
+            )
+            if self.request.user.is_superuser:
+                return
+            has_facility_access = FacilityOrganizationUser.objects.filter(
+                user=self.request.user, organization__facility=facility
+            ).exists()
+            has_geographic_access = OrganizationUser.objects.filter(
+                user=self.request.user,
+                organization_id__in=facility.geo_organization_cache,
+            ).exists()
+            if not has_facility_access and not has_geographic_access:
+                raise PermissionDenied("Cannot register a patient in this facility")
 
     def authorize_destroy(self, instance):
         if not self.request.user.is_superuser:

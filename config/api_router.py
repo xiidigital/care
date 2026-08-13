@@ -39,6 +39,7 @@ from care.emr.api.viewsets.file_assets import (
 )
 from care.emr.api.viewsets.file_upload import FileUploadViewSet
 from care.emr.api.viewsets.form_submission import FormSubmissionViewSet
+from care.emr.api.viewsets.geography import GeographyCatalogViewSet
 from care.emr.api.viewsets.healthcare_service import HealthcareServiceViewSet
 from care.emr.api.viewsets.inventory.delivery_order import DeliveryOrderViewSet
 from care.emr.api.viewsets.inventory.dispense_order import DispenseOrderViewSet
@@ -187,6 +188,8 @@ router.register(
 
 
 router.register("organization", OrganizationViewSet, basename="organization")
+
+router.register("geography", GeographyCatalogViewSet, basename="geography")
 
 router.register(
     "govt/organization", OrganizationPublicViewSet, basename="govt-organization"

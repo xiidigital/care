@@ -6,6 +6,7 @@ from enum import Enum
 from django.conf import settings
 from django.utils import timezone
 from pydantic import UUID4, BaseModel, Field, field_validator, model_validator
+from pydantic_core.core_schema import ValidationInfo
 
 from care.emr.extensions.base import ExtensionResource
 from care.emr.extensions.validator import (
@@ -13,6 +14,7 @@ from care.emr.extensions.validator import (
     ExtensionRetrieveRenderer,
     ExtensionValidator,
 )
+from care.emr.geography.postal_codes import validate_postal_code
 from care.emr.models import Organization
 from care.emr.models.patient import (
     Patient,
@@ -25,6 +27,49 @@ from care.emr.resources.permissions import PatientPermissionsMixin
 from care.emr.tagging.base import PatientFacilityTagManager, PatientInstanceTagManager
 from care.emr.utils.datetime_type import StrictTZAwareDateTime
 from care.utils.time_util import care_now
+
+
+def _get_registration_facility(facility_id):
+    from care.facility.models import Facility
+
+    facility = Facility.objects.filter(external_id=facility_id).select_related(
+        "geo_organization"
+    ).first()
+    if facility is None:
+        raise ValueError("Registration facility does not exist")
+    if facility.geo_organization is None:
+        raise ValueError("Registration facility has no geographic organization")
+    if facility.geo_organization.get_country() is None:
+        raise ValueError("Registration facility geographic organization has no country")
+    return facility
+
+
+def _validate_location(country, region_id, subregion_id, city_id):
+    from cities_light.models import City, Region, SubRegion
+
+    region = Region.objects.filter(id=region_id).first() if region_id else None
+    subregion = (
+        SubRegion.objects.filter(id=subregion_id).first() if subregion_id else None
+    )
+    city = City.objects.filter(id=city_id).first() if city_id else None
+
+    if subregion and not region:
+        raise ValueError("A subregion requires a selected region")
+    if city and not subregion:
+        raise ValueError("A city requires a selected subregion")
+    if region and region.country_id != country.id:
+        raise ValueError("Region does not belong to the registration facility country")
+    if subregion:
+        if subregion.country_id != country.id:
+            raise ValueError("Subregion does not belong to the registration facility country")
+        if region and subregion.region_id != region.id:
+            raise ValueError("Subregion does not belong to the selected region")
+    if city:
+        if city.country_id != country.id:
+            raise ValueError("City does not belong to the registration facility country")
+        if subregion and city.subregion_id != subregion.id:
+            raise ValueError("City does not belong to the selected subregion")
+    return region, subregion, city
 
 
 class BloodGroupChoices(str, Enum):
@@ -65,7 +110,7 @@ class PatientBaseSpec(EMRResource):
     emergency_phone_number: PhoneNumber | None = Field(None, max_length=14)
     address: str | None = None
     permanent_address: str | None = None
-    pincode: int | None = None
+    pincode: str | None = None
     deceased_datetime: StrictTZAwareDateTime | None = None
     blood_group: BloodGroupChoices | None = None
 
@@ -105,8 +150,19 @@ class PatientIdentifierConfigRequest(BaseModel):
 
 
 class PatientCreateSpec(ExtensionValidator, PatientBaseSpec):
+    __exclude__ = [*PatientBaseSpec.__exclude__,
+        "registration_facility",
+        "region_id",
+        "subregion_id",
+        "city_id",
+    ]
+
     name: str = Field(max_length=settings.PATIENT_NAME_MAX_LENGTH)
-    geo_organization: UUID4
+    geo_organization: UUID4 | None = None
+    registration_facility: UUID4 | None = None
+    region_id: int | None = None
+    subregion_id: int | None = None
+    city_id: int | None = None
     date_of_birth: datetime.date | None = None
 
     age: int | None = None
@@ -118,11 +174,22 @@ class PatientCreateSpec(ExtensionValidator, PatientBaseSpec):
     @field_validator("geo_organization")
     @classmethod
     def validate_geo_organization(cls, geo_organization):
+        if geo_organization is None:
+            return None
         if not Organization.objects.filter(
             org_type="govt", external_id=geo_organization
         ).exists():
             raise ValueError("Geo Organization does not exist")
         return geo_organization
+
+    @model_validator(mode="after")
+    def resolve_registration_facility_geography(self):
+        if self.registration_facility:
+            facility = _get_registration_facility(self.registration_facility)
+            self.geo_organization = facility.geo_organization.external_id
+        if self.geo_organization is None:
+            raise ValueError("Geo Organization is required")
+        return self
 
     @model_validator(mode="after")
     def validate_identifiers(self):
@@ -137,10 +204,25 @@ class PatientCreateSpec(ExtensionValidator, PatientBaseSpec):
                 validate_identifier_config(identifier_config, value)
         return self
 
+    @model_validator(mode="after")
+    def validate_postal_code_for_geography(self):
+        organization = Organization.objects.get(external_id=self.geo_organization)
+        country = organization.get_country()
+        if country is None:
+            raise ValueError("Geo Organization has no country")
+        _validate_location(country, self.region_id, self.subregion_id, self.city_id)
+        self.pincode = validate_postal_code(
+            self.pincode, country.code2
+        )
+        return self
+
     def perform_extra_deserialization(self, is_update, obj):
         obj.geo_organization = Organization.objects.get(
             external_id=self.geo_organization
         )
+        obj.region_id = self.region_id
+        obj.subregion_id = self.subregion_id
+        obj.city_id = self.city_id
         if self.age:
             # override dob if user chooses to update age
             obj.date_of_birth = None
@@ -154,17 +236,28 @@ class PatientCreateSpec(ExtensionValidator, PatientBaseSpec):
 
 
 class PatientUpdateSpec(ExtensionValidator, PatientBaseSpec):
+    __exclude__ = [*PatientBaseSpec.__exclude__,
+        "registration_facility",
+        "region_id",
+        "subregion_id",
+        "city_id",
+    ]
+
     name: str | None = Field(default=None, max_length=settings.PATIENT_NAME_MAX_LENGTH)
     gender: GenderChoices | None = None
     phone_number: PhoneNumber | None = Field(default=None, max_length=14)
     emergency_phone_number: PhoneNumber | None = Field(default=None, max_length=14)
     address: str | None = None
     permanent_address: str | None = None
-    pincode: int | None = None
+    pincode: str | None = None
     blood_group: BloodGroupChoices | None = None
     date_of_birth: datetime.date | None = None
     age: int | None = None
     geo_organization: UUID4 | None = None
+    registration_facility: UUID4 | None = None
+    region_id: int | None = None
+    subregion_id: int | None = None
+    city_id: int | None = None
 
     identifiers: list[PatientIdentifierConfigRequest] = []
 
@@ -179,6 +272,18 @@ class PatientUpdateSpec(ExtensionValidator, PatientBaseSpec):
             raise ValueError("Geo Organization does not exist")
         return geo_organization
 
+    @model_validator(mode="after")
+    def resolve_registration_facility_geography(self, info: ValidationInfo):
+        if self.registration_facility:
+            facility = _get_registration_facility(self.registration_facility)
+            self.geo_organization = facility.geo_organization.external_id
+        elif self.geo_organization is None:
+            existing_geography = info.context["object"].geo_organization
+            if existing_geography is None:
+                raise ValueError("Patient has no geographic organization")
+            self.geo_organization = existing_geography.external_id
+        return self
+
     def perform_extra_deserialization(self, is_update, obj):
         if is_update:
             obj._identifiers = self.identifiers  # noqa: SLF001
@@ -186,6 +291,12 @@ class PatientUpdateSpec(ExtensionValidator, PatientBaseSpec):
                 obj.geo_organization = Organization.objects.get(
                     external_id=self.geo_organization
                 )
+            if "region_id" in self.model_fields_set:
+                obj.region_id = self.region_id
+            if "subregion_id" in self.model_fields_set:
+                obj.subregion_id = self.subregion_id
+            if "city_id" in self.model_fields_set:
+                obj.city_id = self.city_id
             if self.age is not None:
                 obj.date_of_birth = None
                 obj.year_of_birth = timezone.now().year - self.age
@@ -193,6 +304,34 @@ class PatientUpdateSpec(ExtensionValidator, PatientBaseSpec):
                 obj.year_of_birth = self.date_of_birth.year
         if not self.pincode:
             obj.pincode = None
+
+    @model_validator(mode="after")
+    def validate_postal_code_for_geography(self, info: ValidationInfo):
+        location_fields = {"geo_organization", "registration_facility", "region_id", "subregion_id", "city_id"}
+        if "pincode" not in self.model_fields_set and not (
+            location_fields & self.model_fields_set
+        ):
+            return self
+        organization = (
+            Organization.objects.get(external_id=self.geo_organization)
+            if self.geo_organization
+            else info.context["object"].geo_organization
+        )
+        country = organization.get_country() if organization else None
+        if country is None:
+            raise ValueError("Geo Organization has no country")
+        obj = info.context["object"]
+        _validate_location(
+            country,
+            self.region_id if "region_id" in self.model_fields_set else obj.region_id,
+            self.subregion_id
+            if "subregion_id" in self.model_fields_set
+            else obj.subregion_id,
+            self.city_id if "city_id" in self.model_fields_set else obj.city_id,
+        )
+        if "pincode" in self.model_fields_set:
+            self.pincode = validate_postal_code(self.pincode, country.code2)
+        return self
 
     @field_validator("identifiers")
     @classmethod
@@ -256,6 +395,7 @@ class PatientRetrieveSpec(
     ExtensionRetrieveRenderer, PatientListSpec, PatientPermissionsMixin
 ):
     geo_organization: dict = {}
+    location: dict = {}
 
     created_by: dict | None = None
     updated_by: dict | None = None
@@ -274,6 +414,17 @@ class PatientRetrieveSpec(
             mapping["geo_organization"] = OrganizationReadSpec.serialize(
                 obj.geo_organization
             ).to_json()
+        mapping["location"] = {
+            "region": {"id": obj.region_id, "name": obj.region.name}
+            if obj.region_id
+            else None,
+            "subregion": {"id": obj.subregion_id, "name": obj.subregion.name}
+            if obj.subregion_id
+            else None,
+            "city": {"id": obj.city_id, "name": obj.city.name}
+            if obj.city_id
+            else None,
+        }
         cls.serialize_audit_users(mapping, obj)
         if obj.instance_identifiers:
             mapping["instance_identifiers"] = [

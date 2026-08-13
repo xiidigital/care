@@ -24,12 +24,22 @@ class HubRelationship(IntegerChoices):
 
 
 class FacilityFeature(models.IntegerChoices):
-    CT_SCAN_FACILITY = 1, "CT Scan Facility"
+    CT_SCAN = 1, "CT Scan"
     MATERNITY_CARE = 2, "Maternity Care"
-    X_RAY_FACILITY = 3, "X-Ray Facility"
+    X_RAY = 3, "X-Ray"
     NEONATAL_CARE = 4, "Neonatal Care"
     OPERATION_THEATER = 5, "Operation Theater"
     BLOOD_BANK = 6, "Blood Bank"
+    EMERGENCY_SERVICES = 7, "Emergency Services"
+    INPATIENT_SERVICES = 8, "Inpatient Services"
+    OUTPATIENT_SERVICES = 9, "Outpatient Services"
+    INTENSIVE_CARE_UNITS = 10, "Intensive Care Units (ICU)"
+    PHARMACY = 11, "Pharmacy"
+    REHABILITATION_SERVICES = 12, "Rehabilitation Services"
+    HOME_CARE_SERVICES = 13, "Home Care Services"
+    PSYCHOSOCIAL_SUPPORT = 14, "Psychosocial Support"
+    RESPITE_CARE = 15, "Respite Care"
+    DAYCARE_PROGRAMS = 16, "Daycare Programs"
 
 FACILITY_TYPES = [
     (1, "Educational Inst"),
@@ -168,11 +178,20 @@ class Facility(BaseModel):
     latitude = models.DecimalField(
         max_digits=22, decimal_places=16, null=True, blank=True
     )
-    pincode = models.IntegerField(default=None, null=True)
+    pincode = models.CharField(max_length=16, default=None, null=True)
     address = models.TextField()
 
     geo_organization = models.ForeignKey(
         "emr.Organization", on_delete=models.SET_NULL, null=True, blank=True
+    )
+    region = models.ForeignKey(
+        "cities_light.Region", on_delete=models.PROTECT, null=True, blank=True
+    )
+    subregion = models.ForeignKey(
+        "cities_light.SubRegion", on_delete=models.PROTECT, null=True, blank=True
+    )
+    city = models.ForeignKey(
+        "cities_light.City", on_delete=models.PROTECT, null=True, blank=True
     )
     geo_organization_cache = ArrayField(models.IntegerField(), default=list)
 
