@@ -114,6 +114,10 @@ Optional secrets — `EMAIL_PASSWORD`, `SENTRY_DSN`, SMS credentials — are
 declared per environment through the `optional_secrets` variable, which takes
 the roles that may read each. Nothing grants a role a secret it does not need.
 
+dev declares none of them: it sends no real email and reports to no Sentry
+project. `EMAIL_PASSWORD` becomes required for staging and prod together with
+the SMTP settings in section 6 — see `unresolved-items.md` N1.
+
 ## 5. Documented but not set
 
 Listed so that nobody configures a variable that is read by nothing, and so the
@@ -143,6 +147,7 @@ omissions are deliberate rather than forgotten.
 | `DJANGO_ALLOWED_HOSTS` | `[..., ".run.app"]` | the generated Cloud Run hostname is not knowable before the service exists; Django reads a leading dot as a subdomain wildcard |
 | `CSRF_TRUSTED_ORIGINS` | `[..., "https://*.run.app"]` | same reason |
 | `CONN_MAX_AGE` | `60` | persistent connections; the figure that turns instance count into a Cloud SQL connection count |
+| `DJANGO_EMAIL_BACKEND` | console (dev only) | the application default is SMTP to `localhost:587`, which nothing in a Cloud Run container answers; leaving it unset made every email task fail *after* Cloud Tasks had delivered it, and the queue retried a send that could not succeed. dev writes the message to stdout, where Cloud Logging keeps it. staging and prod set nothing and need a real relay — `unresolved-items.md` N1 |
 
 ## 7. Tables created by initialization, never by OpenTofu
 
@@ -191,3 +196,30 @@ worker max_instances x GUNICORN_WORKERS
 
 dev: `2 x 2` + `2 x 2` = **8**, against roughly 25 permitted by `db-f1-micro`.
 The `database_connection_budget` output recomputes this for any environment.
+
+## 10. ES-07 acceptance evidence
+
+Run against the applied dev environment, project
+`project-990c4414-a33c-47f2-9f4`, region `us-central1`, image
+`care@sha256:b50abe44…a751`.
+
+| ES-07 | What was proven | Evidence |
+| --- | --- | --- |
+| §53, §59 | worker rejects anonymous invocation | `POST /internal/tasks/execute/` → `403` from Cloud Run IAM, HTML error page, never reaching Django |
+| §53 | role route isolation | same path on the API → `404` (route not registered under `CARE_PROCESS_ROLE=api`); `/api/v1/facility/` on the worker → `403` at the platform |
+| §58, §98, §99 | Cloud Tasks end to end, dispatched by the application | TOTP enable → `enqueue_task_on_commit` → queue → OIDC → private worker → `204`, the "done, never redelivered" contract; rendered message in the worker's log |
+| §63 | init runs the five operations | execution `care-dev-init-m7twm`, `Container called exit(0)` |
+| §33, §34 | both cache tables exist and are distinct | `Cache table 'care_cache' already exists.` / `Cache table 'care_ratelimit_cache' already exists.` — from `createcachetable`, never from OpenTofu |
+| §93 | GCS transport through CARE | 125 bytes uploaded multipart, downloaded back, and read directly from the bucket: three identical SHA-256 digests |
+| §95 | PostgreSQL best-effort rate limiting | twelve sequential bad logins → `401 ×4` then `429 ×8`; counted exactly, sequentially |
+| §96 | Recent Views survive instance boundaries | one entry written, then served identically by **two distinct Cloud Run instances** |
+| §100 | Cloud Scheduler replaces Beat | manual trigger → Job `care-dev-cleanup-token-slots-nf2v6` succeeded; the automatic `0 0 * * *` Asia/Kolkata fired at 18:30 UTC on two consecutive days |
+| §101 | one image, three roles | API, worker and init all on the same digest; `/app_version/` reports it |
+| §105 | invariants are enforced, not documented | making the worker public, disagreeing Cloud SQL protections, and enabling the fixture loader outside dev each fail at plan time |
+| §106 | stateful resources resist destroy | `tofu plan -destroy` on dev fails with four `prevent_destroy` errors on the secrets |
+| §135 | no drift | `tofu plan -detailed-exitcode` → `0`, "No changes" |
+| §140 | no Redis | no Memorystore instance or cluster in the project; every `redis` match in the configuration is a comment or the deliberately empty `redis_resources` output |
+
+Two findings came out of this and are recorded rather than fixed here:
+`unresolved-items.md` **L8** (`collectstatic` dominates cold start) and **N1**
+(staging and prod cannot send email).

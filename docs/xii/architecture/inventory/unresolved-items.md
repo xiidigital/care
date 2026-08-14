@@ -1253,6 +1253,82 @@ logging infrastructure and not to add a framework, so no bypass was invented.
 startup lines return. That is a one-line change to a settings module shared by
 production and staging and was not made inside a runtime-roles phase.
 
+**ES-07 §79 — the effect in Cloud Run, measured.** The defect costs real
+operational visibility on GCP, worse than it did locally.
+
+A task handler raised inside `care/utils/tasks/views.py`. Cloud Logging kept:
+
+```text
+Traceback (most recent call last):
+  File "/app/care/utils/tasks/views.py", line 111, in execute_task
+    definition.handler(**validated)
+  File "/app/care/emr/tasks/totp.py", line 56, in send_totp_enabled_email
+    _send(
+```
+
+and then stopped. **The exception type and message — the only two things that
+identify the failure — were never emitted.** The frames arrive as separate log
+entries and the final line is lost, so an operator watching Cloud Logging sees
+which function failed and cannot see why.
+
+Diagnosing the underlying fault (an unreachable SMTP host) required reading the
+source and reproducing the configuration by hand. On a service that scales to
+zero and has no shell, that is the difference between a five-minute and a
+one-hour diagnosis. It raises the priority of the one-line fix above; it does
+not change the fix.
+
+Not addressed in ES-07: the correction is to `config/settings/deployment.py`,
+shared by production and staging, and ES-07 §79 says explicitly not to redesign
+logging inside an infrastructure phase.
+
+### L8. `collectstatic` runs on every instance start and dominates cold start
+
+**Status:** Open. **Severity:** availability under scale-out. **Origin:** ES-07
+§94 verification.
+
+**verified** `scripts/start.sh` runs `collectstatic` and `compilemessages`
+before gunicorn binds, on every container start. `STATIC_ROOT` is a path inside
+the image and the staticfiles backend is
+`whitenoise.storage.CompressedManifestStaticFilesStorage`, so each start
+recomputes gzip, brotli and content hashes for the same files baked into the
+same immutable image, and reaches the same result every time.
+
+Measured on one Cloud Run cold start (`care-dev-api`, 2026-08-14):
+
+```text
+04:37:00  instance started (AUTOSCALING)
+04:37:09  PostgreSQL reachable                        (+9s)
+04:38:57  193 static files copied, 905 post-processed (+108s)
+04:39:10  gunicorn listening                          (+13s)
+```
+
+**108 of the ~130 seconds is `collectstatic`.** `docker/prod.Dockerfile` does
+not run it at build time, so nothing has done this work before the container
+starts.
+
+**Observed consequence.** The startup budget is
+`initial_delay 10s + 24 x 10s = 250s`, with `startup_cpu_boost`. Under a burst
+that required scaling out, an instance still exhausted it:
+
+```text
+STARTUP HTTP probe failed 24 times consecutively for container "care-1"
+on port 9000 path "/ping/". The instance was not started.
+```
+
+Requests arriving while capacity was being added returned 503 (`the instance
+failed the readiness check`) and 500. In a 60-request burst against dev's
+2-instance ceiling, 2 requests failed this way.
+
+**Recommended fix:** run `collectstatic` in `docker/prod.Dockerfile` and drop it
+from `scripts/start.sh`, so the work happens once per image rather than once per
+instance. `compilemessages` is a smaller instance of the same argument.
+
+Not done in ES-07. The environment is functional — instances do start, and every
+acceptance test passed — so this is not a deployment blocker under §110, and
+§132 asks not to redesign the build. It is a build-and-startup change that
+affects the traditional deployment too, and belongs to a phase that can run the
+full application regression.
+
 ### L3. The Celery Beat container probe is still a start marker
 
 **Status:** Open, pre-existing. **Origin:** `runtime-and-deployment.md` §5.
@@ -1781,3 +1857,54 @@ and deployment-variable conventions.
 
 See `docs/xii/access-control/roles/volunteer.md`, VOL-004, for detailed
 acceptance criteria.
+
+## Part N — GCP infrastructure follow-up (ES-07)
+
+### N1. staging and prod cannot send email
+
+**Status:** Open; blocks the first staging or production deployment.
+**Origin:** ES-07 §58/§98/§99 verification.
+
+**verified** `config/settings/base.py:432` reads `DJANGO_EMAIL_BACKEND` and
+defaults to SMTP; `EMAIL_HOST` defaults to `localhost` and `EMAIL_PORT` to 587.
+A Cloud Run container runs no SMTP server, so `EmailMessage.send()` raises a
+refused connection.
+
+The failure is not visible where it happens. Cloud Tasks delivers correctly, the
+handler raises, `execute_task` returns 500, and the queue treats that as
+retryable — so a permanently impossible send is retried up to `maxAttempts = 10`
+over `maxRetryDuration = 86400s`, and the queue backlog is the only symptom.
+Diagnosis is further slowed by L2, which drops the exception message.
+
+**dev is resolved.** It selects
+`django.core.mail.backends.console.EmailBackend`, so the message is written to
+stdout and kept by Cloud Logging — the test sink ES-07 §99 accepts as evidence.
+The `django_email_backend` module variable exists for every environment.
+
+**staging and prod set nothing** and therefore inherit the broken default.
+Before either is deployed:
+
+- provision a real relay and set `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_USER`;
+- declare `EMAIL_PASSWORD` through `optional_secrets` for the roles that send;
+- leave `django_email_backend` empty so Django's SMTP backend is used.
+
+Not fixed here because it needs credentials for a relay that does not yet exist,
+and ES-07 §83 applies only dev.
+
+### N2. Email-sending tasks retry a permanent failure
+
+**Status:** Open. **Severity:** queue behaviour. **Related:** B7, N1.
+
+An unreachable or misconfigured mail relay is not transient, but
+`care/utils/tasks/views.py` maps an unclassified handler exception to 500, which
+Cloud Tasks retries. Observed during ES-07: two task names retried for roughly
+twenty minutes across ten attempts each before the queue was purged by hand.
+
+`PermanentTaskError` already exists and is already used for a deleted user in
+`care/emr/tasks/totp.py`. The narrow fix is to classify connection and
+authentication failures from the mail backend the same way, so a send that
+cannot succeed fails once. B7 records the neighbouring problem — that a
+post-send exception retries an email that was already delivered.
+
+Out of scope for ES-07: it is application task-classification logic, and §144
+forbids redesigning the async runtime here.

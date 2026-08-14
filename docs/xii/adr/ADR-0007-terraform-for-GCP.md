@@ -807,6 +807,8 @@ This ADR does not define:
 - [x] Secret Manager resources and bindings declared.
 - [x] Role-aware health behavior verified.
 - [x] Redis-free GCP composition verified through infrastructure, initialization and runtime deployment.
-- [ ] GCS application transport verified end to end.
+- [x] GCS application transport verified end to end.
+- [x] Cloud Tasks application dispatch verified end to end.
+- [x] Cloud Scheduler operation verified end to end.
 - [x] Development environment applied successfully.
 - [x] Destructive-change protections tested.
