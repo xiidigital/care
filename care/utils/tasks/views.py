@@ -19,14 +19,38 @@ The status code is the retry signal. Cloud Tasks retries anything that is not
 Outcome                      Status  Effect
 ===========================  ======  ===============================================
 handler returned             204     done, never redelivered
-malformed or unknown request 400     permanent; retried only until the queue's
-                                     attempt limit, then dead-lettered
+handler failed permanently    200     recorded and not redelivered: no attempt
+                                     can succeed
+malformed or unknown request 400     the dispatcher is wrong, not the work;
+                                     retried until the queue's attempt limit,
+                                     then dead-lettered
 retryable failure            503     transient; redelivery is wanted
 unclassified exception       500     treated as retryable, being unclassified
 ===========================  ======  ===============================================
 
-Returning 2xx for a failed operation would silence retries by lying about the
-outcome, and is never done.
+Two of those deserve their reasons written down.
+
+**A permanently failed handler answers 2xx.** Cloud Tasks has exactly one
+question -- redeliver or not -- and expresses it as 2xx versus everything else;
+it has no status meaning "this failed and will keep failing". Answering 400
+therefore did not mark the task permanent, it just spelled the retries
+differently: ES-07 watched an email that could not be sent under any
+configuration retry ten times over the queue's 24-hour window
+(``unresolved-items.md`` N2). The 2xx here does not claim the operation
+succeeded. It ends the delivery, having recorded the failure at ERROR with its
+full traceback, and it is a distinct status from the 204 that means it worked,
+so the two are still told apart in access logs and in the queue's own record.
+ADR-0003 requires the transient and permanent cases to be mapped explicitly onto
+each backend's retry mechanism; for this transport, that mapping is the status.
+
+**A rejected request still answers 4xx**, even though an identical redelivery
+would be rejected identically. That failure is not a task that cannot be done,
+it is a caller sending something CARE never registered -- a broken dispatcher,
+a stale queue entry, or an unauthorized attempt to reach the endpoint -- and it
+should stay visible as a client error rather than be absorbed with a 2xx.
+
+Returning 2xx for a failure that has *not* been characterised is never done: an
+unclassified exception is retryable by default.
 """
 
 import json
@@ -114,7 +138,9 @@ def execute_task(request: HttpRequest) -> HttpResponse:
         return _error(HTTP_RETRYABLE, "Task failed, retry")
     except PermanentTaskError:
         logger.exception("Task %s failed permanently", task_name)
-        return _error(400, "Task failed")
+        # 2xx, and not 204: the delivery is finished, the work is not. See the
+        # module docstring.
+        return JsonResponse({"detail": "Task failed permanently"}, status=200)
     except Exception:
         # Unclassified. Retrying is the safer default for a failure nobody has
         # characterised yet, and the queue's attempt limit bounds it.

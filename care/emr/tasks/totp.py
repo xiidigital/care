@@ -19,7 +19,8 @@ from django.template.loader import render_to_string
 from django.utils import timezone
 
 from care.users.models import User
-from care.utils.tasks.exceptions import PermanentTaskError
+from care.utils.mail import send_email_message
+from care.utils.tasks.exceptions import PermanentTaskError, RetryableTaskError
 
 TOTP_ENABLED_SUBJECT = "Two-Factor Authentication Enabled"
 TOTP_DISABLED_SUBJECT = "Two-Factor Authentication Disabled"
@@ -47,7 +48,10 @@ def _send(user: User, subject: str, template_path: str, timestamp_key: str) -> N
         (user.email,),
     )
     message.content_subtype = "html"
-    message.send()
+    # Not `message.send()`: the mail boundary classifies the failure, so a
+    # relay that is briefly unavailable is retried and a relay that was never
+    # configured is not (care/utils/mail.py, unresolved-items.md N2).
+    send_email_message(message)
 
 
 def send_totp_enabled_email(user_id: int) -> None:
@@ -76,8 +80,16 @@ def send_totp_disabled_email(user_id: int) -> None:
 # anything failed after the SMTP handoff (recorded as B7). It is narrowed to
 # transient failures only: a permanent failure, such as a missing user, is not
 # improved by retrying and a duplicate email is a real user-visible cost.
+#
+# It names CARE's own classification rather than the socket exceptions it used
+# to name. Those were the right set while `_send` re-raised whatever `smtplib`
+# produced; now that the mail boundary translates, `OSError` no longer reaches
+# here -- and listing it would have retried a permanent misconfiguration, since
+# `smtplib.SMTPException` is itself an `OSError`. This is the Celery half of the
+# mapping the task view expresses as HTTP status: one classification, two
+# transports (ADR-0003 "Retries").
 _RETRY = {
-    "autoretry_for": (ConnectionError, TimeoutError, OSError),
+    "autoretry_for": (RetryableTaskError,),
     "retry_kwargs": {"max_retries": 3},
     "expires": 10 * 60,
 }

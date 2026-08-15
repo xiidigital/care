@@ -136,24 +136,43 @@ class TaskWorkerTests(SimpleTestCase):
         )
         self.assertEqual(response.status_code, 503)
 
-    def test_a_permanent_failure_does_not_masquerade_as_retriable_work(self):
+    def test_a_permanent_failure_ends_the_delivery(self):
+        # 2xx is the only answer Cloud Tasks reads as "do not redeliver", so it
+        # is what a failure no attempt can fix has to return. A 4xx here does
+        # not mark the task permanent; it just spells the retries differently,
+        # which is what ES-07 watched happen ten times to one unsendable email.
         response = self.post_to_handler(
             self.raising(PermanentTaskError("user does not exist"))
         )
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 200)
+
+    def test_a_permanent_failure_is_not_reported_as_a_completed_task(self):
+        # ...and it must stay distinguishable from work that succeeded, or the
+        # queue's own record becomes the only place the difference survives.
+        permanent = self.post_to_handler(self.raising(PermanentTaskError("gone")))
+        succeeded = self.post_to_handler(lambda **kwargs: None)
+        self.assertNotEqual(permanent.status_code, succeeded.status_code)
+        self.assertEqual(succeeded.status_code, 204)
+
+    def test_a_permanent_failure_is_logged_with_its_traceback(self):
+        # The delivery ends quietly; the failure must not. This is the record an
+        # operator has left once the queue stops mentioning the task.
+        with self.assertLogs("care.utils.tasks.views", level="ERROR") as logs:
+            self.post_to_handler(self.raising(PermanentTaskError("no mail relay")))
+        output = "\n".join(logs.output)
+        self.assertIn("failed permanently", output)
+        self.assertIn("PermanentTaskError", output)
+        self.assertIn("no mail relay", output)
+        self.assertIn("Traceback", output)
 
     def test_an_unclassified_failure_is_a_server_error(self):
         response = self.post_to_handler(self.raising(RuntimeError("boom")))
         self.assertEqual(response.status_code, 500)
 
-    def test_a_failure_never_reports_success(self):
-        # The one outcome that would silently lose work: returning 2xx after a
-        # failed operation, to stop Cloud Tasks retrying.
-        for exception in (
-            RetryableTaskError("x"),
-            PermanentTaskError("x"),
-            RuntimeError("x"),
-        ):
+    def test_an_uncharacterised_failure_never_reports_success(self):
+        # Ending a delivery is a claim about the *failure*, and may only be made
+        # where the failure has been classified. Anything else keeps its retry.
+        for exception in (RetryableTaskError("x"), RuntimeError("x")):
             response = self.post_to_handler(self.raising(exception))
             self.assertGreaterEqual(response.status_code, 400)
 
