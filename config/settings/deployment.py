@@ -72,7 +72,24 @@ EMAIL_USE_TLS = True
 # more details on how to customize your logging configuration.
 LOGGING = {
     "version": 1,
-    "disable_existing_loggers": True,
+    # False, matching base.py and test.py, and load-bearing.
+    #
+    # `django.setup()` applies this dictConfig, and with True `logging.config`
+    # permanently sets `disabled = True` on every logger object that already
+    # exists and is not named here. That is not a small set: it includes every
+    # logger built while the settings modules imported, every logger Celery
+    # created before Django was set up, and -- worst -- `django.request`, the
+    # logger through which Django reports unhandled exceptions. A disabled
+    # logger drops records at `Logger.handle()`, before any handler runs, so
+    # nothing propagates to the root handler below either.
+    #
+    # Measured on this image before the change (unresolved-items.md L2): an
+    # ERROR emitted on `django.request`, on `celery.worker` or on any
+    # settings-time logger produced no output at all, while the same ERROR on a
+    # logger created after setup printed normally. A 500 raised inside a view
+    # therefore reached Cloud Logging with no exception type, no message and no
+    # traceback, and Celery never emitted its own startup lines.
+    "disable_existing_loggers": False,
     "formatters": {
         "verbose": {
             "format": "%(levelname)s %(asctime)s %(module)s "
@@ -88,6 +105,16 @@ LOGGING = {
     },
     "root": {"level": "INFO", "handlers": ["console"]},
     "loggers": {
+        # Declared so that re-enabling the existing loggers above does not also
+        # restore Django's DEFAULT_LOGGING handlers for this one. Those are a
+        # `console` handler gated on DEBUG -- which would print a second copy of
+        # every record the root handler already printed, wherever DEBUG is on --
+        # and `mail_admins`, which is gated on DEBUG being *off* and would make
+        # every 500 in a deployed environment attempt an SMTP connection. There
+        # is no mail relay to attempt it against (unresolved-items.md N1).
+        # Configuring the logger here replaces both with the one console handler
+        # and stops propagation, so each record is emitted exactly once.
+        "django": {"level": "INFO", "handlers": ["console"], "propagate": False},
         "django.db.backends": {
             "level": "ERROR",
             "handlers": ["console"],
