@@ -9,6 +9,15 @@ set -euo pipefail
 ./scripts/wait_for_db.sh
 ./scripts/wait_for_redis.sh
 
+# Kept here on purpose, and only here.
+#
+# The production image builds these once and ships them (docker/prod.Dockerfile),
+# which is why scripts/start.sh no longer runs them. Local development is the
+# opposite arrangement: docker/dev.Dockerfile builds no assets, and
+# docker-compose.local.yaml bind-mounts the working tree over /app, so anything
+# a build produced would be shadowed by the host checkout anyway. The sources
+# also change while the container runs, which is the case a build-time artefact
+# cannot serve. So the developer entrypoint builds them at start.
 echo "running collectstatic..."
 python manage.py collectstatic --noinput
 python manage.py compilemessages -v 0

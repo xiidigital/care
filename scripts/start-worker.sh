@@ -32,11 +32,10 @@ GUNICORN_WORKERS="${GUNICORN_WORKERS:="2"}"
 ./wait_for_db.sh
 ./wait_for_redis.sh
 
-# Handlers render reports from templates that reference static assets, so the
-# worker collects them for the same reason the API does. It compiles messages
-# because handlers send localized email.
-python manage.py collectstatic --noinput
-python manage.py compilemessages -v 0
+# Handlers render reports from templates that reference static assets, and send
+# localized email, so the worker needs both the static manifest and the compiled
+# catalogues -- but it does not need to build them. docker/prod.Dockerfile does
+# that once per image, for every role (unresolved-items.md L8).
 
 gunicorn --config python:config.gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-9000} --chdir=/app --workers $GUNICORN_WORKERS \
   --access-logformat "$GUNICORN_LOG_FORMAT" --access-logfile $GUNICORN_ACCESS_LOGFILE --error-logfile $GUNICORN_ERROR_LOGFILE

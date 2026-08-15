@@ -29,9 +29,12 @@ GUNICORN_WORKERS="${GUNICORN_WORKERS:="2"}"
 ./wait_for_db.sh
 ./wait_for_redis.sh
 
-python manage.py collectstatic --noinput
-python manage.py compilemessages -v 0
-
+# No collectstatic and no compilemessages. Both are built into the image by
+# docker/prod.Dockerfile and their output is immutable for the life of that
+# image, so running them here repeated identical work on every cold start --
+# 108 of a ~130 second Cloud Run start, enough to exhaust the startup probe
+# budget under scale-out (unresolved-items.md L8). Startup now does runtime
+# preparation only, and then binds.
 
 gunicorn --config python:config.gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-9000} --chdir=/app --workers $GUNICORN_WORKERS \
   --access-logformat "$GUNICORN_LOG_FORMAT" --access-logfile $GUNICORN_ACCESS_LOGFILE --error-logfile $GUNICORN_ERROR_LOGFILE

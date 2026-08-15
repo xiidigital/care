@@ -139,7 +139,7 @@ variable "probe_path" {
 }
 
 variable "startup_probe_failure_threshold" {
-  description = "Startup budget is period x threshold. The role scripts run collectstatic and compilemessages before gunicorn binds, so the budget is generous by necessity."
+  description = "Startup budget is period x threshold. The role scripts no longer build static assets or message catalogues -- the image does (unresolved-items.md L8) -- so the remaining budget covers waiting for Cloud SQL and gunicorn's own boot. Left generous rather than retuned: the cost of an unused threshold is nothing, and the cost of an exhausted one is a killed instance."
   type        = number
   default     = 24
 }
