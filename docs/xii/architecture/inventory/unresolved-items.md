@@ -1221,7 +1221,62 @@ policy, and `init` under an unreachable Redis).
 
 ### L2. Deployment settings disable every logger created during settings import
 
-**Status:** Open. **Severity:** diagnostics. **Origin:** ES-06 §33 verification.
+**Status:** Resolved 2026-08-16 by the pre-staging hardening branch. **Severity:**
+diagnostics. **Origin:** ES-06 §33 verification.
+
+**Resolution.** `config/settings/deployment.py` sets
+`disable_existing_loggers` to `False`, matching `base.py` and `test.py`, and
+declares the `django` logger explicitly so that re-enabling the existing loggers
+does not also restore Django's `DEFAULT_LOGGING` handlers — a DEBUG-gated
+console handler that would print a second copy of every record, and
+`mail_admins`, which would make every 500 attempt an SMTP connection that N1
+says nothing will answer.
+
+The diagnosis below understated the defect. Probed on the production image
+before the change, `disable_existing_loggers: True` had also disabled
+**`django.request`** — the logger through which Django reports every unhandled
+exception — so a 500 raised in a view produced no log line at all, not a
+truncated one. `django`, `celery`, `celery.worker`, `celery.beat` and
+`config.settings.base` were disabled with it; an ERROR emitted on any of them
+reached stderr nowhere, while the same ERROR on a logger created after
+`django.setup()` printed normally.
+
+**Verified in Cloud Run** (`care-dev-worker`, 2026-08-16), on a deliberately
+misconfigured mail backend, one log record carrying the whole failure:
+
+```text
+ERROR ... views 12 Task send_totp_disabled_email failed permanently
+Traceback (most recent call last):
+  ...
+ConnectionRefusedError: [Errno 111] Connection refused
+The above exception was the direct cause of the following exception:
+Traceback (most recent call last):
+  File "/app/care/utils/tasks/views.py", line 135, in execute_task
+  File "/app/care/emr/tasks/totp.py", line 71, in send_totp_disabled_email
+  File "/app/care/utils/mail.py", line 97, in send_email_message
+  ...
+care.utils.tasks.exceptions.PermanentTaskError: No mail relay is configured:
+EMAIL_HOST='localhost' cannot be reached by this process and no attempt will
+succeed until the environment is given one ([Errno 111] Connection refused)
+```
+
+Exception type, exception message, traceback and the chained cause all arrive.
+Exactly one ERROR record was emitted for the failure — verified by counting
+`failed permanently` in Cloud Logging over the window.
+
+**The scheduler gap is closed too.** The local Celery containers, which run
+`config.settings.production` via the `setdefault` in `config/celery_app.py`, now
+emit `celery@<host> ready.` and `beat: Starting...` — each exactly once, with
+`DJANGO_DEBUG=true`, which is the configuration where a restored default handler
+would have doubled them. `runtime-and-deployment.md` §11.6 can stop attributing
+this to `watchmedo`.
+
+Covered by `care/utils/tests/test_deployment_logging.py`, which asserts each
+property in a subprocess under `DJANGO_SETTINGS_MODULE=config.settings.deployment`
+because a dictConfig is process-global and is not observable from a test process
+the test settings already configured.
+
+**The original diagnosis, kept for the record.**
 
 **verified** `config/settings/deployment.py:75` sets
 `"disable_existing_loggers": True`. `django.setup()` applies that dictConfig, and
@@ -1251,7 +1306,8 @@ logging infrastructure and not to add a framework, so no bypass was invented.
 **Recommended fix:** set `disable_existing_loggers` to `False` in
 `deployment.py`, matching `base.py` and `test.py`, and re-verify Celery's own
 startup lines return. That is a one-line change to a settings module shared by
-production and staging and was not made inside a runtime-roles phase.
+production and staging and was not made inside a runtime-roles phase. *Done, plus
+the explicit `django` logger the flip turned out to require.*
 
 **ES-07 §79 — the effect in Cloud Run, measured.** The defect costs real
 operational visibility on GCP, worse than it did locally.
@@ -1271,6 +1327,11 @@ identify the failure — were never emitted.** The frames arrive as separate log
 entries and the final line is lost, so an operator watching Cloud Logging sees
 which function failed and cannot see why.
 
+*Post-fix note: the frames-as-separate-entries observation is how Cloud Run
+ingests any multi-line message and is unchanged. What changed is that the entry
+carrying the type and message is now among them; see the Cloud Run verification
+above.*
+
 Diagnosing the underlying fault (an unreachable SMTP host) required reading the
 source and reproducing the configuration by hand. On a service that scales to
 zero and has no shell, that is the difference between a five-minute and a
@@ -1283,8 +1344,64 @@ logging inside an infrastructure phase.
 
 ### L8. `collectstatic` runs on every instance start and dominates cold start
 
-**Status:** Open. **Severity:** availability under scale-out. **Origin:** ES-07
-§94 verification.
+**Status:** Resolved 2026-08-16 by the pre-staging hardening branch.
+**Severity:** availability under scale-out. **Origin:** ES-07 §94 verification.
+
+**Resolution.** `docker/prod.Dockerfile` gained an `assets` stage that runs
+`collectstatic` and `compilemessages` once per image; the runtime stage copies in
+`staticfiles/` and `locale/` and nothing else from it. `scripts/start.sh`,
+`scripts/start-worker.sh` and `scripts/celery_worker.sh` run neither command.
+`scripts/start-dev.sh` still runs both, deliberately: `docker/dev.Dockerfile`
+builds no assets and `docker-compose.local.yaml` bind-mounts the working tree
+over `/app`, so anything a build produced would be shadowed.
+
+A separate stage rather than two more steps in `runtime`, because importing the
+settings module writes to the filesystem: `deployment.py` eagerly evaluates
+`get_jwks_from_file()`, which generates and writes a key set when
+`jwks.b64.txt` is absent. That write now lands in a discarded stage instead of
+baking a private key into an image every instance would share.
+
+**Build-time configuration required:** `DJANGO_SETTINGS_MODULE=config.settings.deployment`
+and a placeholder `DATABASE_URL`, which `env.db()` parses and never connects
+with. `production` and `staging` derive from `deployment` and override nothing
+reaching `STATIC_ROOT`, `STATICFILES_DIRS`, `STORAGES`, `LOCALE_PATHS` or
+`INSTALLED_APPS`, so all three produce the same artefacts. No secret, no Cloud
+SQL, no GCP credentials, no Redis, no network.
+
+**`compilemessages` had to move, not just go.** `.mo` files are gitignored, so a
+clean checkout has none; deleting the runtime call without adding a build step
+would have shipped an image with no compiled catalogues. Verified by building
+from `git archive HEAD`: the export contains four `.po` files and no `.mo`, and
+the image contains all four compiled. `scripts/initialize.sh` keeps its copy —
+it runs once per deployment, not per instance.
+
+**Measured on Cloud Run**, same environment, same day (2026-08-15), instance
+start to gunicorn listening:
+
+```text
+                     before (b50abe44)   after (564dd946)
+care-dev-api              38.7s               4.3s
+  of which collectstatic  26.4s               0
+  startup probe        4 attempts         1 attempt
+care-dev-worker           37.5s               5.4s
+```
+
+The ES-07 measurement below recorded 108s of `collectstatic` on an instance
+being added under a burst, where CPU was contended; the 26.4s above is the same
+work on an unloaded cold start. Both are the same defect at different levels of
+contention, and both are now zero.
+
+**Static serving is unaffected**, verified against the deployed image: a hashed
+asset returns 200 with `cache-control: max-age=315360000, public, immutable`,
+and `Accept-Encoding: br` returns the pre-compressed variant (23295 bytes → 4504).
+`STATIC_ROOT` holds 1099 files with a 193-entry manifest, 354 `.gz` and 358
+`.br`; `collectstatic --dry-run` in the built image reports 0 to copy and 193
+unmodified; and a fingerprint of `staticfiles/` plus `locale/` is identical
+before and after `start.sh` runs.
+
+Covered by `care/utils/tests/test_runtime_assets.py`.
+
+**The original finding, kept for the record.**
 
 **verified** `scripts/start.sh` runs `collectstatic` and `compilemessages`
 before gunicorn binds, on every container start. `STATIC_ROOT` is a path inside
@@ -1328,6 +1445,8 @@ acceptance test passed — so this is not a deployment blocker under §110, and
 §132 asks not to redesign the build. It is a build-and-startup change that
 affects the traditional deployment too, and belongs to a phase that can run the
 full application regression.
+
+*That phase was the pre-staging hardening branch; see the resolution above.*
 
 ### L3. The Celery Beat container probe is still a start marker
 
@@ -1862,8 +1981,21 @@ acceptance criteria.
 
 ### N1. staging and prod cannot send email
 
-**Status:** Open; blocks the first staging or production deployment.
+**Status:** OPEN. Still blocks the first staging or production deployment.
 **Origin:** ES-07 §58/§98/§99 verification.
+
+> **Not closed by the pre-staging hardening branch, and not closeable by it.**
+> N2 changed what happens *when* a send fails — it now fails once, loudly, with
+> a message naming the cause, instead of retrying ten times with the cause
+> missing. It did not give any environment a way to deliver mail. Staging and
+> production still inherit `EMAIL_HOST=localhost`, still have no relay, and will
+> send nothing. Choosing and provisioning one was explicitly out of scope; the
+> requirements below are unchanged.
+>
+> The improved failure is visible in Cloud Logging as, verbatim:
+> `PermanentTaskError: No mail relay is configured: EMAIL_HOST='localhost'
+> cannot be reached by this process and no attempt will succeed until the
+> environment is given one`. That message is the reminder, not the fix.
 
 **verified** `config/settings/base.py:432` reads `DJANGO_EMAIL_BACKEND` and
 defaults to SMTP; `EMAIL_HOST` defaults to `localhost` and `EMAIL_PORT` to 587.
@@ -1893,7 +2025,60 @@ and ES-07 §83 applies only dev.
 
 ### N2. Email-sending tasks retry a permanent failure
 
-**Status:** Open. **Severity:** queue behaviour. **Related:** B7, N1.
+**Status:** Resolved 2026-08-16 by the pre-staging hardening branch.
+**Severity:** queue behaviour. **Related:** B7, N1.
+
+**Resolution.** `care/utils/mail.py` is the mail-provider boundary, the
+counterpart of the storage boundary in `care.emr.reports.report_utils` that
+ADR-0003 asks for: one place where an `smtplib` exception becomes CARE's own
+classification, so no task definition imports `smtplib`.
+
+| classified | failures |
+| --- | --- |
+| permanent | authentication rejected; an unsupported capability; recipients refused 5xx; any 5xx response code; a backend that cannot be constructed |
+| transient | recipients deferred 4xx; any 4xx response code; a dropped connection; a socket timeout; a refused connection to a configured relay |
+| unclassified | a bare `SMTPException`; anything that is not an SMTP fault |
+
+**The boundary the exception cannot settle**, documented rather than guessed: a
+relay that is down refuses a connection exactly as an absent one does. A refused
+connection is read as a configuration fault *only* when the host cannot be a
+relay for this process — empty, or loopback, in images that ship no MTA. A
+deployment running a real local submission agent is unaffected while that agent
+answers.
+
+Two cases are deliberately left unclassified, both found by the tests rather
+than by inspection: `smtplib.SMTPException` derives from `OSError`, so it had to
+be excluded from the socket case explicitly rather than merely ordered after it;
+and Django 6.0 made `BadHeaderError` an alias of `ValueError`, so branching on it
+would have marked every `ValueError` in the send path permanent.
+
+**The worker's answer to a permanent handler failure changed from 400 to 200.**
+Cloud Tasks asks one question — redeliver or not — and reads only 2xx as "no". A
+400 did not mark the task permanent; it spelled the retries differently. The
+failure is still recorded at ERROR with its full traceback, and 200 is distinct
+from the 204 that means the work was done. A rejected *request* still answers
+4xx: that is a broken dispatcher, not a task that cannot be done. The Celery
+wrappers carry the same classification through `autoretry_for`, which named
+`OSError` and therefore would have retried the permanent case anyway.
+
+**Verified in Cloud Run** (2026-08-16) by removing the dev console backend,
+enqueuing a real email task through the API, and restoring it afterwards:
+
+- the worker logged `Task send_totp_disabled_email failed permanently` with the
+  complete chained traceback and the `PermanentTaskError` message;
+- it answered `POST /internal/tasks/execute/ 200`;
+- the task was **delivered exactly once** — against ten attempts before — and
+  the queue drained to empty;
+- exactly one ERROR record was emitted for it.
+
+With the console backend restored, the same task type completes with 204 and the
+rendered message appears in Cloud Logging.
+
+Covered by `care/utils/tests/test_mail_classification.py` and
+`care/emr/tests/test_totp_email_failures.py`, including the negative control
+that matters most: a real relay that is down stays retryable.
+
+**The original finding, kept for the record.**
 
 An unreachable or misconfigured mail relay is not transient, but
 `care/utils/tasks/views.py` maps an unclassified handler exception to 500, which
@@ -1908,3 +2093,84 @@ post-send exception retries an email that was already delivered.
 
 Out of scope for ES-07: it is application task-classification logic, and §144
 forbids redesigning the async runtime here.
+
+## Part P — Found while closing L8, L2 and N2
+
+Three things this branch ran into that are not L8, L2 or N2. One was fixed
+because nothing could be verified until it was; two are recorded and left.
+
+### P1. The production image could not be built from the branch
+
+**Status:** Resolved 2026-08-16 in the same branch. **Severity:** was total —
+no production image could be produced at all.
+
+**verified** Since `d275c8141` added `django-cities-light`, `Pipfile.lock` has
+carried a `_meta.hash` that `pipenv 2025.1.1` — the version both Dockerfiles pin
+— does not compute for the current `Pipfile`. `pipenv install --deploy` refuses
+to install from a lock it believes is stale:
+
+```text
+Your Pipfile.lock (30940ca92f32) is out of date. Expected: (adf809c48c20).
+ERROR:: Aborting deploy
+```
+
+The lock was not stale. Every pin in `[packages]`, `[dev-packages]` and `[docs]`
+resolved to exactly the version the `Pipfile` required, `django-cities-light`
+included; only the recorded digest disagreed. Fixed by replacing that one field
+rather than re-locking, which would have changed resolved versions as a side
+effect of an unrelated task.
+
+`docker/dev.Dockerfile` installs without `--deploy` and only warns, which is why
+the local stack kept building while the production image could not — and why
+this survived from `d275c8141` to here unnoticed. The ES-07 acceptance image
+predates that commit.
+
+**Worth deciding:** CI that builds `docker/prod.Dockerfile` on every push would
+have caught this the day it landed (ADR-0008).
+
+### P2. `.dockerignore` lets the builder's working tree into the image
+
+**Status:** Open. **Severity:** build hygiene, reproducibility.
+
+**verified** `.dockerignore` excludes `.venv`, `.git`, `htmlcov`, `staticfiles`,
+`.coverage`, `care/media/` and `celerybeat*`. It excludes nothing else, so
+`COPY . $APP_HOME` copies whatever untracked files the builder happens to have.
+On the machine this branch was built on that was 180 MB of local scratch, and
+the image differed accordingly:
+
+```text
+built from the working tree      1.79 GB
+built from `git archive HEAD`     784 MB
+```
+
+Two consequences beyond size. `jwks.b64.txt` is gitignored and *generated on
+first settings import*, so a developer's key set is copied into the image; it is
+unused wherever `JWKS_BASE64` is set from Secret Manager, which is every GCP
+environment, but it is in the layer. And an image built from a dirty tree is not
+reproducible from its commit, which is what the `-dirty` tag in
+`infrastructure/scripts/publish-image.sh` is warning about.
+
+The acceptance image for this branch was built from `git archive HEAD` into a
+clean directory for exactly this reason.
+
+**Recommended fix:** switch `.dockerignore` to an allowlist, or at least add the
+generated paths. Not done here: it changes what every image contains, and
+belongs to a phase that can rebuild and re-verify all of them.
+
+### P3. 22 patient API tests fail on the branch point
+
+**Status:** Open. **Severity:** blocks staging. **Not caused by this branch.**
+
+**verified** `care.emr.tests.test_patient_api.TestPatientViewSet` has 22 failing
+tests at `7d2bfa0d6`, the commit this branch started from, and the same 22 fail
+identically with every change in this branch stashed. Patient creation returns
+400 where the tests expect 200, and one date validation reports `value_error`
+where the test expects `validation_error`.
+
+The shape points at `d275c8141` (`feat(geography): derive patient location from
+facility`), which added country-aware postal-code validation and a derived
+residence — the same commit that carried the lock drift in P1 — but the cause
+was not investigated here.
+
+Out of scope for this branch, which was scoped to L8, L2 and N2. Recorded
+because "the suite passes" is a staging precondition and it does not.

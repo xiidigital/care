@@ -812,3 +812,25 @@ This ADR does not define:
 - [x] Cloud Scheduler operation verified end to end.
 - [x] Development environment applied successfully.
 - [x] Destructive-change protections tested.
+
+**Post-ES-07 note, 2026-08-16 — evidence only; the decision is unchanged.**
+
+Three findings this deployment produced have since been closed on the
+pre-staging hardening branch, and two figures recorded above as characteristic
+of the environment are no longer characteristic of it:
+
+- Cloud Run cold start is now **4.3s** for the API and **5.4s** for the worker,
+  against 38.7s and 37.5s when this ADR was verified. `collectstatic` and
+  `compilemessages` moved into the image build (`unresolved-items.md` L8); the
+  services, probes, scaling limits and startup budget declared here are
+  unchanged.
+- Deployed processes emit complete exception logs, so the "Logging and
+  observability" section's assumption — that stdout and stderr reaching Cloud
+  Logging is sufficient — now holds in practice as well as in configuration
+  (L2). It was not holding: the settings module was disabling `django.request`.
+- A permanently unsendable email task is no longer redelivered by Cloud Tasks
+  (N2). The queue configuration declared here is unchanged; the worker's status
+  mapping is what changed.
+
+**N1 remains open and still blocks the first staging or production deployment.**
+Neither environment can send email. Nothing above changes that.

@@ -138,26 +138,99 @@ is a container on a private network and there is no CA to verify against.
 
 ## 4. Static files and i18n
 
-**verified** `collectstatic --noinput` runs **at container start**, not at image
-build time:
+**Corrected 2026-08-16.** Both commands now run at image build time. What this
+section recorded — that they ran at container start, in five scripts, repeating
+identical work on every cold start — was the defect filed as
+`unresolved-items.md` L8 and is no longer true of the production image.
 
-| Script | Line |
-| --- | --- |
-| `scripts/start.sh` | `python manage.py collectstatic --noinput` |
-| `scripts/start-dev.sh` | same |
-| `scripts/celery_worker.sh` | same |
+### 4.1 The asset lifecycle
 
-**verified** `compilemessages -v 0` runs at start in all five scripts.
+```text
+docker build
+  builder  installs the venv and the plugins
+  assets   FROM builder
+           collectstatic   -> staticfiles/  (hashed names, manifest, .gz, .br)
+           compilemessages -> locale/**/*.mo
+  runtime  FROM base
+           COPY --from=builder  .venv
+           COPY .               the source
+           COPY --from=assets   staticfiles/   <- only these two cross over
+           COPY --from=assets   locale/
+
+container start
+  wait_for_db, wait_for_redis (when the configuration selects one)
+  gunicorn / celery                            <- builds nothing
+```
+
+**verified** No production entrypoint runs either command:
+`scripts/start.sh`, `scripts/start-worker.sh`, `scripts/celery_worker.sh` and
+`scripts/celery_beat.sh`. Held in place by
+`care/utils/tests/test_runtime_assets.py`.
+
+**verified** `scripts/initialize.sh` still runs `compilemessages`. The `init`
+role is a deployment step that runs once per release, not once per instance, so
+it costs no cold start; it is left alone so a deployment that overlays its own
+catalogues keeps working.
 
 **verified** `whitenoise` is a dependency (`Pipfile`, `whitenoise = "==6.11.0"`),
-so static files are served from the application process.
+so static files are served from the application process, out of the baked
+`STATIC_ROOT`. `WHITENOISE_MANIFEST_STRICT = False` (`base.py`).
 
-**inferred** Running `collectstatic` and `compilemessages` on every cold start
-adds latency to every Cloud Run instance launch and repeats identical work.
-Moving both into the image build is a contained, low-risk improvement.
+### 4.2 Production image versus local development
 
-**verified** `scripts/celery_worker.sh` runs `collectstatic` even though a worker
-serves no HTTP.
+They are deliberately opposite, and neither is a mistake.
+
+| | production image | local development |
+| --- | --- | --- |
+| Dockerfile | `docker/prod.Dockerfile` | `docker/dev.Dockerfile` |
+| assets built | at image build, in `assets` | at container start, in `start-dev.sh` |
+| source at runtime | copied into the image | bind-mounted from the host |
+| when sources change | rebuild the image | already visible; restart to rebuild assets |
+
+`docker-compose.local.yaml` mounts the working tree over `/app`, so anything a
+dev image built would be shadowed by the host checkout; and the sources change
+while the container runs, which is the case a build-time artefact cannot serve.
+`scripts/start-dev.sh` therefore keeps both commands and says so in a comment.
+
+### 4.3 What the build needs, and what it must not have
+
+`DJANGO_SETTINGS_MODULE=config.settings.deployment` — the module the container
+runs, so the manifest written is the one the application looks up. `production`
+and `staging` derive from it and override nothing reaching `STATIC_ROOT`,
+`STATICFILES_DIRS`, `STORAGES`, `LOCALE_PATHS` or `INSTALLED_APPS`.
+
+`DATABASE_URL` — the only value `deployment.py` requires without a default.
+`env.db()` parses it; nothing connects. The Dockerfile supplies an obvious
+placeholder.
+
+Nothing else. No secret is injected into a layer, no Cloud SQL, no GCP
+credentials, no Redis, no network access.
+
+`assets` is a separate stage rather than two steps in `runtime` because
+importing the settings module writes to the filesystem: `deployment.py` eagerly
+evaluates `get_jwks_from_file()`, which generates and writes a key set when
+`jwks.b64.txt` is absent. In a discarded stage that write is harmless; in the
+shipped image it would be a private key every instance shares.
+
+### 4.4 Verifying a built image
+
+```bash
+docker run --rm --entrypoint bash <image> -c '
+  ls /app/staticfiles/staticfiles.json
+  find /app/staticfiles -name "*.br" | wc -l
+  find /app/locale -name "*.mo"
+'
+```
+
+On the 2026-08-16 acceptance image: 1099 files under `STATIC_ROOT`, a 193-entry
+manifest, 354 `.gz`, 358 `.br`, four compiled catalogues. `collectstatic
+--dry-run` inside the image reports `0 static files copied, 193 unmodified`.
+
+Build from a clean export — `git archive HEAD` into an empty directory — rather
+than from a working tree, or the image absorbs whatever untracked files the
+builder has (`unresolved-items.md` P2). It is also the only way to confirm the
+catalogues are really built: `.mo` files are gitignored, so a clean checkout has
+none.
 
 ---
 
@@ -554,6 +627,15 @@ live, evidenced by the schedule files above. **inferred** log truncation under
 `watchmedo auto-restart`, not a process failure. Recorded so that a future reader
 does not mistake the missing lines for a broken worker.
 
+> **The inference was wrong, and it is fixed.** It was not truncation and had
+> nothing to do with `watchmedo`. The local Celery containers run
+> `config.settings.production` — `DJANGO_SETTINGS_MODULE` is unset for them, so
+> the `setdefault` in `config/celery_app.py` applies — which imported a
+> `LOGGING` config with `disable_existing_loggers: True`, and `django.setup()`
+> disabled every logger Celery had built before it. Filed as
+> `unresolved-items.md` L2 and closed on 2026-08-16. Both lines are back:
+> `celery@<host> ready.` and `beat: Starting...`, each emitted once.
+
 ### 11.7 Migration and synchronization results
 
 | Check | Result |
@@ -923,16 +1005,22 @@ explicit.
 
 | Entrypoint | Role | Long-running | Routes served | migrate | createcachetable | sync_permissions_roles | sync_valueset | collectstatic | compilemessages | Celery |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `scripts/start.sh` | `api` | yes | public API + diagnostics | no | no | no | no | yes | yes | no |
-| `scripts/start-dev.sh` | `api` | yes | public API + diagnostics | no | no | no | no | yes | yes | no |
-| `scripts/start-worker.sh` | `task_worker` | yes | task endpoint + diagnostics | no | no | no | no | yes | yes | no |
-| `scripts/celery_worker.sh` | `task_worker` | yes | none (broker) | no | no | no | no | yes | yes | worker |
+| `scripts/start.sh` | `api` | yes | public API + diagnostics | no | no | no | no | no | no | no |
+| `scripts/start-dev.sh` | `api` | yes | public API + diagnostics | no | no | no | no | **yes** | **yes** | no |
+| `scripts/start-worker.sh` | `task_worker` | yes | task endpoint + diagnostics | no | no | no | no | no | no | no |
+| `scripts/celery_worker.sh` | `task_worker` | yes | none (broker) | no | no | no | no | no | no | worker |
 | `scripts/celery-dev.sh` | `task_worker` | yes | none (broker) | no | no | no | no | no | no | worker |
 | `scripts/celery_beat.sh` | `scheduler` | yes | none | no | no | no | no | no | no | beat |
 | `scripts/celery_beat-dev.sh` | `scheduler` | yes | none | no | no | no | no | no | no | beat |
 | `scripts/initialize.sh` | `init` | **no** | none | **yes** | **yes** | **yes** | **yes** | no | **yes** | no |
 | `Procfile` `web` | `api` | yes | public API + diagnostics | no | no | no | no | no | no | no |
 | `Procfile` `release` | `init` | no | none | yes | yes | yes | yes | yes | yes | no |
+
+**Updated 2026-08-16.** The `collectstatic` and `compilemessages` columns were
+`yes` for every long-running entrypoint until L8 was closed; they are built into
+the image now (§4). `scripts/start-dev.sh` is the one long-running entrypoint
+that still builds them, because local development bind-mounts the source over
+`/app` and a build-time artefact would be shadowed.
 
 **verified** The `-ecs` scripts remain thin `exec` wrappers over `start.sh`,
 `celery_worker.sh` and `celery_beat.sh` and inherit their roles unchanged.
@@ -1153,3 +1241,119 @@ the suite was run at the branch point (`5066cfebb`) and reported **2234**. The
 difference is the 48-test runtime-roles module, one test added to the
 worker-route module and one dispatcher test removed when role validation moved
 out of the task-backend module.
+
+---
+
+## 16. Runtime changes in the pre-staging hardening branch
+
+Three findings from the ES-07 deployment, closed together because they were all
+first observed in the same failure: an email task that could not succeed,
+retried for hours, with the reason missing from the logs.
+
+### 16.1 Assets are built once, by the image
+
+See §4, rewritten. In short: `docker/prod.Dockerfile` gained an `assets` stage;
+production entrypoints build nothing; `scripts/start-dev.sh` still does, because
+local development mounts the source over `/app`.
+
+Cold start on Cloud Run, before and after, same environment and same day:
+
+```text
+                     before      after
+care-dev-api          38.7s       4.3s     startup probe 4 attempts -> 1
+care-dev-worker       37.5s       5.4s     startup probe 4 attempts -> 1
+```
+
+The startup probe budget (`initial_delay 10s + 24 x 10s`) is unchanged. It was
+not retuned downwards: an unused threshold costs nothing and an exhausted one
+kills an instance.
+
+### 16.2 Logging: what a deployed process actually emits
+
+`config/settings/deployment.py` sets `disable_existing_loggers: False` and
+declares the `django` logger explicitly. Before that, `django.request`,
+`django`, every `celery.*` logger and every logger built during settings import
+were disabled by `django.setup()`, and a disabled logger drops records before
+any handler runs — including the root handler.
+
+What this means operationally:
+
+- an unhandled view exception now appears, with type, message and traceback;
+- a chained exception shows both halves and the `direct cause` line, so a
+  translated failure still names the provider error underneath it;
+- each record is emitted **once**. The explicit `django` entry is what
+  guarantees that: Django's `DEFAULT_LOGGING` attaches a DEBUG-gated console
+  handler to `django`, which would print a second copy wherever `DEBUG` is on —
+  the local Celery containers, for instance — and `mail_admins`, which would
+  make every 500 attempt an SMTP connection nothing will answer;
+- Cloud Run still splits a multi-line message into one entry per line. That is
+  ingestion, not Django. The entry carrying `<ExceptionType>: <message>` is now
+  among them, which is the part that was missing.
+
+Nothing was added: no framework, no agent, no provider-specific call. Logs go to
+stdout and stderr and Cloud Run forwards them.
+
+`care/utils/tests/test_deployment_logging.py` asserts these in a subprocess
+under the deployment settings, because a dictConfig is process-global.
+
+### 16.3 Email task failure semantics
+
+An email task can now end three ways, and the HTTP status the worker returns is
+the whole contract with Cloud Tasks:
+
+| outcome | status | Cloud Tasks | log |
+| --- | --- | --- | --- |
+| sent | 204 | done | `Executing task <name>` |
+| permanently unsendable | 200 | done, no redelivery | ERROR + full traceback |
+| temporarily unsendable | 503 | redelivered | WARNING |
+| not characterised | 500 | redelivered | ERROR + full traceback |
+
+`care/utils/mail.py` decides which. Permanent covers authentication rejected, an
+unsupported capability, recipients refused 5xx, any 5xx response code, and a
+backend that cannot be constructed. Transient covers 4xx responses, deferrals,
+dropped connections and timeouts.
+
+**The one judgement call**, and the reason it is a judgement call: a relay that
+is down refuses a connection exactly as an absent one does. A refused connection
+is read as a configuration fault only when `EMAIL_HOST` cannot be a relay for
+this process — empty or loopback, in images that ship no MTA. A deployment with
+a real local submission agent keeps its retries while that agent answers.
+
+**Reading the failure.** A permanent mail failure looks like this in Cloud
+Logging, and the message is meant to be actionable on its own:
+
+```text
+PermanentTaskError: No mail relay is configured: EMAIL_HOST='localhost' cannot
+be reached by this process and no attempt will succeed until the environment is
+given one ([Errno 111] Connection refused)
+```
+
+If you see it, the environment has no relay. Retrying will not help and the
+queue will not try — that is the point. Fix the configuration (§16.4).
+
+**A 200 is not a claim that the mail was sent.** It answers Cloud Tasks'
+question, which is only ever "redeliver or not". The 204 is the one that means
+delivered.
+
+The Celery transport carries the same classification through `autoretry_for`,
+which names `RetryableTaskError` only. It previously named `OSError`, which
+would have retried the permanent case — `smtplib.SMTPException` derives from
+`OSError`.
+
+### 16.4 The remaining email prerequisite for staging
+
+**`unresolved-items.md` N1 is open and blocks the first staging or production
+deployment.** Nothing in this branch gave any environment the ability to send
+mail; it changed only what happens when a send fails.
+
+- **dev** sets `django_email_backend =
+  "django.core.mail.backends.console.EmailBackend"`, so messages are written to
+  stdout and kept by Cloud Logging. Verified end to end on 2026-08-16: a TOTP
+  change through the API enqueued a task, Cloud Tasks delivered it, the worker
+  answered 204 and the rendered message appears in the logs. This is a test
+  sink and must not become a staging or production default.
+- **staging and prod** set nothing and inherit Django's `EMAIL_HOST=localhost`.
+  Before either is deployed: provision a relay; set `EMAIL_HOST`, `EMAIL_PORT`
+  and `EMAIL_USER`; declare `EMAIL_PASSWORD` through `optional_secrets` for the
+  roles that send; and leave `django_email_backend` empty so Django's SMTP
+  backend is used.

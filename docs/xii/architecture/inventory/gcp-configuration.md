@@ -223,3 +223,8 @@ Run against the applied dev environment, project
 Two findings came out of this and are recorded rather than fixed here:
 `unresolved-items.md` **L8** (`collectstatic` dominates cold start) and **N1**
 (staging and prod cannot send email).
+
+**2026-08-16.** L8 is closed — assets are built into the image and cold start
+fell from 38.7s to 4.3s on the API — along with L2 and N2, which came out of the
+same ES-07 failure. **N1 is still open and still blocks staging:** no
+environment other than dev, which writes to the console, can send email at all.
