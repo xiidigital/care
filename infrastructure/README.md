@@ -289,6 +289,65 @@ survive — the cleanup schedules are indifferent to whether data is synthetic.
 
 Credentials are in `care/fixtures/fixtures.md`.
 
+## 7.9 Staging
+
+Staging is the same procedure with `staging` substituted for `dev` throughout —
+same module, same composition, same nine steps. What differs is stated here so
+nobody has to infer it from a diff.
+
+**A separate project is the intended shape.** ADR-0007 requires environment
+separation to include stateful resources and secrets. Every stateful name the
+module builds derives from `var.environment`, so a staging environment applied
+into the dev project would still have its own Cloud SQL instance, its own
+buckets, its own secret containers and its own queue — but it would share the
+project's quotas, IAM surface and audit trail. Prefer a project of its own; if
+one is not available, the isolation above is what you are relying on, and it is
+worth saying so in the deployment record.
+
+Either way, **bootstrap the state bucket in whichever project holds staging**
+(section 6) before `tofu init`. State prefix `environments/staging` is fixed in
+`main.tf` and cannot be overridden from the command line.
+
+Never point staging at a dev database, bucket or secret value. Run
+`provision-secrets.sh --env staging` to generate its own; secret values are
+per-environment by construction, not by convention.
+
+Two differences from dev in the tracked configuration, both deliberate:
+
+| | dev | staging |
+| --- | --- | --- |
+| Cloud SQL | `db-f1-micro`, no PITR | `db-g1-small`, PITR on, 7 backups |
+| deletion protection | off, both guards | **on**, both guards |
+| buckets | `force_destroy`, unversioned | protected, versioned |
+| fixture loader | available | **refused by the module** |
+| alerts | off | on |
+
+Deletion protection being on means a teardown is a reviewable edit to a tracked
+file, not something a routine plan can do. That is the point of it.
+
+### Email in staging
+
+Staging defaults to Django's console email backend, and that is a valid
+configuration rather than a stopgap. Under it CARE renders the message,
+dispatches through Cloud Tasks, executes in the worker and writes the rendered
+message where Cloud Logging keeps it — the whole generation path, verifiable
+end to end. Only the relay hop is absent.
+
+Verify it as part of acceptance:
+
+```bash
+gcloud logging read 'resource.labels.service_name="care-staging-worker" AND textPayload:"Subject:"' --project <project> --limit 5
+```
+
+**No email provider is named anywhere in this repository, and none may be.**
+Enabling external delivery later is a configuration change: clear
+`django_email_backend`, supply `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_USER` and
+`EMAIL_USE_TLS` (or `EMAIL_USE_SSL`) through `extra_env`, declare
+`EMAIL_PASSWORD` in `optional_secrets`, and write its value with
+`gcloud secrets versions add`. No infrastructure architecture changes, and no
+credential is ever committed. See
+`docs/xii/architecture/inventory/unresolved-items.md` N1.
+
 ## 8. Verifying
 
 ```bash
@@ -331,16 +390,21 @@ migration must not take traffic.
 Cloud SQL is the only resource that costs money while nothing is happening.
 Everything else scales to zero.
 
-| Resource | dev | Note |
-| --- | --- | --- |
-| Cloud SQL `db-f1-micro` | ~USD 8/month | shared core, 614 MiB, plus 10 GB SSD |
-| Cloud Run API / worker | ~0 idle | `min_instances = 0` |
-| Cloud Run Jobs | ~0 idle | compute only while executing |
-| Cloud Storage | usage | Standard, regional |
-| Cloud Tasks | usage | first million operations/month free |
-| Artifact Registry | ~0.10/GB/month | one image |
-| Logging | usage | first 50 GiB/month free |
-| **Redis** | **none** | none is provisioned |
+| Resource | dev | staging | Note |
+| --- | --- | --- | --- |
+| Cloud SQL | ~USD 8/month (`db-f1-micro`) | ~USD 25–30/month (`db-g1-small`) | shared core; staging adds PITR write-ahead log retention and 7 backups |
+| Cloud Run API / worker | ~0 idle | ~0 idle | `min_instances = 0` in both |
+| Cloud Run Jobs | ~0 idle | ~0 idle | compute only while executing |
+| Cloud Storage | usage | usage + versioning | staging keeps noncurrent generations |
+| Cloud Tasks | usage | usage | first million operations/month free |
+| Artifact Registry | ~0.10/GB/month | ~0.10/GB/month | one image each |
+| Logging | usage | usage | first 50 GiB/month free |
+| Monitoring | none | alert policies | staging has `alerts_enabled = true` |
+| **Redis** | **none** | **none** | none is provisioned in either |
+
+Cloud SQL is the standing cost in both, and staging's is the larger one because
+it is a real instance with point-in-time recovery — the whole point being that a
+migration's cost becomes visible here before production sees it.
 
 Raising `api_min_instances` above zero is the single easiest way to turn this
 into a continuous cost, which is why production requires the decision explicitly.

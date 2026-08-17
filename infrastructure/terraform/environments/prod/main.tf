@@ -89,12 +89,31 @@ module "care" {
   django_debug               = false
   django_secure_ssl_redirect = true
 
+  # Console email is permitted in production, and is the default here.
+  #
+  # Not a compromise and not a placeholder. CARE separates application email
+  # generation from external email delivery; the first is architecture and is
+  # present, the second is an operational capability an operator enables when
+  # they have a relay to enable it against (unresolved-items.md N1). Nothing in
+  # this root requires SMTP credentials, and no validation rule may be added
+  # that does.
+  #
+  # It is a default rather than a constant precisely because production is the
+  # environment most likely to want delivery. Clearing it restores Django's SMTP
+  # backend; the transport settings then come through extra_env and the password
+  # through optional_secrets. The default is the console backend rather than
+  # empty because empty means SMTP to localhost:587, which no Cloud Run
+  # container answers — a broken configuration is a worse default than an
+  # honest one.
+  django_email_backend = var.django_email_backend
+
   django_allowed_hosts = var.django_allowed_hosts
   csrf_trusted_origins = var.csrf_trusted_origins
   cors_allowed_origins = var.cors_allowed_origins
   current_domain       = var.current_domain
 
   optional_secrets = var.optional_secrets
+  extra_env        = var.extra_env
 
   # --- Monitoring ----------------------------------------------------------
   alerts_enabled              = true

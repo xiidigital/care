@@ -82,12 +82,28 @@ module "care" {
   django_debug               = false
   django_secure_ssl_redirect = true
 
+  # Console email. A valid runtime configuration for staging, not a placeholder
+  # for one (unresolved-items.md N1).
+  #
+  # CARE separates application email generation from external email delivery.
+  # Generation is exercised in full here — the API enqueues, Cloud Tasks
+  # delivers, the worker renders and the message lands in Cloud Logging — and
+  # only the relay hop is absent. Staging is where that path is verified;
+  # whether the bytes then reach a mailbox is an operational choice this
+  # repository does not make for anyone.
+  #
+  # Overridable in tfvars. An operator who wants delivery clears it and supplies
+  # the generic SMTP settings through extra_env plus EMAIL_PASSWORD through
+  # optional_secrets. No provider is named here or anywhere else.
+  django_email_backend = var.django_email_backend
+
   django_allowed_hosts = var.django_allowed_hosts
   csrf_trusted_origins = var.csrf_trusted_origins
   cors_allowed_origins = var.cors_allowed_origins
   current_domain       = var.current_domain
 
   optional_secrets = var.optional_secrets
+  extra_env        = var.extra_env
 
   # --- Monitoring ----------------------------------------------------------
   alerts_enabled              = var.alerts_enabled

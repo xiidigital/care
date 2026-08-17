@@ -137,9 +137,34 @@ variable "current_domain" {
   default = ""
 }
 
+variable "django_email_backend" {
+  description = <<-EOT
+    DJANGO_EMAIL_BACKEND. Defaults to Django's console backend, which is a valid
+    production configuration: email-producing workflows are operational and the
+    rendered message reaches Cloud Logging, while external delivery is
+    intentionally absent (unresolved-items.md N1).
+
+    Nothing here requires SMTP credentials. To enable external delivery, set
+    this to "" — restoring Django's SMTP backend — and supply EMAIL_HOST,
+    EMAIL_PORT, EMAIL_USER and EMAIL_USE_TLS or EMAIL_USE_SSL through extra_env,
+    with EMAIL_PASSWORD declared in optional_secrets and its value written
+    straight to Secret Manager. The repository names no provider, and no
+    credential belongs in any tracked file.
+  EOT
+  type        = string
+  default     = "django.core.mail.backends.console.EmailBackend"
+}
+
 variable "optional_secrets" {
-  type    = map(list(string))
-  default = {}
+  description = "Secret Manager containers beyond the required set, as variable name => roles. Containers only; values are written with `gcloud secrets versions add`."
+  type        = map(list(string))
+  default     = {}
+}
+
+variable "extra_env" {
+  description = "Additional non-secret environment variables for every role. This is where generic SMTP transport settings go if external email delivery is enabled later. Never a credential."
+  type        = map(string)
+  default     = {}
 }
 
 variable "alert_notification_channels" {

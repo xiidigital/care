@@ -2,6 +2,11 @@
 #
 # No secret belongs here. Values live in Secret Manager, written by
 # infrastructure/scripts/provision-secrets.sh.
+#
+# Staging is production's architecture at a smaller size. What differs is
+# quantity — instance size, instance counts, backup depth — never composition.
+# ADR-0007 requires environment separation to include stateful resources and
+# secrets, so nothing below may point at a dev database, bucket or secret.
 
 project_id = "your-staging-gcp-project-id"
 
@@ -27,6 +32,36 @@ current_domain       = "care-staging.example.org"
 # alert_notification_channels = ["projects/your-staging-gcp-project-id/notificationChannels/1234567890"]
 
 # optional_secrets = {
+#   SENTRY_DSN = ["api", "worker", "init"]
+# }
+
+# --- Email -------------------------------------------------------------------
+# Nothing needs to be set here. Staging defaults to Django's console backend,
+# which is a valid runtime configuration: the API enqueues, Cloud Tasks
+# delivers, the worker renders the message and it lands in Cloud Logging.
+# External delivery is intentionally absent and is an optional operational
+# capability (docs/xii/architecture/inventory/unresolved-items.md N1).
+#
+# To enable external delivery, uncomment all three blocks and fill in the relay
+# you chose. This repository names no provider and holds no credential; the
+# values below are placeholders showing shape only.
+#
+# django_email_backend = ""   # restores Django's SMTP backend
+#
+# extra_env = {
+#   EMAIL_HOST    = "smtp.your-relay.example"
+#   EMAIL_PORT    = "587"
+#   EMAIL_USER    = "your-relay-username"
+#   EMAIL_USE_TLS = "true"     # or EMAIL_USE_SSL = "true" on 465; never both
+#   EMAIL_FROM    = "CARE <no-reply@care-staging.example.org>"
+# }
+#
+# optional_secrets = {
 #   EMAIL_PASSWORD = ["api", "worker"]
 #   SENTRY_DSN     = ["api", "worker", "init"]
 # }
+#
+# That declares the Secret Manager container and its per-role IAM. The value is
+# written separately, and never into this file or any other tracked one:
+#
+#   gcloud secrets versions add care-staging-email-password --data-file=-
