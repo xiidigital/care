@@ -2159,6 +2159,86 @@ belongs to a phase that can rebuild and re-verify all of them.
 
 ### P3. 22 patient API tests fail on the branch point
 
+**Status:** Resolved 2026-08-17 on `feature/patient-postal-code-regression`.
+**Severity:** was blocking staging — no patient could be created in any
+deployment.
+
+**Regression boundary, proven rather than inferred.** `care.emr.tests.test_patient_api`
+runs **29 tests, all passing, at `a4928e042`** — the parent of `d275c8141` —
+checked out into a separate worktree and run against the same image. At
+`d275c8141` and everywhere after it, 22 of those 29 fail. `git log -S` finds the
+failing error string and the validator that raises it in exactly one commit,
+`d275c8141` (`feat(geography): derive patient location from facility`). The
+change is fork-local; no upstream CARE commit contains `care/emr/geography/`.
+
+**Root cause 1 — a country was made a precondition for creating a patient.**
+`PatientCreateSpec.validate_postal_code_for_geography` and its update
+counterpart raised `Geo Organization has no country` before looking at anything
+else:
+
+```python
+country = organization.get_country()
+if country is None:
+    raise ValueError("Geo Organization has no country")
+```
+
+This fired whether or not a postal code was supplied — a create with no
+`pincode` at all was rejected, verified by probe. `get_country()` returns `None`
+for any organization tree not yet linked to the `cities_light` catalogue, which
+is every existing deployment and the entire test corpus, so the effect was that
+**patients could not be created at all**. It also ran before the permission
+check (`test_create_patient_unauthorization` got 400 instead of 403) and masked
+other validators (`test_invalid_date_of_birth_and_death_date` saw the country
+error's `value_error` instead of its own `validation_error`), which is why the
+22 failures presented as three different assertion patterns.
+
+The rule contradicted its own feature. `get_postal_code_rule` is written to
+accept `None` and answer with the international fallback; the documented table
+in `geographic-catalog-and-postal-codes.md` has an explicit "Otros" row; and the
+**facility** spec from the same commit already does the tolerant thing:
+
+```python
+country = organization.get_country()
+country_code = country.code2 if country else None
+self.pincode = validate_postal_code(self.pincode, country_code)
+```
+
+The patient path now matches it. A missing country selects the international
+rule instead of raising. What genuinely needs a country — a region, subregion or
+city, which are validated against that country's catalogue — still requires one,
+and says so.
+
+**Root cause 2 — `authorize_update({})` met an attribute it does not have.**
+The same commit added `self.authorize_registration_facility(request_obj)` to
+`authorize_update`, and that helper read `request_obj.registration_facility`
+directly. Seven actions on the viewset — `add_user`, `remove_user`, the tag
+actions and the identifier actions — call `authorize_update({}, instance)` with
+an empty dict meaning "no request body to authorize", so each raised
+`AttributeError` and answered **500**. Invisible until root cause 1 was fixed,
+because no patient existed to act on. Now read with `getattr(..., None)`.
+
+**Root cause 3, pre-existing and not from this fork.** A partial update that did
+not resend `pincode` erased the stored one: `perform_extra_deserialization` ran
+`if not self.pincode: obj.pincode = None` unconditionally, so a PATCH of the
+patient's name discarded their postal code. Introduced by upstream commit
+`8cf5b0e71` ("Temporary fix for pincode", 2025-07-21), which predates the
+geography work. Found by the new tests rather than by the old ones, and fixed to
+key off `model_fields_set` the way the neighbouring region/subregion/city fields
+already do. Sending `""` or `null` still clears it.
+
+**The contract, now asserted.** `care/emr/tests/test_patient_postal_code.py`,
+24 tests: `pincode` is optional on create and update (omitted, null, blank and
+whitespace all store nothing); a supplied code is validated and only when
+supplied; the country derived from the jurisdiction selects the rule (`IN` 6
+digits, `MX` 5, `US` ZIP/ZIP+4, everything else the 2–12 character fallback); a
+leading zero survives; an unrelated PATCH neither revalidates nor erases it; and
+address detail without a country is rejected.
+
+**Result:** `test_patient_api` is 29/29. The full suite is green — 2534 tests,
+0 failures, serial and parallel.
+
+**The original finding, kept for the record.**
+
 **Status:** Open. **Severity:** blocks staging. **Not caused by this branch.**
 
 **verified** `care.emr.tests.test_patient_api.TestPatientViewSet` has 22 failing
