@@ -63,7 +63,15 @@ TEMPLATES[-1]["OPTIONS"]["loaders"] = [  # type: ignore[index]
 
 # EMAIL
 # ------------------------------------------------------------------------------
-EMAIL_USE_TLS = True
+# A deployed environment that talks to a relay should do so over TLS, so True is
+# the default here where base.py leaves it False. It is a default and not a
+# constant: it was previously assigned unconditionally, which meant an operator
+# could not select implicit TLS on port 465 — Django rejects EMAIL_USE_TLS and
+# EMAIL_USE_SSL together, so forcing one made the other unreachable.
+#
+# Both are inert under a non-SMTP EMAIL_BACKEND. The console backend, which is a
+# valid configuration in every environment, never opens a socket.
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
 
 # LOGGING
 # ------------------------------------------------------------------------------

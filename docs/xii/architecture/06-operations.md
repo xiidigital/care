@@ -1989,9 +1989,45 @@ The outage behavior SHALL be tested before production.
 
 # 76. Email Operations
 
-CARE email tasks use Django's email abstraction.
+CARE email tasks use Django's email abstraction. Nothing in the application or
+the infrastructure names an email provider, and nothing requires one.
 
-Operators SHALL monitor:
+## 76.1 Two capabilities
+
+**Application email generation** — rendering, dispatch, execution and failure
+reporting — is always present. **External email delivery** is an optional
+operational capability, selected per environment.
+
+An environment without external delivery is a correctly configured environment,
+not a degraded one.
+
+## 76.2 Console mode
+
+```text
+DJANGO_EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+```
+
+is a valid runtime configuration in dev, staging and production. Under it the
+rendered message is written to stdout and kept by Cloud Logging, so the whole
+asynchronous path stays observable:
+
+```text
+API -> Cloud Tasks -> worker -> Django email backend -> Cloud Logging
+```
+
+Operators verify it by enqueuing an email-producing action and reading the
+worker's log for the rendered message and the task's `204`.
+
+Console mode does not deliver to a mailbox, and no operational record SHALL
+claim that it does. What it demonstrates is that generation, dispatch,
+execution and logging work; what it leaves untested is the relay.
+
+Deployment SHALL NOT fail because console mode is selected, and no environment
+guard SHALL reject it.
+
+## 76.3 When external delivery is configured
+
+Only then do the following apply. Operators SHALL monitor:
 
 - send failures;
 - authentication failures;
@@ -2000,9 +2036,26 @@ Operators SHALL monitor:
 - rejected recipients;
 - provider outages.
 
-Email credentials SHALL remain in Secret Manager.
+Email credentials SHALL remain in Secret Manager, injected at runtime, never
+committed. Enabling delivery is a configuration change — backend, transport
+settings, one secret — and SHALL NOT require an application or infrastructure
+redesign; see `07-configuration-reference.md` §34.
 
-Task logs SHOULD avoid full message contents.
+## 76.4 Failure classification
+
+A send that cannot succeed on any attempt — an unreachable configured relay,
+rejected authentication, a 5xx from the relay — fails once, permanently, and is
+not redelivered. A deferred or transient failure is retried. The classification
+lives at the mail boundary in `care/utils/mail.py`, so no task definition
+depends on which backend is selected.
+
+Clearing the backend selection without supplying a relay is the one
+misconfiguration this produces a specific message for: the send fails
+permanently and names `EMAIL_HOST` as the cause. Console mode never reaches it.
+
+Task logs SHOULD avoid full message contents. Console mode is the exception by
+construction — it writes the message — which is one more reason it belongs in
+environments whose logs are access-controlled.
 
 ---
 

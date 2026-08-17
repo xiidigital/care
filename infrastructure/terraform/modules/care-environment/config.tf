@@ -77,6 +77,10 @@ locals {
     # Set only when chosen. Empty leaves the application default rather than
     # asserting one here — but see the variable: the default is SMTP to
     # localhost, which no Cloud Run container answers.
+    #
+    # No provider appears in this file. The SMTP settings an operator would add
+    # to reach one arrive through var.extra_env below, and the password through
+    # optional_secrets; neither requires a change here (unresolved-items.md N1).
     var.django_email_backend != "" ? { DJANGO_EMAIL_BACKEND = var.django_email_backend } : {},
 
     var.extra_env,

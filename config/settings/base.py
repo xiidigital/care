@@ -440,10 +440,21 @@ DEFAULT_FROM_EMAIL = env(
     "EMAIL_FROM", default="Open Healthcare Network <ops@care.ohc.network>"
 )
 EMAIL_HOST = env("EMAIL_HOST", default="localhost")
-EMAIL_PORT = env("EMAIL_PORT", default=587)
+EMAIL_PORT = env.int("EMAIL_PORT", default=587)
 EMAIL_HOST_USER = env("EMAIL_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_PASSWORD", default="")
-EMAIL_USE_TLS = env("EMAIL_USE_TLS", default=False)
+# Both are read as booleans rather than as raw strings. `env(...)` returns the
+# string when the variable is present, and every non-empty string is truthy —
+# so `EMAIL_USE_TLS=false` used to enable TLS.
+#
+# Django rejects a configuration that sets both; nothing here needs to restate
+# that. Which one an operator selects is a property of the relay they chose, so
+# neither is given a value here beyond the off default that keeps a
+# non-delivering environment from asserting a transport it does not use.
+# https://docs.djangoproject.com/en/dev/ref/settings/#email-use-tls
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=False)
+# https://docs.djangoproject.com/en/dev/ref/settings/#email-use-ssl
+EMAIL_USE_SSL = env.bool("EMAIL_USE_SSL", default=False)
 # https://docs.djangoproject.com/en/dev/ref/settings/#email-subject-prefix
 EMAIL_SUBJECT_PREFIX = env("DJANGO_EMAIL_SUBJECT_PREFIX", default="[Care]")
 

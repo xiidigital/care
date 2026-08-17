@@ -470,18 +470,40 @@ variable "django_secure_ssl_redirect" {
 
 variable "django_email_backend" {
   description = <<-EOT
-    DJANGO_EMAIL_BACKEND. Empty leaves the application default, which is SMTP
-    to EMAIL_HOST — and that defaults to localhost:587.
+    DJANGO_EMAIL_BACKEND — the Django email backend, by dotted path. No provider
+    is named here or anywhere else in this repository; which relay an
+    environment uses, if any, is an operational decision made outside it.
 
-    A Cloud Run container runs no SMTP server, so leaving this empty without
-    also setting EMAIL_HOST makes every email-sending task fail with a refused
-    connection. The failure is in the handler, after Cloud Tasks has delivered
-    the request, so the queue retries it to exhaustion.
+    django.core.mail.backends.console.EmailBackend is a valid configuration in
+    every environment, dev, staging and prod alike. Under it CARE renders the
+    message, dispatches the task, executes it in the worker and writes the
+    rendered message to stdout, where Cloud Logging keeps it. Generation is
+    fully exercised; external delivery is intentionally absent
+    (unresolved-items.md N1). Nothing rejects it and nothing warns about it.
 
-    dev uses the console backend: the message is written to stdout and arrives
-    in Cloud Logging, which is the email test sink ES-07 section 99 accepts as
-    observable evidence. staging and prod need a real relay configured through
-    EMAIL_HOST and the optional EMAIL_PASSWORD secret.
+    Empty leaves the application default, which is SMTP to EMAIL_HOST — and that
+    defaults to localhost:587. A Cloud Run container runs no SMTP server, so
+    clearing this without also supplying a relay makes every send fail. That
+    failure is now permanent rather than retried (N2) and names its own cause,
+    but it is still a misconfiguration: clear this only together with the SMTP
+    settings below.
+
+    To enable external delivery later, with no change to this module:
+
+      django_email_backend = ""            restores Django's SMTP backend
+      extra_env = {                        non-secret transport settings
+        EMAIL_HOST     = "..."
+        EMAIL_PORT     = "..."
+        EMAIL_USER     = "..."
+        EMAIL_USE_TLS  = "true"            or EMAIL_USE_SSL for implicit TLS
+        EMAIL_FROM     = "..."
+      }
+      optional_secrets = {                 the container and its IAM only
+        EMAIL_PASSWORD = ["api", "worker"]
+      }
+
+    The password value is written with `gcloud secrets versions add`, never by
+    OpenTofu, so it reaches neither state nor a plan.
   EOT
   type        = string
   default     = ""

@@ -114,9 +114,13 @@ Optional secrets — `EMAIL_PASSWORD`, `SENTRY_DSN`, SMS credentials — are
 declared per environment through the `optional_secrets` variable, which takes
 the roles that may read each. Nothing grants a role a secret it does not need.
 
-dev declares none of them: it sends no real email and reports to no Sentry
-project. `EMAIL_PASSWORD` becomes required for staging and prod together with
-the SMTP settings in section 6 — see `unresolved-items.md` N1.
+dev and staging declare none of them: neither sends external email, and neither
+reports to a Sentry project. `EMAIL_PASSWORD` is **not required by any
+environment**. It becomes required only for an environment that chooses to
+enable external delivery, and it is declared then — the container and its
+per-role binding are created by adding one entry to `optional_secrets`, with
+the value written by `gcloud secrets versions add` and never by OpenTofu. See
+`unresolved-items.md` N1.
 
 ## 5. Documented but not set
 
@@ -147,7 +151,7 @@ omissions are deliberate rather than forgotten.
 | `DJANGO_ALLOWED_HOSTS` | `[..., ".run.app"]` | the generated Cloud Run hostname is not knowable before the service exists; Django reads a leading dot as a subdomain wildcard |
 | `CSRF_TRUSTED_ORIGINS` | `[..., "https://*.run.app"]` | same reason |
 | `CONN_MAX_AGE` | `60` | persistent connections; the figure that turns instance count into a Cloud SQL connection count |
-| `DJANGO_EMAIL_BACKEND` | console (dev only) | the application default is SMTP to `localhost:587`, which nothing in a Cloud Run container answers; leaving it unset made every email task fail *after* Cloud Tasks had delivered it, and the queue retried a send that could not succeed. dev writes the message to stdout, where Cloud Logging keeps it. staging and prod set nothing and need a real relay — `unresolved-items.md` N1 |
+| `DJANGO_EMAIL_BACKEND` | console (dev and staging) | the application default is SMTP to `localhost:587`, which nothing in a Cloud Run container answers; leaving it unset made every email task fail *after* Cloud Tasks had delivered it. The console backend writes the rendered message to stdout, where Cloud Logging keeps it, and is a **valid configuration in every environment** — generation is exercised end to end and only external delivery is absent. No provider is named anywhere in this infrastructure. An environment that wants delivery clears this and supplies `EMAIL_HOST`/`EMAIL_PORT`/`EMAIL_USER`/`EMAIL_USE_TLS` or `EMAIL_USE_SSL`/`EMAIL_FROM` through `extra_env` plus `EMAIL_PASSWORD` through `optional_secrets` — `unresolved-items.md` N1 |
 
 ## 7. Tables created by initialization, never by OpenTofu
 
@@ -226,5 +230,11 @@ Two findings came out of this and are recorded rather than fixed here:
 
 **2026-08-16.** L8 is closed — assets are built into the image and cold start
 fell from 38.7s to 4.3s on the API — along with L2 and N2, which came out of the
-same ES-07 failure. **N1 is still open and still blocks staging:** no
-environment other than dev, which writes to the console, can send email at all.
+same ES-07 failure.
+
+**2026-08-17.** N1 is **reclassified, not closed**. It is an operational
+capability and a deployment follow-up, not a staging or production blocker.
+Console email delivery is a valid configuration in every managed environment;
+staging now selects it explicitly, as dev does. External mailbox delivery
+remains unconfigured and unverified, and is enabled later through
+provider-neutral settings and Secret Manager without application redesign.

@@ -834,3 +834,30 @@ of the environment are no longer characteristic of it:
 
 **N1 remains open and still blocks the first staging or production deployment.**
 Neither environment can send email. Nothing above changes that.
+
+**Amended 2026-08-17 — N1 is reclassified; the decision in this ADR is
+unchanged.** It is an operational capability and deployment follow-up, not a
+staging or production blocker.
+
+This ADR's *Environments* section already says that application architecture
+SHALL remain the same across environments and that environments MAY differ in
+operational configuration. Email delivery is such a difference. CARE separates
+**application email generation** — rendering, dispatch, execution, failure
+reporting, all implemented and portable — from **external email delivery**,
+which is an environment-specific operational choice.
+
+The console email backend is therefore a valid runtime configuration in dev,
+staging and production. Under it the full asynchronous path is exercised and
+observable in Cloud Logging; only the relay hop is absent. No infrastructure
+declared by this ADR requires a mail provider, no environment guard rejects the
+console backend, and **this repository names no provider**.
+
+An operator who later wants external delivery clears `django_email_backend`,
+supplies the generic SMTP settings through `extra_env`, and declares
+`EMAIL_PASSWORD` through `optional_secrets` — a configuration change, using the
+Secret Manager mechanism this ADR already specifies, with no change to the
+infrastructure architecture. Credentials are written directly to Secret Manager
+and never reach OpenTofu state, exactly as the *Secret Manager* section requires.
+
+External mailbox delivery has not been verified in any environment, and this
+amendment does not claim it has.

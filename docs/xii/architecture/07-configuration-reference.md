@@ -2267,43 +2267,95 @@ No `USE_UPSTASH` variable is required.
 
 # 34. Email Configuration
 
+## 34.0 Two capabilities, configured separately
+
+CARE distinguishes **application email generation** from **external email
+delivery**.
+
+| | |
+| --- | --- |
+| generation | render the message, dispatch the work, execute the task, report the failure |
+| delivery | hand the bytes to a relay that reaches a mailbox |
+
+Generation is application behaviour and is always present. Delivery is an
+**optional operational capability** selected per environment.
+
+**No email provider is mandated by this repository, and none SHALL be.** The
+settings below are Django's own generic ones. Nothing here names, assumes or
+requires a particular relay, API or vendor, and no credential value belongs in
+any tracked file — see §34.11.
+
+### Console mode is a valid configuration in every environment
+
+```text
+DJANGO_EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+```
+
+SHALL be accepted in dev, staging and production alike. Under it:
+
+- email-producing workflows are operational;
+- rendered messages appear on stdout, and therefore in the platform log sink;
+- the asynchronous path is verifiable end to end —
+  `API -> Cloud Tasks -> worker -> Django email backend -> logs`;
+- external delivery is intentionally absent.
+
+Console mode SHALL NOT be labelled invalid for staging or production, SHALL NOT
+be rejected by an environment guard, and SHALL NOT fail a deployment. An
+informational, non-failing note is permitted where it is useful and not noisy.
+
+Selecting a real relay later requires no application redesign: set the backend
+and the transport settings below, and supply the password through the platform
+secret store. See `inventory/unresolved-items.md` N1.
+
 ## 34.1 `EMAIL_BACKEND`
 
-Default production value MAY remain:
+Read from `DJANGO_EMAIL_BACKEND`. Any Django email backend, by dotted path.
+
+The application default is:
 
 ```text
 django.core.mail.backends.smtp.EmailBackend
 ```
 
+which reads §34.2–§34.7. A managed environment that has not been given a relay
+SHALL select the console backend rather than leave the SMTP default in place
+against a host it cannot reach.
+
 ## 34.2 `EMAIL_HOST`
 
-Required when SMTP is enabled.
+Required when the SMTP backend is selected. Defaults to `localhost`, which no
+container in a managed environment answers.
 
 ## 34.3 `EMAIL_PORT`
 
-Required.
+Integer. Defaults to `587`.
 
 ## 34.4 `EMAIL_HOST_USER`
 
-Secret or protected value.
+Read from `EMAIL_USER`. Not a secret by itself; protected where the relay
+treats it as one.
 
 ## 34.5 `EMAIL_HOST_PASSWORD`
 
-Required secret when provider authentication requires it.
+Read from `EMAIL_PASSWORD`. A secret whenever the relay authenticates. It SHALL
+be injected from the platform secret store and SHALL NOT appear in any tracked
+file, example or plan.
 
 ## 34.6 `EMAIL_USE_TLS`
 
-Recommended according to provider requirements.
+Boolean. STARTTLS on a submission port, typically 587.
 
 ## 34.7 `EMAIL_USE_SSL`
 
-Mutually constrained with TLS according to Django behavior.
+Boolean. Implicit TLS, typically 465. Django rejects a configuration that sets
+both this and §34.6; the application states no preference between them, because
+which one applies is a property of the relay an operator selects.
 
 ## 34.8 `DEFAULT_FROM_EMAIL`
 
-Required.
+Read from `EMAIL_FROM`.
 
-Example:
+Example, and only an example — the address is deployment data:
 
 ```text
 CARE <no-reply@example.org>
@@ -2311,13 +2363,29 @@ CARE <no-reply@example.org>
 
 ## 34.9 `SERVER_EMAIL`
 
-Recommended for framework-generated error notifications where used.
+Recommended for framework-generated error notifications where used. **Not read
+by the implementation**; `config/settings/base.py` leaves it commented out, and
+the deployed logging configuration declares the `django` logger explicitly so
+that `mail_admins` is not restored.
 
 ## 34.10 `CARE_EMAIL_TASK_QUEUE`
 
-Optional.
+Optional. **Not read by the implementation.**
 
 May select a dedicated queue name when task isolation is implemented.
+
+## 34.11 What the repository SHALL NOT contain
+
+This is a public repository. It SHALL contain only generic variable names,
+generic secret-store hooks, provider-neutral prose and non-secret placeholders.
+
+It SHALL NOT contain SMTP usernames or passwords, API keys, relay hostnames
+belonging to a private deployment, private sender addresses, production
+credentials, committed secret values, or a provider-specific proposal presented
+as required architecture.
+
+Real email configuration belongs to deployment operations outside this
+repository, or to secure secret injection at runtime.
 
 ---
 

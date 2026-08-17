@@ -1,14 +1,14 @@
 ---
 title: Unresolved Items
 document: inventory/unresolved-items
-version: 0.4.1
+version: 0.4.2
 status: Draft
 phase: 3
 source_repository: https://github.com/ohcnetwork/care
 source_branch: gcp
 source_commit: 6a2976dc2512c2c532fcc70628c5690fbbbe3f3d
 baseline_commit: 2fe40cd16
-reviewed: 2026-08-11
+reviewed: 2026-08-17
 ---
 
 # Unresolved Items
@@ -417,9 +417,25 @@ health endpoint reports unhealthy in the target runtime.
 
 **verified** `Pipfile` installs `django-anymail` with the `amazon-ses` extra.
 
-**Decision needed.** GCP has no SES equivalent. Options are keeping SES
-cross-cloud, or switching provider — which changes `EMAIL_BACKEND` and the
-Anymail extra.
+**verified** No settings module activates it. `EMAIL_BACKEND` is read from
+`DJANGO_EMAIL_BACKEND` and defaults to Django's own SMTP backend; no Anymail
+backend, and no provider of any kind, is named in `config/settings/` or in
+`infrastructure/`. The dependency is inherited from upstream and is inert.
+
+**No decision is needed, and this is closed as a blocking question
+(2026-08-17).** It presupposed that a provider had to be selected before CARE
+could run on GCP. It does not. Email delivery is an optional operational
+capability: the console backend is a valid runtime configuration in dev,
+staging and prod, and an operator who wants external delivery configures a
+relay of their own choosing through the generic settings in
+`07-configuration-reference.md` §34 plus one Secret Manager entry, without an
+application or infrastructure change. See N1.
+
+**What remains, and it is not architectural.** Whether the `django-anymail`
+dependency is worth carrying while nothing selects it is a dependency-hygiene
+question for an upstream-sync phase. Removing it would diverge from upstream;
+keeping it costs an unused wheel. Either answer is compatible with everything
+above, and neither belongs to a deployment phase.
 
 ### C7. Celery's hardcoded `Asia/Kolkata` timezone
 
@@ -1979,10 +1995,86 @@ acceptance criteria.
 
 ## Part N — GCP infrastructure follow-up (ES-07)
 
-### N1. staging and prod cannot send email
+### N1. External email delivery not configured
 
-**Status:** OPEN. Still blocks the first staging or production deployment.
+**Status:** OPEN as an **operational capability / deployment follow-up**.
+**Reclassified 2026-08-17** on `feature/staging-readiness`; it was previously
+recorded as a staging and production blocker.
 **Origin:** ES-07 §58/§98/§99 verification.
+
+CARE currently supports console email delivery in managed environments. This is
+a valid deployment configuration and does not block dev, staging or production
+infrastructure acceptance.
+
+A real external email provider may be configured later through provider-neutral
+application settings and Secret Manager without application redesign. Until
+configured, email-producing workflows render successfully but do not deliver
+messages externally.
+
+#### Why the reclassification is sound, not a downgrade of the finding
+
+The original entry is factually correct and is kept in full below. What changed
+is the classification, and it changed because the two things it conflated are
+separable:
+
+| | |
+| --- | --- |
+| **application email generation** | rendering a message, dispatching the work, executing the task, reporting the failure. This is CARE's responsibility and it is implemented, portable and tested. |
+| **external email delivery** | handing bytes to a relay that reaches a mailbox. This is an environment-specific operational choice, made outside this repository. |
+
+The blocker framing required the second before the first could be accepted. It
+should not: with `DJANGO_EMAIL_BACKEND` set to Django's console backend, the
+whole generation path is exercised and observable —
+`API -> Cloud Tasks -> worker -> Django email backend -> Cloud Logging` — and
+only the last hop, into someone's mailbox, is intentionally absent.
+
+**Console mode is a valid runtime configuration in dev, staging and prod.** No
+environment guard rejects it, no deployment fails because of it, and nothing in
+this repository requires a provider to be selected. That is deliberate: CARE is
+a public repository and a Digital Public Good, and encoding one operator's relay
+choice as an architectural requirement would be wrong for every other operator.
+
+#### What this does *not* claim
+
+**External mailbox delivery has not been verified in any environment.** No
+message from a deployed CARE environment has been observed arriving at a real
+mailbox, because no relay has been configured for one. Console mode proves
+generation, dispatch, execution and logging; it proves nothing about delivery,
+and no acceptance record should say otherwise.
+
+#### What a future operator does, when they want delivery
+
+Entirely through mechanisms that already exist. No new application code, no new
+module variable, no architecture change:
+
+1. set `django_email_backend = ""` for that environment, which restores
+   Django's SMTP backend (the application default);
+2. supply the non-secret SMTP settings through the module's `extra_env` —
+   `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_USER`, `EMAIL_USE_TLS` or
+   `EMAIL_USE_SSL`, `EMAIL_FROM`;
+3. declare `EMAIL_PASSWORD` in `optional_secrets` for the roles that send —
+   `["api", "worker"]` — which creates the Secret Manager container and the
+   per-role accessor binding, and write the value with
+   `gcloud secrets versions add`, never through OpenTofu.
+
+The values themselves are deployment operations data. They are not in this
+repository, they are not in a `.tfvars.example`, and they must not be.
+
+#### Related, and not superseded by this
+
+N2 remains the correct behaviour for the case where a relay *is* configured and
+fails: one loud permanent failure rather than ten retries. Its message —
+`No mail relay is configured: EMAIL_HOST='localhost' cannot be reached by this
+process` — is what an operator sees if they clear `django_email_backend`
+without also supplying a host. That is the misconfiguration guard; console mode
+never reaches it.
+
+---
+
+**The original finding, kept for the record.**
+
+**Status at the time:** OPEN, blocking the first staging or production
+deployment.
 
 > **Not closed by the pre-staging hardening branch, and not closeable by it.**
 > N2 changed what happens *when* a send fails — it now fails once, loudly, with
@@ -2022,6 +2114,12 @@ Before either is deployed:
 
 Not fixed here because it needs credentials for a relay that does not yet exist,
 and ES-07 §83 applies only dev.
+
+*Superseded by the reclassification above. The remaining accurate part of it is
+the misconfiguration case: an environment that clears `django_email_backend`
+without supplying a relay does inherit `localhost:587` and does fail every send.
+Staging now selects the console backend explicitly rather than leaving that
+default in place.*
 
 ### N2. Email-sending tasks retry a permanent failure
 
