@@ -12,8 +12,9 @@ from care.emr.resources.base import EMRResource
 from care.emr.resources.patient.spec import (
     BloodGroupChoices,
     GenderChoices,
+    _country_code,
     _get_registration_facility,
-    _validate_location,
+    _validate_location_for_country,
 )
 
 
@@ -79,12 +80,15 @@ class PatientOTPWriteSpec(ExtensionValidator, PatientOTPBaseSpec):
         self.geo_organization = facility.geo_organization.external_id
         organization = Organization.objects.get(external_id=self.geo_organization)
         country = organization.get_country()
-        if country is None:
-            raise ValueError("Registration facility geographic organization has no country")
-        _validate_location(country, self.region_id, self.subregion_id, self.city_id)
-        self.pincode = validate_postal_code(
-            self.pincode, country.code2
+        # Same contract as the authenticated create path: the country selects
+        # which postal-code rule applies, and its absence selects the
+        # international fallback rather than refusing the registration. The
+        # public flow still requires `pincode` itself -- that is a separate
+        # decision, and it is unchanged.
+        _validate_location_for_country(
+            country, self.region_id, self.subregion_id, self.city_id
         )
+        self.pincode = validate_postal_code(self.pincode, _country_code(country))
         return self
 
     def perform_extra_deserialization(self, is_update, obj):

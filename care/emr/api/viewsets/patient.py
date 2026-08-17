@@ -70,9 +70,16 @@ class PatientViewSet(EMRModelViewSet):
         self.authorize_registration_facility(request_obj)
 
     def authorize_registration_facility(self, request_obj):
-        if request_obj.registration_facility:
+        # `request_obj` is a validated spec on create and update, but seven of
+        # this viewset's actions -- add_user, remove_user, the tag actions and
+        # the identifier actions -- call `authorize_update({}, instance)` with
+        # an empty dict, meaning "there is no request body to authorize, only
+        # check write access to the object". Reading the attribute directly
+        # turned every one of those into a 500.
+        registration_facility = getattr(request_obj, "registration_facility", None)
+        if registration_facility:
             facility = get_object_or_404(
-                Facility, external_id=request_obj.registration_facility
+                Facility, external_id=registration_facility
             )
             if self.request.user.is_superuser:
                 return

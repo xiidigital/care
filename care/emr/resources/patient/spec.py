@@ -39,9 +39,41 @@ def _get_registration_facility(facility_id):
         raise ValueError("Registration facility does not exist")
     if facility.geo_organization is None:
         raise ValueError("Registration facility has no geographic organization")
-    if facility.geo_organization.get_country() is None:
-        raise ValueError("Registration facility geographic organization has no country")
+    # A country is deliberately not required here. What this function is for is
+    # deriving the patient's jurisdiction from the facility, and that works
+    # whether or not the jurisdiction tree has been linked to a country yet.
+    # The country is needed only to *validate* a postal code or a
+    # region/subregion/city, and that is decided where those are validated.
     return facility
+
+
+def _country_code(country):
+    """The ISO alpha-2 code, or ``None`` when the jurisdiction has no country.
+
+    ``get_postal_code_rule`` accepts ``None`` and answers with the documented
+    international fallback ("Otros" in
+    ``docs/xii/access-control/geographic-catalog-and-postal-codes.md``), so an
+    unknown country is a supported state rather than an error.
+    """
+    return country.code2 if country else None
+
+
+def _validate_location_for_country(country, region_id, subregion_id, city_id):
+    """Validate optional address detail, which is only checkable against a country.
+
+    Unlike a postal code, a region, subregion or city has nothing to be
+    validated against when the jurisdiction resolves to no country -- the
+    catalog is keyed by country. Supplying one anyway is a real error; supplying
+    none is not.
+    """
+    if country is not None:
+        return _validate_location(country, region_id, subregion_id, city_id)
+    if region_id or subregion_id or city_id:
+        raise ValueError(
+            "A region, subregion or city can only be recorded when the "
+            "geographic organization resolves to a country"
+        )
+    return None, None, None
 
 
 def _validate_location(country, region_id, subregion_id, city_id):
@@ -208,12 +240,10 @@ class PatientCreateSpec(ExtensionValidator, PatientBaseSpec):
     def validate_postal_code_for_geography(self):
         organization = Organization.objects.get(external_id=self.geo_organization)
         country = organization.get_country()
-        if country is None:
-            raise ValueError("Geo Organization has no country")
-        _validate_location(country, self.region_id, self.subregion_id, self.city_id)
-        self.pincode = validate_postal_code(
-            self.pincode, country.code2
+        _validate_location_for_country(
+            country, self.region_id, self.subregion_id, self.city_id
         )
+        self.pincode = validate_postal_code(self.pincode, _country_code(country))
         return self
 
     def perform_extra_deserialization(self, is_update, obj):
@@ -302,7 +332,15 @@ class PatientUpdateSpec(ExtensionValidator, PatientBaseSpec):
                 obj.year_of_birth = timezone.now().year - self.age
             elif self.date_of_birth:
                 obj.year_of_birth = self.date_of_birth.year
-        if not self.pincode:
+        # Only when the caller actually sent the field. Unconditionally, this
+        # cleared a stored postal code on every partial update that did not
+        # resend it -- a PATCH of the patient's name silently discarded their
+        # address detail. Sending "" or null still clears it, which is what the
+        # line was for; omitting it now leaves it alone. This mirrors how the
+        # region, subregion and city fields above are already handled, and how
+        # `validate_postal_code_for_geography` below already decides whether
+        # there is a postal code to validate at all.
+        if "pincode" in self.model_fields_set and not self.pincode:
             obj.pincode = None
 
     @model_validator(mode="after")
@@ -318,10 +356,8 @@ class PatientUpdateSpec(ExtensionValidator, PatientBaseSpec):
             else info.context["object"].geo_organization
         )
         country = organization.get_country() if organization else None
-        if country is None:
-            raise ValueError("Geo Organization has no country")
         obj = info.context["object"]
-        _validate_location(
+        _validate_location_for_country(
             country,
             self.region_id if "region_id" in self.model_fields_set else obj.region_id,
             self.subregion_id
@@ -330,7 +366,7 @@ class PatientUpdateSpec(ExtensionValidator, PatientBaseSpec):
             self.city_id if "city_id" in self.model_fields_set else obj.city_id,
         )
         if "pincode" in self.model_fields_set:
-            self.pincode = validate_postal_code(self.pincode, country.code2)
+            self.pincode = validate_postal_code(self.pincode, _country_code(country))
         return self
 
     @field_validator("identifiers")
