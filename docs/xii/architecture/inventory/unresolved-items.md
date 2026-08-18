@@ -2121,6 +2121,78 @@ without supplying a relay does inherit `localhost:587` and does fail every send.
 Staging now selects the console backend explicitly rather than leaving that
 default in place.*
 
+### N3. Staging shares dev's GCP project
+
+**Status:** Open, accepted for now. **Recorded 2026-08-17** when staging was
+first applied. **Category:** environment separation.
+
+**verified** Staging was applied into `project-990c4414-a33c-47f2-9f4`, the
+same project that holds dev, because it is the only project with billing
+enabled and no staging project exists. Region `us-central1`, state prefix
+`environments/staging` in the same state bucket.
+
+**What is still isolated, and it is what ADR-0007 actually requires.** The ADR
+says environment separation SHALL include stateful resources and secrets, and it
+does. Every name derives from `var.environment`, so staging has its own Cloud
+SQL instance (`care-staging-db`), its own buckets, its own four secret
+containers with their own generated values, its own service accounts, its own
+queue, its own scheduler jobs and its own state prefix. Nothing is shared with
+dev at the resource level, and `provision-secrets.sh --env staging` generated
+values that exist nowhere else.
+
+**What is not isolated.** Project quotas, the project-level IAM surface, the
+audit trail, and the enabled-API set. A quota exhausted by dev is exhausted for
+staging.
+
+**One concrete consequence.** Both root modules declare the same thirteen
+`google_project_service` resources, so dev's state and staging's state each
+believe they manage them. In practice this is benign — enabling an already
+enabled API is a no-op, and `disable_on_destroy = false` means neither destroy
+turns one off — but it is two states holding one resource, and it should be
+understood before a third environment lands in the same project.
+
+**Recommended.** A dedicated project for staging when one is available, with
+its own bootstrap and state bucket. `infrastructure/README.md` §7.9 states this
+as the intended shape and states what a shared project relies on instead. The
+move is a rebuild rather than a migration: no state surgery, apply the same
+roots against the new project.
+
+**Not a blocker for ES-08.** Every acceptance item passed in the shared
+project, and nothing in the composition depends on which project it is.
+
+### N4. A new environment's first apply cannot complete
+
+**Status:** Documented 2026-08-17, not fixed. **Severity:** procedural.
+**Category:** deployment procedure.
+
+**verified** The first `tofu apply` of a greenfield environment fails partway:
+
+```text
+Error waiting to create Service: ... secret_key_ref.name:
+Secret projects/272331402273/secrets/care-staging-jwks-base64/versions/latest
+was not found
+```
+
+Cloud Run mounts secret *versions*, OpenTofu creates only secret *containers* —
+deliberately, because a version resource takes the payload as an argument and
+would put every credential in state — and `provision-secrets.sh` writes the
+versions. So the real sequence is apply, provision, apply again, and the first
+apply necessarily fails.
+
+**Not a defect in the configuration.** The alternative is worse: creating the
+versions in OpenTofu is exactly what ADR-0007's *State* section forbids. The
+partial apply is idempotent and leaves nothing to undo.
+
+**Fixed where it was actually wrong: the documentation.** `README.md` §7.4 read
+as though one apply would succeed and secrets came afterwards as a finishing
+step. It now states the three-step order and quotes the error, so an operator
+meeting it knows it is expected rather than a broken configuration.
+
+**Left alone otherwise.** Making the apply succeed first time would need either
+secret values in state, or `ignore_changes` gymnastics on the service template,
+or a documented `-target` sequence. All three are worse than one honest
+paragraph.
+
 ### N2. Email-sending tasks retry a permanent failure
 
 **Status:** Resolved 2026-08-16 by the pre-staging hardening branch.

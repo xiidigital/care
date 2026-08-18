@@ -208,6 +208,22 @@ Read it. Then:
 tofu apply
 ```
 
+**The first apply of a new environment stops part-way, and that is expected.**
+It creates the Cloud SQL instance, the buckets, the queue, the service accounts
+and the four secret *containers*, and then fails creating the Cloud Run
+services:
+
+```text
+Error waiting to create Service: ... secret_key_ref.name:
+Secret projects/<n>/secrets/care-<env>-jwks-base64/versions/latest was not found
+```
+
+A container with no version cannot be mounted, and OpenTofu never creates a
+version, because that would put the value in state. So the sequence is
+apply → provision secrets → apply again, and the second apply completes.
+Nothing is wrong at this point and nothing needs to be undone; go to 7.5 and
+then run `tofu apply` once more.
+
 ### 7.5 Provision secrets
 
 The apply created the secret containers and their IAM. It created no values:
@@ -220,6 +236,12 @@ infrastructure/scripts/provision-secrets.sh --env dev --project <project> --imag
 This generates `DJANGO_SECRET_KEY`, `JWKS_BASE64`, the database password and
 `DATABASE_URL`, creates the Cloud SQL user, and pipes every value directly into
 Secret Manager. Nothing is printed or written to disk.
+
+Then finish the apply:
+
+```bash
+tofu apply
+```
 
 ### 7.6 Initialize the database
 

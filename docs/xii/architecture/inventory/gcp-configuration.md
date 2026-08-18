@@ -238,3 +238,57 @@ Console email delivery is a valid configuration in every managed environment;
 staging now selects it explicitly, as dev does. External mailbox delivery
 remains unconfigured and unverified, and is enabled later through
 provider-neutral settings and Secret Manager without application redesign.
+
+## 11. Staging acceptance evidence
+
+Applied 2026-08-17/18 on branch `feature/staging-readiness`. Project
+`project-990c4414-a33c-47f2-9f4`, region `us-central1`, environment `staging`,
+state prefix `environments/staging`, image
+`care-staging/care@sha256:3284c115…ba42`, built from a clean `git archive HEAD`
+export at `fd243e17faed`.
+
+**Staging shares dev's project.** Recorded as N3 below; it is a deviation from
+this document's preferred shape, not from the isolation ADR-0007 requires.
+
+| # | Acceptance item | Result | Evidence |
+| --- | --- | --- | --- |
+| 1 | init Job succeeds | pass | execution `care-staging-init-h2dsn`, "successfully completed"; `migrate`, `createcachetable`, `compilemessages`, `sync_permissions_roles`, `sync_valueset` |
+| 2 | API starts and responds | pass | `/ping/` `200`, `/health/` `200`, `/app_version/` reports the deployed digest; `/api/v1/facility/` `403` from DRF, so Django and Cloud SQL are both live |
+| 3 | worker remains private | pass | anonymous `GET /ping/` and `POST /internal/tasks/execute/` on the worker → `403` from Cloud Run IAM, before Django |
+| 4 | Cloud Tasks OIDC invocation | pass | `POST /internal/tasks/execute/` → `204`, user agent `Google-Cloud-Tasks`, queue `care-staging-tasks` drained to empty |
+| 5 | task route absent on the API | pass | `GET` and `POST` of that path on the API → `404`; the route is not registered under `CARE_PROCESS_ROLE=api` |
+| 6 | public API absent on the worker | pass | authenticated `GET /api/v1/facility/` on the worker → `404`, while its own `/ping/` → `200` and the task route → `400` |
+| 7 | GCS multipart upload / download | pass | 12 MiB written through the `patient` alias — above the GCS chunk size, so a resumable upload — `exists` true, size exact, byte-for-byte round trip, then deleted |
+| 8 | PostgreSQL default cache | pass | set/get/delete round trip, plus the row observed in `care_cache` by direct SQL |
+| 9 | PostgreSQL best-effort rate limiting | pass | five `incr` on the `ratelimit` alias → `5`, row present in `care_ratelimit_cache`; `RATELIMIT_USE_CACHE` is `ratelimit`, so the default cache is not the limiter's store |
+| 10 | Recent Views persist across instances | pass | one entry written by a **Cloud Run Job**, then served identically by **three distinct API instances** (`…562c52`, `…04c1f1`, `…bfec7e`), 360 reads, all `200` |
+| 11 | PostgreSQL advisory locking | pass | second thread on an independent connection refused with `ObjectLocked`; reacquired after the holder's transaction committed, so the lock is transaction-scoped |
+| 12 | Cloud Scheduler triggers an operation | pass | manual trigger of `care-staging-cleanup-expired-token-slots` → Job `care-staging-cleanup-token-slots-mzt9r`, `Deleted 0 expired token slots`, `exit(0)` |
+| 13 | console email end to end | pass | API → Cloud Tasks → worker → console backend → Cloud Logging. `Executing task send_totp_enabled_email`, then the rendered message: `Subject: Two-Factor Authentication Enabled`, `To:`, `From:`, full HTML body. Worker answered `204` |
+| 14 | Redis-free | pass | no Memorystore instance or cluster; no `REDIS*` variable in either service's environment; no Redis cache alias at runtime; the worker logs `Redis is not required by the selected configuration (CARE_CACHE_BACKEND=postgres, CARE_TASK_BACKEND=cloud_tasks); not waiting for it.` |
+| 15 | post-apply plan is clean | pass | `tofu plan -detailed-exitcode` → `0`, "No changes", both immediately after apply and again after the verification artefacts were removed |
+
+**The runtime composition, read from the deployed environment**, not from the
+configuration that produced it: `CARE_STORAGE_BACKEND=gcs`,
+`CARE_TASK_BACKEND=cloud_tasks`, `CARE_CACHE_BACKEND=postgres`,
+`CARE_RATE_LIMIT_BACKEND=postgres`, `DJANGO_EMAIL_BACKEND=console`, both cache
+aliases resolving to `DatabaseCache`, both storage aliases to
+`GoogleCloudStorage`.
+
+**What item 13 does not prove.** No message left the environment. Console mode
+demonstrates generation, dispatch, execution and logging; external mailbox
+delivery is unconfigured, unverified and out of scope (N1).
+
+**Verification artefacts, all removed.** A temporary Cloud Run Job
+(`care-staging-acceptance`) ran the in-runtime probes for items 7–11, because
+the declared Jobs run fixed commands and staging refuses the fixture loader. A
+synthetic superuser drove items 4, 10 and 13 through the real API. Both were
+deleted afterwards — staging holds no user and no acceptance data — and neither
+was managed by OpenTofu, which is why item 15 is clean.
+
+**One deliberate identity correction during the run.** The probes first ran as
+the `init` service account and failed item 7 with
+`storage.objects.get denied`. That is correct behaviour, not a defect:
+`iam.tf` grants `roles/storage.objectUser` to the `api` and `worker` identities
+only, and excludes `init` explicitly because initialization opens no object.
+Re-run under the worker identity, item 7 passed.
