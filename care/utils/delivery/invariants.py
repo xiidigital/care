@@ -782,6 +782,80 @@ def check_invoked_scripts_are_executable() -> list[Finding]:
     return findings
 
 
+#: Where the names live. Parsed rather than imported: this module runs in a job
+#: that has not installed Django, and duplicating the list here is how the two
+#: drift apart (ES-08 section 81).
+TASK_SETTINGS_SOURCE = REPO_ROOT / "config" / "tasks.py"
+
+#: Names ``config/settings/base.py`` derives from another when it is absent, so
+#: a caller that sets the source has satisfied them.
+CLOUD_TASKS_DERIVED_FROM = {
+    "GCP_TASKS_PROJECT_ID": "GCP_PROJECT_ID",
+    "GCP_TASKS_OIDC_AUDIENCE": "GCP_WORKER_URL",
+}
+
+
+def _cloud_tasks_required_settings() -> list[str]:
+    """The names ``CARE_TASK_BACKEND=cloud_tasks`` makes mandatory."""
+    if not TASK_SETTINGS_SOURCE.is_file():
+        return []
+    text = TASK_SETTINGS_SOURCE.read_text(encoding="utf-8")
+    match = re.search(r"CLOUD_TASKS_REQUIRED_SETTINGS\s*=\s*\((.*?)\)", text, re.DOTALL)
+    if not match:
+        return []
+    return re.findall(r'"([A-Z0-9_]+)"', match.group(1))
+
+
+def check_cloud_tasks_selection_is_complete() -> list[Finding]:
+    """
+    Anything that selects the Cloud Tasks backend supplies what it requires
+    (ES-08 sections 10, 99).
+
+    ``config.tasks`` validates the whole set at settings import, so a caller
+    that names the backend and half the variables does not get a degraded
+    run -- it gets ImproperlyConfigured before the test runner or the
+    entrypoint exists. Two separate places got this wrong, which makes it an
+    invariant rather than a fix.
+    """
+    required = _cloud_tasks_required_settings()
+    if not required:
+        return []
+
+    sources = [*_workflow_paths()]
+    scripts = REPO_ROOT / "infrastructure" / "scripts"
+    if scripts.is_dir():
+        sources.extend(sorted(scripts.rglob("*.sh")))
+
+    findings = []
+    for path in sources:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "CARE_TASK_BACKEND=cloud_tasks" not in text:
+            continue
+        missing = [
+            name
+            for name in required
+            if not re.search(rf"{name}=", text)
+            and not (
+                CLOUD_TASKS_DERIVED_FROM.get(name)
+                and re.search(rf"{CLOUD_TASKS_DERIVED_FROM[name]}=", text)
+            )
+        ]
+        if missing:
+            findings.append(
+                Finding(
+                    where=str(path.relative_to(REPO_ROOT)).replace("\\", "/"),
+                    rule="cloud tasks selection is complete",
+                    detail=(
+                        "selects CARE_TASK_BACKEND=cloud_tasks without "
+                        + ", ".join(missing)
+                    ),
+                )
+            )
+    return findings
+
+
 CHECKS = (
     check_workflows_exist,
     check_permissions_declared,
@@ -800,6 +874,7 @@ CHECKS = (
     check_root_dockerignore_categories,
     check_upstream_base_recorded,
     check_invoked_scripts_are_executable,
+    check_cloud_tasks_selection_is_complete,
 )
 
 

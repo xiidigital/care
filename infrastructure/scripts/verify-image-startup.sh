@@ -124,8 +124,10 @@ COMMON_ENV=(
   -e "CARE_RATE_LIMIT_BACKEND=postgres"
   -e "CARE_TASK_BACKEND=cloud_tasks"
   -e "GCP_PROJECT_ID=startup-verification"
+  -e "GCP_TASKS_LOCATION=startup-verification"
   -e "GCP_TASKS_QUEUE=startup-verification"
   -e "GCP_WORKER_URL=http://startup-verification.invalid"
+  -e "GCP_TASKS_SERVICE_ACCOUNT=startup-verification@invalid"
   -e "GUNICORN_WORKERS=1"
 )
 

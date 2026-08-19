@@ -18,13 +18,25 @@ sys.modules["care.emr.utils.valueset_coding_type"].validate_valueset = lambda f,
 
 
 class _NoOpLock:
-    """Bypass PatientCreateLock inside an outer transaction."""
+    """
+    Bypass PatientCreateLock inside an outer transaction.
+
+    Both protocols, because the call sites use both: PatientCreateLock is a
+    context manager since ADR-0005, and older paths still call
+    acquire/release.
+    """
 
     def acquire(self):
         pass
 
     def release(self):
         pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
 
 
 @contextmanager

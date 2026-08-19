@@ -129,7 +129,7 @@ class CareFixtureBase:
             "description": self.fake.paragraph(),
             "facility_type": choice(list(REVERSE_FACILITY_TYPES.values())),
             "address": self.fake.address(),
-            "pincode": self.fake.random_int(min=100000, max=999999),
+            "pincode": str(self.fake.random_int(min=100000, max=999999)),
             "phone_number": generate_phone_number(),
             "latitude": float(self.fake.latitude()),
             "longitude": float(self.fake.longitude()),
@@ -235,7 +235,7 @@ class CareFixtureBase:
             "phone_number": generate_phone_number(),
             "geo_organization": geo_organization,
             "address": self.fake.address(),
-            "pincode": self.fake.random_int(min=100000, max=999999),
+            "pincode": str(self.fake.random_int(min=100000, max=999999)),
             "date_of_birth": self.fake.date_of_birth(
                 minimum_age=18, maximum_age=80
             ).isoformat(),
