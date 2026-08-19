@@ -269,6 +269,20 @@ THIRD_PARTY_APPS = [
 CITIES_LIGHT_INCLUDE_COUNTRIES = env.list(
     "CITIES_LIGHT_INCLUDE_COUNTRIES", default=["MX"]
 )
+
+# Keep the model in step with the schema the package's own migrations created.
+#
+# django-cities-light declares `search_names` with `db_index=INDEX_SEARCH_NAMES`,
+# and that setting auto-detects to False on PostgreSQL — while the package ships
+# migration 0013 with `db_index=True`, which is what actually built
+# `cities_light_city_search_names_fb77fed2` in every database that ran it. The
+# result on a PostgreSQL project that leaves this unset is a permanent pending
+# migration inside site-packages, which no repository can author.
+#
+# True is the accurate description of the deployed schema, and it is also the
+# behaviour CARE wants: the search-name lookup is indexed.
+CITIES_LIGHT_INDEX_SEARCH_NAMES = True
+
 LOCAL_APPS = [
     "care.security",
     "care.facility",
