@@ -1,0 +1,184 @@
+# Apply infrastructure changes to one environment.
+#
+# Separate from application promotion, and separately gated (ADR-0008
+# section 18, ES-08 section 65). A release that can deploy a Cloud Run revision
+# must not thereby be able to replace a Cloud SQL instance, so this workflow uses
+# a different identity, a different GitHub Environment and a different approval.
+#
+# `workflow_dispatch` only. No push, no pull request, no chaining from a build.
+#
+# It never destroys. `tofu destroy` is not a rollback mechanism (ADR-0008
+# section 43) and does not appear in this file. Deleting infrastructure remains
+# an operator action against a checkout, where the deletion protections in
+# ADR-0007 can be turned off deliberately and reviewably.
+#
+# A plan that would destroy or replace a resource stops here unless the operator
+# said so in the request. That is the difference between changing infrastructure
+# and losing data.
+
+name: Infrastructure apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment root to apply"
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      confirm_environment:
+        description: "Type the environment name again to confirm"
+        required: true
+        type: string
+      allow_destructive:
+        description: "Permit a plan that destroys or replaces resources"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One apply per environment, never cancelled: an interrupted apply leaves state
+# that has to be reconciled by hand.
+concurrency:
+  group: care-infra-apply-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  TOFU_VERSION: "1.12.5"
+
+jobs:
+  apply:
+    name: Apply ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    # The protected gate. Approval happens after the operator can see which
+    # environment and which change is requested, and the GCP trust binding for
+    # the infrastructure identity accepts this environment claim
+    # (ES-08 sections 65, 158).
+    environment: infrastructure-apply
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check the confirmation
+        run: |
+          if [ "${{ inputs.confirm_environment }}" != "${{ inputs.environment }}" ]; then
+            echo "::error::Confirmation '${{ inputs.confirm_environment }}' does not match '${{ inputs.environment }}'."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+
+      - name: Require infrastructure configuration
+        run: |
+          missing=""
+          for pair in \
+            "GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}" \
+            "GCP_REGION=${{ vars.GCP_REGION }}" \
+            "TF_STATE_BUCKET=${{ vars.TF_STATE_BUCKET }}" \
+            "GCP_WORKLOAD_IDENTITY_PROVIDER=${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}" \
+            "GCP_INFRA_SERVICE_ACCOUNT=${{ vars.GCP_INFRA_SERVICE_ACCOUNT }}"; do
+            name="${pair%%=*}"
+            value="${pair#*=}"
+            if [ -z "$value" ]; then
+              missing="${missing} ${name}"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::The 'infrastructure-apply' environment is missing:${missing}."
+            exit 1
+          fi
+
+      # google-github-actions/auth v3.0.0
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@140bb5113ffb6b65a7e9b937a81fa96cf5064462
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_INFRA_SERVICE_ACCOUNT }}
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@592200bd4b9bbf4772ace78f887668cd1c75d281
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      # Plan and apply in one job, against one saved plan. Regenerating the plan
+      # after approval would apply something nobody reviewed; carrying a plan
+      # file between jobs would mean publishing it (ES-08 section 64). So it is
+      # created, inspected and consumed here, and never leaves the runner.
+      - name: Plan
+        id: plan
+        working-directory: infrastructure/terraform/environments/${{ inputs.environment }}
+        run: |
+          set -o pipefail
+          tofu init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" >/dev/null
+
+          set +e
+          tofu plan -input=false -no-color -out=tfplan \
+            -var "project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var "region=${{ vars.GCP_REGION }}" \
+            -var "image=${{ vars.INITIAL_IMAGE || 'placeholder' }}" \
+            -detailed-exitcode > plan.txt 2>&1
+          code=$?
+          set -e
+
+          echo "exitcode=${code}" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "1" ]; then
+            echo "::error::plan failed"
+            tail -40 plan.txt
+            exit 1
+          fi
+
+          destructive="$(grep -cE '^  # .* will be destroyed|^  # .* must be replaced' plan.txt || true)"
+          echo "destructive=${destructive:-0}" >> "$GITHUB_OUTPUT"
+          grep -E '^Plan: ' plan.txt || echo "Plan: no changes"
+
+      - name: Stop on a destructive plan
+        if: steps.plan.outputs.destructive != '0' && !inputs.allow_destructive
+        working-directory: infrastructure/terraform/environments/${{ inputs.environment }}
+        run: |
+          echo "::error::This plan destroys or replaces ${{ steps.plan.outputs.destructive }} resource(s)."
+          grep -E '^  # .* will be destroyed|^  # .* must be replaced' plan.txt || true
+          echo "::error::Re-run with allow_destructive if that is intended, after reading the plan"
+          echo "::error::locally. Cloud SQL replacement and bucket or secret deletion are data loss."
+          exit 1
+
+      - name: Nothing to do
+        if: steps.plan.outputs.exitcode == '0'
+        run: echo "The environment already matches the configuration; no apply is needed."
+
+      - name: Apply
+        if: steps.plan.outputs.exitcode == '2'
+        working-directory: infrastructure/terraform/environments/${{ inputs.environment }}
+        run: tofu apply -input=false -no-color tfplan
+
+      - name: Summarize
+        if: always()
+        working-directory: infrastructure/terraform/environments/${{ inputs.environment }}
+        run: |
+          {
+            echo "### Infrastructure apply — ${{ inputs.environment }}"
+            echo ""
+            echo "- OpenTofu: $(tofu version | head -1)"
+            echo "- plan result: ${{ steps.plan.outputs.exitcode == '0' && 'no changes' || 'changes proposed' }}"
+            echo "- destructive changes in plan: ${{ steps.plan.outputs.destructive || 'unknown' }}"
+            echo "- outcome: ${{ job.status }}"
+            echo "- infrastructure commit: \`${{ github.sha }}\`"
+            echo ""
+            echo "The plan and state are not published. Neither is the application image:"
+            echo "OpenTofu does not own the runtime image field (ES-08 section 140)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove local plan output
+        if: always()
+        working-directory: infrastructure/terraform/environments/${{ inputs.environment }}
+        run: rm -f tfplan plan.txt
