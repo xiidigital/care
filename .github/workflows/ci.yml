@@ -164,8 +164,10 @@ jobs:
             -e CARE_RATE_LIMIT_BACKEND=postgres \
             -e CARE_TASK_BACKEND=cloud_tasks \
             -e GCP_PROJECT_ID=ci \
+            -e GCP_TASKS_LOCATION=ci \
             -e GCP_TASKS_QUEUE=ci \
             -e GCP_WORKER_URL=http://worker.invalid \
+            -e GCP_TASKS_SERVICE_ACCOUNT=ci@ci.invalid \
             backend bash -c "python manage.py test \
               care.utils.tests.test_cache_backends \
               care.utils.tests.test_cache_config \
