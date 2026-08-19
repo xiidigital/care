@@ -181,3 +181,17 @@ variable "labels" {
   type    = map(string)
   default = {}
 }
+
+# --- Delivery (ES-08) -------------------------------------------------------
+
+variable "deployment_principals" {
+  description = "IAM members allowed to deploy application revisions into this environment. Take them from the bootstrap root's github_deployment_principals output."
+  type        = list(string)
+  default     = []
+}
+
+variable "image_publisher_principals" {
+  description = "IAM members allowed to publish images to this environment's Artifact Registry repository."
+  type        = list(string)
+  default     = []
+}

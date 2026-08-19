@@ -146,6 +146,27 @@ resource "google_cloud_run_v2_service" "this" {
   }
 
   lifecycle {
+    # The image field, and only the image field, belongs to application
+    # delivery (ADR-0008 section 7, ES-08 section 140).
+    #
+    # OpenTofu creates and configures the service; a release then moves it from
+    # one immutable digest to the next, many times, without an infrastructure
+    # apply. Without this, the two owners fight: every plan after a deployment
+    # would propose reverting the running image to whatever `var.image` said,
+    # and an operator would learn to ignore plan output — which is how a real
+    # drift gets missed.
+    #
+    # `var.image` keeps its job for the case it is actually needed: a greenfield
+    # service must be created with some image, and that is the one
+    # (ES-08 section 143). It is the initial value, not the current one.
+    #
+    # Deliberately narrow. Everything else about this service — scaling,
+    # concurrency, ingress, secrets, service account, probes — stays owned by
+    # OpenTofu and a plan still reports drift in any of it.
+    ignore_changes = [
+      template[0].containers[0].image,
+    ]
+
     precondition {
       condition     = !(var.process_role == "task_worker" && var.allow_unauthenticated)
       error_message = "The task worker must not permit unauthenticated invocation. ADR-0007 treats a deployment that exposes the worker without its IAM boundary as invalid, and the worker's task endpoint carries no application-layer authentication by design (ES-06 section 14)."

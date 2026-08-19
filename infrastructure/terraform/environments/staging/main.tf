@@ -109,5 +109,11 @@ module "care" {
   alerts_enabled              = var.alerts_enabled
   alert_notification_channels = var.alert_notification_channels
 
+  # --- Delivery ------------------------------------------------------------
+  # Who may publish images here and who may deploy them. Empty until the
+  # bootstrap root has created the automation identities (ES-08 section 17).
+  deployment_principals      = var.deployment_principals
+  image_publisher_principals = var.image_publisher_principals
+
   labels = var.labels
 }

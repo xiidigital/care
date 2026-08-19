@@ -37,3 +37,30 @@ variable "create_deployer_service_account" {
   type        = bool
   default     = false
 }
+
+variable "github_repository" {
+  description = <<-EOT
+    GitHub repository, as "owner/name", whose Actions workflows may
+    authenticate to this project through workload identity federation (ES-08).
+
+    Empty disables the whole GitHub trust relationship, which is the right
+    setting for a project with no CI/CD. Setting it creates a workload identity
+    pool, a provider that accepts tokens from this repository and no other, and
+    four automation identities that hold no environment permission until an
+    environment grants them one.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "grant_infrastructure_roles" {
+  description = <<-EOT
+    Grant the infrastructure automation identity the project roles required to
+    apply this repository's OpenTofu.
+
+    False by default: applying from an authenticated operator remains supported,
+    and an identity holding unused project administration is a standing risk.
+  EOT
+  type        = bool
+  default     = false
+}

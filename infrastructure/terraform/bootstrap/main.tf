@@ -86,3 +86,71 @@ resource "google_storage_bucket_iam_member" "deployer_state" {
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.deployer[0].email}"
 }
+
+# ---------------------------------------------------------------------------
+# GitHub Actions identity (ES-08)
+#
+# Repository setup, not environment setup: one pool and one provider per
+# project, and the automation identities that specific workflow contexts may
+# impersonate. It lives in bootstrap for the same reason the state bucket does —
+# it must exist before anything automated can run, so an authenticated operator
+# creates it once (ES-08 sections 74, 75).
+#
+# Off unless `github_repository` is set. A project with no CI has no reason to
+# trust an external issuer.
+# ---------------------------------------------------------------------------
+
+module "github_oidc" {
+  source = "../modules/github-oidc"
+  count  = var.github_repository != "" ? 1 : 0
+
+  project_id        = var.project_id
+  github_repository = var.github_repository
+
+  # Four identities, four jobs. The GitHub Environment names on the right are
+  # the trust expression: a job that does not declare that environment cannot
+  # become that identity, and `production` is the one that is protected.
+  identities = {
+    publisher = {
+      account_id   = "care-ci-publisher"
+      display_name = "CARE image publication"
+      description  = "Builds are published to Artifact Registry as this identity. It has no permission on any running environment."
+      environments = ["artifact-publication"]
+    }
+
+    deploy_staging = {
+      account_id   = "care-deploy-staging"
+      display_name = "CARE staging deployment"
+      description  = "Deploys published digests to staging and runs staging acceptance."
+      environments = ["staging"]
+    }
+
+    deploy_production = {
+      account_id   = "care-deploy-prod"
+      display_name = "CARE production deployment"
+      description  = "Deploys an accepted digest to production. Separate from staging so a staging workflow cannot reach production."
+      environments = ["production"]
+    }
+
+    infrastructure = {
+      account_id   = "care-infra"
+      display_name = "CARE infrastructure delivery"
+      description  = "Plans and, when granted, applies OpenTofu. Deliberately not the same identity that deploys application revisions."
+      environments = ["infrastructure-plan", "infrastructure-apply"]
+    }
+  }
+
+  grant_infrastructure_roles = var.grant_infrastructure_roles
+}
+
+# State access for the infrastructure identity, scoped to the bucket. The
+# application deployment identities get nothing here: a release that deploys a
+# Cloud Run revision has no business reading infrastructure state
+# (ES-08 section 120).
+resource "google_storage_bucket_iam_member" "github_infrastructure_state" {
+  count = var.github_repository != "" ? 1 : 0
+
+  bucket = google_storage_bucket.state.name
+  role   = "roles/storage.objectAdmin"
+  member = module.github_oidc[0].deployment_principals["infrastructure"]
+}

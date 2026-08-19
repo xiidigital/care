@@ -31,6 +31,17 @@ variable "image" {
     Prefer an immutable reference — a digest, or a tag that is never moved.
     Building and publishing is an operational or CI responsibility; OpenTofu
     only selects.
+
+    THIS IS THE INITIAL IMAGE, NOT THE CURRENT ONE.
+
+    ES-08 gives the image field of every service and Job to application
+    delivery, and the resources ignore changes to it. So this value is what a
+    greenfield environment is created with, and after that the deployed digest
+    is whatever the last release deployed — read it from the platform, or from
+    the environment's deployment records, not from here (ES-08 section 143).
+
+    A stale value in tfvars is therefore harmless: it will not roll an
+    environment back, and a plan will not propose to.
   EOT
   type        = string
 
@@ -557,4 +568,64 @@ variable "alerts_enabled" {
   description = "Whether alert policies are created at all. Off in dev: paging on scale-to-zero behaviour is noise (ES-07 section 81)."
   type        = bool
   default     = false
+}
+
+# ---------------------------------------------------------------------------
+# Delivery (ES-08)
+#
+# Who may deploy into this environment, and who may publish images to it. See
+# delivery.tf for what each grant is and why it is scoped the way it is.
+# ---------------------------------------------------------------------------
+
+variable "deployment_principals" {
+  description = <<-EOT
+    IAM members allowed to deploy application revisions into this environment:
+    update the Cloud Run services and Jobs, execute the init Job, act as the
+    runtime service accounts, and read this environment's registry.
+
+    Members, in IAM form — "serviceAccount:care-deploy-staging@project.iam.gserviceaccount.com".
+
+    Empty by default. Granting deployment permission to an identity that does
+    not yet exist, or is not yet trusted by anything, is permission nobody uses
+    and everybody has to reason about.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
+variable "image_publisher_principals" {
+  description = <<-EOT
+    IAM members allowed to publish images to this environment's Artifact
+    Registry repository. Separate from deployment_principals on purpose: a
+    build identity publishes an artifact and never touches a running
+    environment (ES-08 section 115).
+  EOT
+  type        = list(string)
+  default     = []
+}
+
+variable "grant_deployment_task_dispatch" {
+  description = "Let deployment_principals enqueue on this environment's Cloud Tasks queue. Required by the staging acceptance dispatch check; not required to deploy."
+  type        = bool
+  default     = true
+}
+
+variable "grant_deployment_storage_access" {
+  description = "Let deployment_principals read and write objects in this environment's buckets. Required by the staging acceptance storage round trip; not required to deploy."
+  type        = bool
+  default     = true
+}
+
+variable "grant_deployment_log_read" {
+  description = <<-EOT
+    Let deployment_principals read this project's log entries
+    (roles/logging.viewer). Required by the acceptance check that proves a
+    dispatched task was actually executed.
+
+    This is the only project-level grant in the delivery set, because Cloud
+    Logging has no per-service IAM. It is read-only. Set false to withhold it;
+    acceptance then runs with --skip-tasks or under a separate identity.
+  EOT
+  type        = bool
+  default     = true
 }

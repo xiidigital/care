@@ -34,3 +34,8 @@ override.tf.json
 *_override.tf.json
 
 # Lock files ARE tracked (.terraform.lock.hcl) — they pin provider versions.
+
+# Variable-value variants. `*.tfvars` above misses a suffixed copy such as
+# terraform.tfvars.pre-hardening, and those hold the same class of content.
+terraform.tfvars.*
+!terraform.tfvars.example

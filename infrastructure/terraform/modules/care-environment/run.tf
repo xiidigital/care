@@ -278,6 +278,15 @@ resource "google_cloud_run_v2_job" "jobs" {
   # application refuses to run it without DEBUG; this refuses to build the Job
   # that would carry DEBUG anywhere but dev, so neither guard stands alone.
   lifecycle {
+    # Same ownership boundary as the services: application delivery moves the
+    # image, OpenTofu owns everything else about the Job (ES-08 sections 144,
+    # 145). The init Job especially — a deployment must be able to point it at
+    # the digest it is about to roll out without an infrastructure apply, and
+    # the next plan must not propose putting it back.
+    ignore_changes = [
+      template[0].template[0].containers[0].image,
+    ]
+
     precondition {
       condition     = !var.enable_fixture_loader || var.environment == "dev"
       error_message = "enable_fixture_loader is true for environment '${var.environment}'. The fixture Job seeds known-credential accounts and synthetic clinical data, and runs with DJANGO_DEBUG=true. It is a development tool and cannot be created outside dev."
