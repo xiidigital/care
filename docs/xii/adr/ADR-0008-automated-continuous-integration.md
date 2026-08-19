@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-06
-- **Last Updated:** 2026-08-17
+- **Last Updated:** 2026-08-19
 - **Decision Makers:** CARE Fork Maintainers
 - **Supersedes:** None
 - **Superseded by:** None
@@ -1389,31 +1389,43 @@ These may be addressed by later implementation specifications or ADRs.
 
 ### ADR-0008 implementation
 
-- [ ] CI workflow implemented.
-- [ ] Pull-request validation implemented.
-- [ ] Full application regression gate implemented.
-- [ ] OpenTofu validation workflow implemented.
-- [ ] Clean production build context enforced.
-- [ ] Immutable OCI image build implemented in CI.
-- [ ] Artifact publication implemented.
-- [ ] Commit-to-digest provenance recorded.
-- [ ] Upstream base commit recorded in release metadata.
-- [ ] GCP staging deployment adapter implemented in CI/CD.
-- [ ] Explicit init execution gate implemented.
-- [ ] Worker-before-API deployment ordering implemented.
-- [ ] Staging acceptance workflow implemented.
-- [ ] Same-digest promotion semantics verified.
-- [ ] Production deployment workflow implemented.
-- [ ] Production approval gate implemented.
-- [ ] Environment deployment concurrency protection implemented.
-- [ ] Production smoke verification implemented.
-- [ ] Application rollback to a previous immutable digest implemented or operationally documented.
-- [ ] Infrastructure plan workflow implemented.
-- [ ] Production infrastructure apply gate implemented.
-- [ ] Greenfield bootstrap and secret-provisioning sequence operationally documented and verified.
-- [ ] Secret/credential scanning implemented where practical.
-- [ ] Release/deployment metadata recorded.
-- [ ] Public-repository credential boundary verified.
+Implemented on `feature/ci-controlled-delivery` (ES-08), 2026-08-19. A box is
+checked when the thing exists in the repository and its behaviour was verified;
+where verification required a GitHub Actions run, the box says so, because a
+workflow GitHub has never seen has never run (ES-08 sections 133, 134, 197).
+
+- [x] CI workflow implemented. `.github/workflows/ci.yml`.
+- [x] Pull-request validation implemented. No credentials; `pull_request` rather than `pull_request_target`.
+- [x] Full application regression gate implemented. The Makefile targets, plus the backend-sensitive modules again under the Redis-free selections.
+- [x] OpenTofu validation workflow implemented. `infra-check.yml`; fmt and validate need no credentials and run on pull requests.
+- [x] Clean production build context enforced. Allowlist in `docker/prod.Dockerfile.dockerignore`; P2 closed, with byte-identical inventories from a dirty tree and a clean export.
+- [x] Immutable OCI image build implemented in CI. `build-image.yml`, from the repository's production Dockerfile.
+- [x] Artifact publication implemented. Artifact Registry, digest read back from the registry.
+- [x] Commit-to-digest provenance recorded. `release-metadata.json`, plus `APP_VERSION` reported by `/app_version/`.
+- [x] Upstream base commit recorded in release metadata. From the committed `UPSTREAM_BASE`.
+- [x] GCP staging deployment adapter implemented in CI/CD. `infrastructure/scripts/gcp/`, called by `deploy-app.yml`.
+- [x] Explicit init execution gate implemented. Verified against staging: the deployment stops on init failure and the window is bounded in the log.
+- [x] Worker-before-API deployment ordering implemented. In the script, not in YAML, and each deployed digest is read back.
+- [x] Staging acceptance workflow implemented. `acceptance.sh`, executed against the real staging environment.
+- [x] Same-digest promotion semantics verified. Deployment and promotion accept a digest and refuse a tag; promotion has no build step, asserted by a test.
+- [x] Production deployment workflow implemented. `promote-production.yml`; no production environment was created (ES-08 section 67).
+- [x] Production approval gate implemented. Protected `production` environment, after an eligibility job that shows the digest. **Not exercised:** requires the GitHub environment to exist.
+- [x] Environment deployment concurrency protection implemented. One group per environment, cancellation disabled.
+- [x] Production smoke verification implemented. `smoke.sh`; non-destructive, no synthetic state.
+- [x] Application rollback to a previous immutable digest implemented or operationally documented. `rollback.sh`, `rollback.yml`, and the previous digest recorded from the platform at every deployment.
+- [x] Infrastructure plan workflow implemented. `infra-check.yml`; plan output deliberately not published.
+- [x] Production infrastructure apply gate implemented. `infra-apply.yml`, protected, refuses a destructive plan unless asked, and never destroys.
+- [x] Greenfield bootstrap and secret-provisioning sequence operationally documented and verified. `08-continuous-delivery.md` section 11; N4 remains true and is stated as expected behaviour.
+- [x] Secret/credential scanning implemented where practical. gitleaks, pinned to a commit.
+- [x] Release/deployment metadata recorded. Build, deployment and acceptance records, none committed to the branch.
+- [x] Public-repository credential boundary verified. No key material, no secret payload, no tfvars and no state in the repository; asserted by the delivery-invariants test.
+
+Open, and tracked in `inventory/unresolved-items.md` Part D8:
+
+- [ ] A real GitHub Actions run of the CI/build path (D1). Blocked: the branch has not been pushed.
+- [ ] A real trusted workflow deploying a CI-built digest to staging (D1). Same blocker; the same scripts were executed manually against staging instead, which proves the environment behaves and does not prove the platform wiring.
+- [ ] Workload Identity Federation applied, and the GitHub environments and variables configured (D2). Declared and validated; requires an operator apply and repository-admin configuration.
+- [ ] Recent Views covered by automated acceptance (D3). Manually verified in ES-07; automating it would require broadening the deployment identity.
 
 ---
 

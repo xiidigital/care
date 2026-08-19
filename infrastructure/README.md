@@ -393,19 +393,50 @@ gcloud redis instances list --project <project> --region us-central1
 
 ## 9. Ordinary deployment sequence
 
+**An ordinary application release no longer runs `tofu apply`.** ES-08 gave the
+image field of the Cloud Run services and Jobs to application delivery, and the
+resources ignore changes to it: `var.image` is what a greenfield service is
+*created* with, and after that the deployed digest is whatever the last release
+deployed. A stale `image` in tfvars is harmless and a plan will not propose
+putting it back.
+
+So there are two sequences now, and which one you want depends on whether
+infrastructure changed.
+
+**Application only** — the normal case:
+
 ```
-1. tofu apply                          infrastructure
-2. publish-image.sh                    new digest
-3. update `image` in terraform.tfvars
-4. tofu apply                          updates the init Job to the new image
-5. gcloud run jobs execute ...-init --wait
-6. require success                     stop here if it failed
-7. tofu apply already updated API and worker; verify their revisions are ready
-8. verify health and the worker IAM boundary
+1. push to gcp                         CI, then build-image.yml publishes a digest
+2. deploy-staging.yml <digest>          init -> worker -> API -> Jobs, then acceptance
+3. promote-production.yml <digest>      approved, same digest, no rebuild
 ```
 
-Step 6 is the one that matters. An API revision that depends on an unapplied
-migration must not take traffic.
+or the same thing by hand, which is what those workflows run:
+
+```bash
+export CARE_ENVIRONMENT=staging GCP_PROJECT_ID=<project> GCP_REGION=us-central1
+infrastructure/scripts/gcp/deploy.sh     --digest sha256:...
+infrastructure/scripts/gcp/acceptance.sh --digest sha256:...
+```
+
+`deploy.sh` updates the init Job to the digest, executes it, **stops if it
+fails**, then deploys the worker, then the API, then the application Jobs, and
+reads each deployed image back to confirm it is the digest that was asked for.
+The init gate is the step that matters: an API revision that depends on an
+unapplied migration must not take traffic.
+
+**Infrastructure changed** — a separate path with its own approval:
+
+```
+1. tofu plan                           infra-check.yml, or locally
+2. review                              destructive changes require explicit intent
+3. tofu apply                          infra-apply.yml, approved
+4. then an application release if one is needed
+```
+
+See `docs/xii/architecture/08-continuous-delivery.md` for the workflows, the
+GitHub and Workload Identity Federation setup, acceptance, rollback and the
+manual equivalents of every step.
 
 ## 10. Cost
 

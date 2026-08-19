@@ -2300,6 +2300,49 @@ have caught this the day it landed (ADR-0008).
 
 ### P2. `.dockerignore` lets the builder's working tree into the image
 
+**Status:** Resolved 2026-08-19 on `feature/ci-controlled-delivery` (ES-08).
+**Severity:** was build hygiene and reproducibility.
+
+**How.** The production build context is now an allowlist in
+`docker/prod.Dockerfile.dockerignore` — BuildKit resolves a Dockerfile-specific
+ignore file before the root one — which excludes everything and then admits the
+dependency manifests, the Django project, the plugin installer, the role
+entrypoints, the translation sources and the reference data. A denylist was
+rejected: it excludes the categories someone thought of, and a missed category
+produces a silently different image.
+
+The root `.dockerignore` remains a denylist and now covers the categories ES-08
+section 21 names, so the development and fixture images improve and a legacy
+non-BuildKit production build has a much better fallback.
+
+**verified, on this branch with 163 MB of untracked scratch present** (`output/`,
+`care-backups/`, `.tmp-opentofu/`, a 34 MB PDF, `staticfiles/`, `__pycache__/`):
+
+```text
+built from the working tree                  781 MB   inventory sha256 917d82c2…
+built from `git archive HEAD` (clean export) 781 MB   inventory sha256 917d82c2…
+built from `git archive HEAD`, old rules     784 MB   156 extra files
+built from the working tree, old rules      1.79 GB   (recorded when P2 was opened)
+```
+
+The two builds under the new rules have **byte-identical file inventories**:
+2225 files, same sha256 of the sorted path list. The 156 files the old rules
+admitted from a clean export were `docs/`, `infrastructure/`, `.github/`,
+`.vscode/` and the repository's root metadata — none of which the application
+reads.
+
+`jwks.b64.txt` can no longer enter an image: it is not on the allowlist, and CI
+plants one in the build context before every build and fails if it appears.
+
+**Kept checkable rather than fixed once.** `infrastructure/scripts/verify-image.sh`
+inspects a built image for nineteen local-only paths, for infrastructure state
+and key material anywhere in the application tree, for the static manifest and
+for the compiled catalogues.
+`care.utils.tests.test_delivery_invariants` fails if the allowlist stops being
+one, or names a path that no longer exists.
+
+**The original finding, kept for the record.**
+
 **Status:** Open. **Severity:** build hygiene, reproducibility.
 
 **verified** `.dockerignore` excludes `.venv`, `.git`, `htmlcov`, `staticfiles`,
@@ -2424,3 +2467,192 @@ was not investigated here.
 
 Out of scope for this branch, which was scoped to L8, L2 and N2. Recorded
 because "the suite passes" is a staging precondition and it does not.
+
+---
+
+## Part D8 — Delivery findings (ES-08)
+
+Recorded while implementing automated CI and controlled delivery. P2 is closed
+above; these are what ES-08 found or deliberately left.
+
+### D1. Real GitHub Actions execution has not happened
+
+**Status:** Open, externally blocked. **Recorded 2026-08-19.** **Severity:**
+blocks the ES-08 acceptance items that require a CI run.
+
+**What is blocked.** ES-08 section 133 requires at least one real GitHub Actions
+run of the common CI/build path, and section 134 requires at least one real
+trusted workflow deploying a CI-built digest to staging. Neither has occurred,
+because the workflows exist only on a local branch: ES-08 section 3 says not to
+push unless explicitly instructed, and no instruction was given. A workflow file
+that GitHub has never seen has never run.
+
+**What was verified instead, and what it does not cover.** Every check the
+workflows perform was executed locally against the same targets, using the same
+scripts the workflows invoke — the production image built and inspected, the
+image started and probed, the digest published to Artifact Registry, staging
+deployed and accepted, OpenTofu validated and planned. That establishes that the
+commands work and that the environment behaves. It does not establish that
+GitHub Actions resolves the workflow syntax, that the reusable-workflow
+composition wires up, that OIDC exchange produces a usable credential, that
+environment protection gates what it should, or that a fork pull request is
+refused — all of which are properties of the platform and can only be observed
+there (ES-08 section 132).
+
+**To close.** Push the branch, open a pull request, and let CI run; configure the
+GitHub Environments and variables (08-continuous-delivery.md sections 3 and 4);
+apply the bootstrap root so the identities exist; run the build workflow; deploy
+the resulting digest to staging through the workflow. Section 133 and 134
+evidence is a run id and a URL, and neither exists yet.
+
+### D2. Workload Identity Federation is declared but not applied
+
+**Status:** Open, sequenced. **Recorded 2026-08-19.** **Severity:** procedural.
+
+The pool, the provider, the four automation identities and their claim
+restrictions are declared in `modules/github-oidc` and instantiated by the
+bootstrap root behind `github_repository`. All four roots validate. Nothing has
+been applied: the bootstrap root runs on local state from an operator
+workstation, and applying it also requires deciding the repository's GitHub
+configuration, which is repository-admin work rather than code (ES-08 section
+196).
+
+The chicken-and-egg is inherent and documented rather than hidden: federation
+must exist before CI can authenticate, so the first apply is an operator's
+(ES-08 section 75).
+
+### D3. Recent Views is not covered by automated staging acceptance
+
+**Status:** Open, accepted. **Recorded 2026-08-19.** **Severity:** acceptance
+coverage.
+
+Everything else in ES-08 section 39's list is checked by
+`infrastructure/scripts/gcp/acceptance.sh`. Recent Views is not, because it needs
+an authenticated user acting through the API, and there is no automatable way to
+get one in staging that is also correct:
+
+- staging refuses the dev fixture loader, deliberately, and ES-08 section 119
+  requires that separation to be preserved;
+- ES-07 verified it by creating a temporary Cloud Run Job and a synthetic
+  superuser and deleting both afterwards (see gcp-configuration.md section 11).
+  Automating that would need `run.jobs.create` at project level for the
+  deployment identity, which is exactly the broadening ES-08 section 116 asks to
+  avoid;
+- a management command that seeds an acceptance user would be application source
+  added for CI's benefit, which section 111 restricts to proven blockers.
+
+So it stays manually verified, on the ES-07 evidence, and the acceptance script
+says so rather than implying coverage. A future phase that adds a staging-only
+acceptance Job — infrastructure-owned, so no identity gains creation rights — can
+close it.
+
+**Advisory locking, by contrast, is covered indirectly and honestly.**
+`sync_permissions_roles` takes a transaction-scoped advisory lock and runs on
+every init, so a green init exercises the path. Nothing deliberately contends for
+the lock in staging: deadlocking the staging database is not a check
+(ES-08 section 176).
+
+### D4. The repository is not `ruff format` clean repository-wide
+
+**Status:** Open, out of ES-08 scope. **Recorded 2026-08-19.** **Severity:**
+gate scope.
+
+`ruff format --check .` reports **73 files** that would be reformatted, at both
+pinned versions. Formatting has only ever been enforced on diffs: `linter.yml`
+runs pre-commit over a pull request's range, and the hook only sees staged files.
+So CI checks formatting on the files a change touches, and `ruff check .` — which
+does pass repository-wide as of ES-08, after three fixes in fork code — is the
+repository-wide half of the gate.
+
+Reformatting 73 files is the unrelated cleanup ES-08 section 201 forbids. It is a
+one-commit decision for whoever wants it, and it would be a large diff against
+upstream.
+
+**Related, and worth fixing whenever ruff is next touched:** `.pre-commit-config.yaml`
+pins `ruff v0.14.8` and the `Pipfile` pins `ruff==0.14.14`. The two format
+differently, so a developer using the container's ruff and a developer using the
+hook disagree. CI installs the pre-commit version, because agreeing with the hook
+matters more than which version wins.
+
+### D5. Artifact Registry is private, so an external operator cannot pull
+
+**Status:** Open, accepted. **Recorded 2026-08-19.** **Severity:** distribution.
+
+ES-08 section 69 asks for documentation of how another operator consumes a
+published image, and section 70 forbids making the registry public to achieve it.
+Both are satisfied: the reference form is documented, and the limitation is
+stated rather than designed around. Pulling
+`<region>-docker.pkg.dev/<project>/<repo>/care@sha256:<digest>` needs a reader
+binding in the maintainers' project.
+
+The release architecture does not depend on this. A public mirror or a second
+registry can be added without changing the build contract (ES-08 section 125).
+
+### D6. No production environment exists
+
+**Status:** Open by decision. **Recorded 2026-08-19.**
+
+`promote-production.yml` and the production half of `deploy-app.yml` are
+implemented and validated, and no production resource was created to test them —
+ES-08 sections 67 and 107 require exactly that. Run against an unconfigured
+`production` environment the workflow fails at its configuration check and names
+what is missing.
+
+Consequences to be aware of before a first production release: the
+`production` GitHub Environment and its variables do not exist; the
+`care-deploy-prod` identity has no grants, because no production environment root
+has been applied to give it any; and the emergency-promotion question is
+deliberately unanswered (ES-08 section 129).
+
+### D8. `/app_version/` reported a stale build — RESOLVED
+
+**Status:** Found and fixed 2026-08-19 during ES-08 staging acceptance.
+**Severity:** was release traceability.
+
+**verified** After the first CI/CD-style deployment moved all five staging
+resources to `sha256:5ca9624b…`, `/app_version/` still answered with the
+*previous* image reference, `…@sha256:3284c115…`. Acceptance caught it, which is
+what acceptance is for.
+
+**Cause.** `modules/care-environment/config.tf` set `APP_VERSION = var.image` as
+a Cloud Run environment variable. That was correct while OpenTofu owned the image
+— the variable and the running image moved together. ES-08 gave the image field
+to application delivery, so `var.image` became the *initial* image, and an
+environment variable derived from it overrides the value the image itself
+carries. The endpoint then described tfvars rather than the artifact.
+
+**Fix.** The environment variable is gone. `docker/prod.Dockerfile` bakes
+`APP_VERSION` from a build argument, CI passes the commit, and `/app_version/`
+now reports it: `{"version": "f2468c5bf5b3"}` against the digest that was
+deployed. It is a property of the image, which is what ES-08 section 49 needs it
+to be.
+
+**Generalisable point.** Any environment variable derived from `var.image` has
+the same defect after the ownership change. This was the only one.
+
+### D9. Deploying with gcloud produced a permanent OpenTofu diff — RESOLVED
+
+**Status:** Found and fixed 2026-08-19. **Severity:** was plan noise, and
+ES-08 section 139 forbids accepting it.
+
+**verified** After the deployment, `tofu plan` proposed five in-place updates —
+the API, the worker and the three Jobs — each of them only
+`client = "gcloud" -> null` and `client_version = "579.0.0" -> null`. No image
+change was proposed, so the ownership boundary worked; but every plan from then
+on would have carried five diffs produced by nothing except the act of deploying,
+and a plan whose output is routinely ignored is a plan that will miss a real
+change.
+
+`client` and `client_version` are Cloud Run's record of which tool last wrote the
+resource. They are provenance, not configuration.
+
+**Fix.** Both fields joined `containers[0].image` under `ignore_changes` on the
+services and the Jobs. `tofu plan` against staging after a deployment and an
+apply now reports **No changes**.
+
+### D7. Staging still shares dev's GCP project
+
+Unchanged from N3, and CI/CD does not depend on it either way: every identifier
+reaches the workflows as environment configuration, so separating staging into
+its own project is a variable change and an apply, not a workflow redesign
+(ES-08 section 79).

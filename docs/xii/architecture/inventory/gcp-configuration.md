@@ -81,7 +81,17 @@ in two places.
 | `POSTGRES_PORT` | ✓ | ✓ | — | — | tofu (fixed) | `5432` |
 | `POSTGRES_USER` | ✓ | ✓ | — | — | tfvars | `care` |
 | `POSTGRES_DB` | ✓ | ✓ | — | — | tfvars | `care` |
-| `APP_VERSION` | ✓ | ✓ | ✓ | — | tofu | the image reference |
+| `APP_VERSION` | ✓ | ✓ | ✓ | — | **image** | the commit the image was built from |
+
+`APP_VERSION` is the one row whose source changed in ES-08, and it is now the
+only value in this table that OpenTofu does not set. It used to be
+`var.image`, which was correct while OpenTofu owned the image; once application
+delivery owned it, the environment variable kept overriding the image's own
+value and `/app_version/` reported the digest deployed months earlier — observed
+on staging, where the endpoint named the previous digest while all five
+resources were running the new one. `docker/prod.Dockerfile` bakes it from a
+build argument, CI passes the commit, and the endpoint now describes the
+artifact rather than a tfvars entry.
 
 `GCP_WORKER_URL` is derived rather than read back from the service, because the
 worker's own settings validate it and a service cannot reference itself. A
@@ -292,3 +302,93 @@ the `init` service account and failed item 7 with
 `iam.tf` grants `roles/storage.objectUser` to the `api` and `worker` identities
 only, and excludes `init` explicitly because initialization opens no object.
 Re-run under the worker identity, item 7 passed.
+
+---
+
+## 12. Delivery configuration (ES-08)
+
+Not application configuration. None of this reaches the image, and the
+application never reads any of it — it is what CI/CD needs in order to
+authenticate and to know which environment it is acting on
+(ADR-0008 section 38).
+
+### 12.1 Automation identities
+
+Created by the bootstrap root when `github_repository` is set
+(`modules/github-oidc`). No key exists for any of them; GitHub exchanges an OIDC
+token for a short-lived credential.
+
+| Identity | Account | May do | Impersonated from |
+| --- | --- | --- | --- |
+| publisher | `care-ci-publisher` | write one Artifact Registry repository | `artifact-publication` |
+| staging deploy | `care-deploy-staging` | update staging's services and Jobs, run its init Job, act as its runtime identities | `staging` |
+| production deploy | `care-deploy-prod` | the same, in production | `production` |
+| infrastructure | `care-infra` | state bucket; project roles only when granted | `infrastructure-plan`, `infrastructure-apply` |
+
+The provider accepts tokens only where `assertion.repository` equals the one
+configured repository; impersonation is restricted further by the environment
+claim. Both must hold.
+
+### 12.2 What an environment grants them
+
+`modules/care-environment/delivery.tf`, all bound to that environment's own
+resources, all empty until `deployment_principals` and
+`image_publisher_principals` are set:
+
+| Grant | Scope | Why |
+| --- | --- | --- |
+| `roles/artifactregistry.writer` | this environment's repository | publish |
+| `roles/artifactregistry.reader` | this environment's repository | resolve a digest before deploying it |
+| `roles/run.developer` | each service, each Job, individually | update the image, execute init |
+| `roles/iam.serviceAccountUser` | api, worker, init, tasks_invoker | deploy a revision that runs as them; mint an OIDC task |
+| `roles/cloudtasks.enqueuer` | this environment's queue | acceptance dispatch |
+| `roles/storage.objectUser` | this environment's buckets | acceptance round trip |
+| `roles/logging.viewer` | **project** | acceptance observes the worker executing the task |
+
+`roles/logging.viewer` is the only project-level grant, because Cloud Logging has
+no per-service IAM. It is read-only and separately switchable
+(`grant_deployment_log_read`).
+
+None of these can read a secret payload. Cloud Run resolves secret references
+itself, and no workflow or deployment script calls
+`gcloud secrets versions access` — the delivery-invariants test fails if one
+starts to.
+
+### 12.3 GitHub variables
+
+Variables, not secrets: a project id, a region and a service-account email
+authenticate nobody (ES-08 section 72). No GitHub secret is required by any
+delivery workflow.
+
+```text
+GCP_PROJECT_ID                    GCP_WORKLOAD_IDENTITY_PROVIDER
+GCP_REGION                        GCP_PUBLISHER_SERVICE_ACCOUNT
+ARTIFACT_REGISTRY_REPOSITORY      GCP_DEPLOY_SERVICE_ACCOUNT
+IMAGE_NAME              optional  GCP_INFRA_SERVICE_ACCOUNT
+CARE_ENVIRONMENT                  TF_STATE_BUCKET
+CARE_API_SERVICE        optional  INITIAL_IMAGE          optional
+CARE_WORKER_SERVICE     optional
+CARE_INIT_JOB           optional
+CARE_APP_JOBS           optional
+```
+
+The optional ones default to the naming convention this module implements
+(`care-<environment>-<resource>`). Nothing in the scripts or workflows hardcodes
+a name, so an installation that names things differently sets the overrides
+instead of forking the workflows.
+
+Full setup in `docs/xii/architecture/08-continuous-delivery.md`.
+
+### 12.4 The runtime image field
+
+Owned by application delivery, not by OpenTofu (ES-08 section 140). The Cloud
+Run services and Jobs ignore changes to `containers[0].image`; `var.image` is the
+image a greenfield service is *created* with, and after that the deployed digest
+is whatever the last release deployed.
+
+Read the deployed digest from the platform, not from tfvars:
+
+```bash
+gcloud run services describe care-<env>-api --region <region> \
+  --format='value(spec.template.spec.containers[0].image)'
+```

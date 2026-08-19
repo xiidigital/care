@@ -238,6 +238,17 @@ APP_VERSION=gcp-v2026.08.05.1
 
 This value identifies the logical application release.
 
+**Set by the image, not by the environment (ES-08).** `docker/prod.Dockerfile`
+takes it as a build argument and bakes it in; CI passes the commit being built.
+It is reported by `/app_version/`, which is how acceptance checks that a
+deployed service is running the build it was asked to run.
+
+Do not set it as a deployment environment variable. A value supplied at
+deployment overrides the one the image carries, and then the endpoint describes
+the deployment configuration instead of the artifact — which is exactly what it
+exists to identify. The GCP module used to set it from `var.image` and no longer
+does.
+
 ## 5.3 `GIT_COMMIT_SHA`
 
 Recommended.
@@ -3239,6 +3250,29 @@ secrets -> security/platform maintainers
 
 Ownership MAY be held by the same person in a small deployment, but
 responsibilities SHALL remain explicit.
+
+## 58.1 Delivery configuration is not application configuration (ES-08)
+
+CI/CD needs a second, disjoint set of values: which project and region an
+environment lives in, which services and Jobs it has, which identity to
+authenticate as, which registry to publish to. None of it is read by the
+application, none of it reaches the image, and none of it belongs in this
+reference's tables.
+
+It lives in GitHub repository and environment **variables**, and it is documented
+in `docs/xii/architecture/08-continuous-delivery.md` section 3, with the IAM side
+in `inventory/gcp-configuration.md` section 12.
+
+Two rules worth stating here, because they are about configuration rather than
+about workflows:
+
+- **A project id and a region are not secrets.** Classifying them as secrets
+  hides the configuration without protecting anything. No GitHub secret is
+  required by any delivery workflow — authentication is a short-lived federated
+  credential (ES-08 sections 72, 73).
+- **Changing an environment value never requires rebuilding CARE.** Every value
+  in this reference is supplied at deployment or runtime; that is what makes one
+  artifact promotable across environments (ADR-0008 section 38).
 
 ---
 

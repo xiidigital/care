@@ -1357,3 +1357,79 @@ mail; it changed only what happens when a send fails.
   and `EMAIL_USER`; declare `EMAIL_PASSWORD` through `optional_secrets` for the
   roles that send; and leave `django_email_backend` empty so Django's SMTP
   backend is used.
+
+---
+
+## 17. Deployment changes in ES-08
+
+The runtime is unchanged. Roles, entrypoints, images, health, routes and backend
+selections are exactly as ES-06 and the pre-staging hardening left them. What
+changed is who moves the image, and how a deployment is performed.
+
+### 17.1 One image, one owner for the image field
+
+`docker/prod.Dockerfile` still produces one image for `api`, `task_worker` and
+`init`, and ES-08 added no second image: the fixture image remains development
+only and is not part of any deployment.
+
+What changed is ownership. OpenTofu creates and configures the Cloud Run services
+and Jobs, and `containers[0].image` — that field alone — is under
+`ignore_changes`, because application delivery moves it now. `var.image` is the
+image a greenfield service is created with, and after that the deployed digest is
+whatever the last release deployed.
+
+Consequence for anyone reading tfvars: **it does not tell you what is running.**
+Read the platform:
+
+```bash
+gcloud run services describe care-<env>-api --region <region> \
+  --format='value(spec.template.spec.containers[0].image)'
+```
+
+Verified against the applied staging environment: `tofu plan` reports no changes
+after a deployment moved every service and Job to a new digest.
+
+### 17.2 The production build context is an allowlist
+
+`docker/prod.Dockerfile.dockerignore` excludes everything and admits the
+dependency manifests, the Django project, the plugin installer, the role
+entrypoints, the translation sources and the reference data. The image therefore
+contains no `.github`, no `infrastructure`, no `docs`, no editor metadata, no
+generated key material and none of the builder's scratch — 2225 files, and the
+same 2225 whether built from a working tree with 163 MB of untracked files in it
+or from a clean `git archive` export.
+
+The development and fixture images keep the root `.dockerignore`, now covering the
+categories ES-08 section 21 names. They legitimately need most of the working
+tree.
+
+### 17.3 Initialization is now a gate, not a step
+
+`scripts/initialize.sh` is unchanged and is still the only definition of the
+sequence. What is new is that the deployment procedure treats its exit status as
+a decision: `infrastructure/scripts/gcp/deploy.sh` updates the init Job to the
+selected digest, executes it, and stops the deployment if it fails — no worker
+revision, no API revision, no retry that would turn a failure into a slow
+failure and then into an apparent success.
+
+The state-changing window is bounded in the log by `INIT-STARTED` and
+`INIT-FINISHED` lines carrying the execution id and exit status, so after a
+cancellation an operator can tell whether the schema moved.
+
+### 17.4 Deployment order is executed, not documented
+
+worker before API, both after init, Jobs after both, and each one read back and
+compared with the requested digest. Previously this was a documented sequence
+that an operator performed; it is now a script, and the workflow runs that same
+script.
+
+### 17.5 What still requires an operator
+
+- provisioning secret payloads (`provision-secrets.sh`);
+- the first `tofu apply` of a new environment, and the second one after secrets;
+- the bootstrap apply that creates the GitHub trust relationship;
+- GitHub repository configuration: environments, variables, protection;
+- any infrastructure apply, which is gated and separate from application release.
+
+None of these is automated, and each is documented in
+`docs/xii/architecture/08-continuous-delivery.md` rather than implied.

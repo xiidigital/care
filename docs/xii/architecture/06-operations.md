@@ -607,6 +607,33 @@ The production image build SHALL:
 
 A failed test SHALL prevent image promotion.
 
+## 21.1 How this is implemented (ES-08)
+
+`.github/workflows/build-image.yml` builds `docker/prod.Dockerfile` from a clean
+checkout after CI passes, publishes it to Artifact Registry, reads the digest
+back from the registry and records provenance. Items 4 to 7 are enforced by the
+build context rather than by care: `docker/prod.Dockerfile.dockerignore` is an
+allowlist, so nothing enters the image unless it is named there, and CI plants
+untracked scratch in the context on every run and fails if any of it appears in
+the image.
+
+Item 9: the commit is the image's `APP_VERSION`, reported by `/app_version/`, and
+the upstream base comes from the repository's `UPSTREAM_BASE` file.
+
+Item 10: `infrastructure/scripts/verify-image.sh` inspects a built image — static
+manifest, compiled catalogues, role entrypoints, and the absence of local-only
+files, infrastructure state and key material.
+`infrastructure/scripts/verify-image-startup.sh` runs the real entrypoints
+against a throwaway PostgreSQL with no Redis, and both run in CI before
+publication.
+
+Item 8 is stated carefully. The build input is controlled and the published
+output is immutable, which is what matters operationally. Bit-for-bit
+reproducibility across runs is **not** claimed: image metadata and timestamps
+differ, and no attestation proves otherwise (ES-08 section 94).
+
+A manual publication path remains: `infrastructure/scripts/publish-image.sh`.
+
 ---
 
 # 22. Image Retention
@@ -628,6 +655,11 @@ At minimum, operators SHOULD retain:
 Untagged temporary images MAY be cleaned automatically after a defined period.
 
 Active revision images SHALL not be deleted.
+
+No cleanup policy is configured on the CARE repositories, deliberately: rollback
+selects a previously published digest, and an aggressive retention rule deletes
+rollback candidates (ES-08 section 55). Adding one later needs explicit retention
+rules, not a default.
 
 ---
 
@@ -1487,6 +1519,13 @@ The worker revision SHALL contain handlers required by the API revision.
 
 This order reduces tasks arriving before their handler exists.
 
+As implemented (ES-08), the order is not advisory and not left to a resource
+graph: `infrastructure/scripts/gcp/deploy.sh` performs it, reads each deployed
+image back to confirm the requested digest, verifies the worker still refuses
+anonymous invocation before touching the API, and aborts rather than continuing
+past any of those. The same script is what the workflow runs, so the automated and
+the manual path cannot diverge.
+
 ---
 
 # 57. Cloud Run Revisions
@@ -1524,6 +1563,18 @@ Before rollback, verify:
 API and worker may need to roll back together.
 
 Rollback SHALL not assume database migrations are reversible.
+
+As implemented (ES-08): `infrastructure/scripts/gcp/rollback.sh --list` shows the
+deployed digest and what has been published, and `--digest ... --confirm` puts a
+previously published digest back through the ordinary deployment path, including
+init. Or `rollback.yml`, which requires the environment name typed twice.
+
+The rollback candidate is read from the platform — the digest the environment
+actually ran — not inferred from the previous tag. Every deployment records it as
+`previous_digest`.
+
+Neither path reverses a migration, and both say so where an operator reads them.
+If the current schema cannot support the older artifact, fix forward.
 
 ---
 
@@ -2308,6 +2359,32 @@ A production release SHOULD follow:
 13. tag the release;
 14. record upstream and image references.
 
+## 89.1 How this is implemented (ES-08)
+
+Automated, and with one correction to the list above: **step 4 happens once**.
+Production deploys the digest staging accepted; it does not rebuild the same
+commit, because a rebuild can differ and then "production runs what we tested" is
+unverifiable (ADR-0008 section 5).
+
+```text
+push to gcp        build-image.yml     CI, then one image, published by digest
+staging            deploy-staging.yml  init -> worker -> API -> Jobs, then acceptance
+production         promote-production.yml   approved, same digest, no rebuild
+```
+
+Steps 8 to 10 are inside the deployment adapter and in that order:
+`infrastructure/scripts/gcp/deploy.sh` runs the init Job and **stops the
+deployment** if it fails, then the worker, then the API, then the application
+Jobs, reading each deployed image back to confirm the digest.
+
+Step 11: Cloud Scheduler definitions belong to infrastructure delivery. A release
+updates the Jobs' image, never the schedules.
+
+Step 13 is optional and does not rebuild anything. A tag labels a digest.
+
+Full detail, including the GitHub and Workload Identity Federation setup, in
+`docs/xii/architecture/08-continuous-delivery.md`.
+
 ---
 
 # 90. Release Metadata
@@ -2332,6 +2409,22 @@ This metadata MAY be stored in:
 - a release record;
 - `UPSTREAM_BASE`;
 - application version endpoint.
+
+As implemented (ES-08), all of it exists and none of it is committed back to the
+branch — a bot commit per deployment is noise in the history that matters:
+
+| Record | Where |
+| --- | --- |
+| `release-metadata.json` — commit, upstream base, digest, run URL, timestamp | build workflow artifact |
+| `deployment-record.json` — environment, digest, previous digest, init execution, revisions, result | deployment workflow artifact |
+| `staging-accepted-<digest>` | staging workflow artifact, written only when acceptance passed |
+| the artifact itself | Artifact Registry, no cleanup policy |
+| who, when, and the outcome | GitHub Actions run history |
+
+`UPSTREAM_BASE` is a committed file, updated only during upstream
+synchronization. The application version endpoint reports the build's commit.
+
+No record contains a secret; every field is an identifier.
 
 ---
 
