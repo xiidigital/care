@@ -1,0 +1,25 @@
+# The upstream CARE commit this fork is built on.
+#
+# The mechanism docs/xii/architecture/05-upstream-sync.md section 27 prescribes,
+# in the format it gives. It exists because ES-08 section 28 requires the
+# upstream base to be recorded in release metadata and forbids guessing it from
+# branch names: a release must be able to say which upstream CARE it is, and a CI
+# runner cannot derive that without fetching a second remote it has no other
+# reason to have.
+#
+# UPDATED ONLY DURING UPSTREAM SYNCHRONIZATION. It is not a build artifact and
+# no workflow writes it. If it disagrees with the merge history, the merge
+# history is right and this file is stale.
+#
+# Verify with:
+#   git merge-base HEAD upstream/develop
+#
+# Recorded 2026-08-19 during ES-08. The value is upstream/develop's tip at the
+# last synchronization and is an ancestor of this branch; synchronized_at is that
+# commit's own date, because the synchronization predates this file and its exact
+# time was not recorded.
+
+repository=https://github.com/ohcnetwork/care
+branch=develop
+commit=81149a358c22ff8cf6a3a512f7cdddc136de0b6f
+synchronized_at=2026-08-06T13:20:16Z
