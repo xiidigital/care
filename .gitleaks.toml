@@ -1,0 +1,41 @@
+# gitleaks configuration for the CARE fork.
+#
+# The scan is a release gate: a credible committed credential blocks publication
+# (ADR-0008 section 35). A gate that reports four findings on a clean checkout,
+# none of which is a credential, is a gate people learn to ignore — so the known
+# false positives are listed here, each with the reason it is one, rather than
+# suppressed as a class (ES-08 section 194).
+#
+# Every entry below was checked by reading the line it matches. Nothing here
+# excludes a path that could hold a real secret: `.tfvars`, `backend.hcl`,
+# `.env`, `jwks.b64.txt` and OpenTofu state are all gitignored and none of them
+# is allowlisted.
+#
+# Adding an entry means asserting that the match is not a credential. Say why.
+
+[extend]
+# The upstream rule set, unchanged. This file only adds exceptions.
+useDefault = true
+
+[allowlist]
+description = "Verified false positives, each checked by reading the matched line"
+
+paths = [
+  # A commented-out example value in the documented environment template. The
+  # line begins with '#', the file is `.env.example`, and the real value comes
+  # from Secret Manager in every deployed environment (ES-08 section 162).
+  '''\.env\.example$''',
+
+  # Upstream CARE migrations. The generic-api-key rule matches
+  # `value__has_key="ventilator_fi02"` — a JSONField lookup on clinical
+  # observation data, in a data migration that renames a field. There is no
+  # credential in this tree, and it is upstream code this fork does not own.
+  '''care/facility/migrations/.*\.py$''',
+
+  # Editor and agent metadata. Untracked, so a CI checkout never contains it,
+  # but a developer running the same scan locally would otherwise get findings
+  # from their own IDE state.
+  '''\.idea/.*''',
+  '''\.vscode/.*''',
+  '''\.claude/.*''',
+]

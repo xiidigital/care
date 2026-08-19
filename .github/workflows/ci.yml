@@ -276,8 +276,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # gitleaks compares commits, so it needs history rather than a
-          # single-commit checkout.
+          # The commit scan needs the commits being introduced, which a
+          # single-commit checkout does not have.
           fetch-depth: 0
 
       # The gitleaks binary, not the marketplace action.
@@ -307,8 +307,36 @@ jobs:
           rm -f "$archive" gitleaks
           gitleaks version
 
+      # Two scans, because they answer different questions.
+      #
+      # `dir` reads the working tree: is there a credential in the repository as
+      # it stands? That is the state ADR-0008 section 34 is about, and it is the
+      # one a maintainer can act on.
+      #
+      # `git` reads the commits this change introduces: is one being added? A
+      # scan of the fork's entire history would take far longer and would report
+      # things nobody can remove without rewriting upstream CARE.
+      #
       # `--redact` so a finding names the file and the rule without reproducing
-      # the secret in a public log. A finding fails the job, which fails CI, which
-      # blocks publication (ADR-0008 section 35).
-      - name: Scan for committed secrets
-        run: gitleaks detect --source . --no-banner --redact --verbose
+      # the secret in a public log. Either finding fails the job, which fails CI,
+      # which blocks publication (ADR-0008 section 35).
+      - name: Scan the working tree
+        run: gitleaks dir . --no-banner --redact --verbose
+
+      - name: Scan the commits being introduced
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+          fi
+
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "no comparable base commit; the working-tree scan above stands alone"
+            exit 0
+          fi
+
+          gitleaks git . --no-banner --redact --verbose \
+            --log-opts="${base}..${head}"
