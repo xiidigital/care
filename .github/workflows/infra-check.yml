@@ -1,0 +1,218 @@
+# Validate the infrastructure sources, and plan an environment on request.
+#
+# Infrastructure delivery is a separate path from application delivery
+# (ADR-0008 section 18). An application release does not run this, and a change
+# here does not rebuild the application.
+#
+# Two halves, deliberately split by what they need:
+#
+#   validate   fmt and validate, no credentials, on every pull request
+#   plan       one environment, authenticated, on request only
+#
+# `tofu validate` needs no backend and no project, so it runs on untrusted pull
+# requests (ES-08 section 11). A plan reads real state and must not
+# (ADR-0008 section 3).
+
+name: Infrastructure check
+
+on:
+  pull_request:
+    paths:
+      - "infrastructure/**"
+      - ".github/workflows/infra-check.yml"
+  push:
+    branches:
+      - gcp
+    paths:
+      - "infrastructure/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment root to plan"
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: care-infra-check-${{ github.ref }}-${{ inputs.environment || 'validate' }}
+  cancel-in-progress: true
+
+env:
+  # ADR-0007 chose OpenTofu, and ES-08 section 14 requires CI to install a
+  # deterministic supported version rather than whatever is newest. The roots
+  # declare >= 1.8.0, < 2.0.0.
+  TOFU_VERSION: "1.12.5"
+
+jobs:
+  validate:
+    name: fmt and validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # opentofu/setup-opentofu v1.0.5
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@592200bd4b9bbf4772ace78f887668cd1c75d281
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      - name: Record the version
+        run: tofu version
+
+      - name: tofu fmt
+        run: tofu fmt -check -recursive infrastructure/terraform
+
+      # Every root and every module, with no backend: initialization here
+      # downloads providers and nothing else, so it needs no state access and no
+      # project (ES-08 section 120).
+      - name: tofu validate
+        run: |
+          status=0
+          for dir in \
+            infrastructure/terraform/bootstrap \
+            infrastructure/terraform/environments/dev \
+            infrastructure/terraform/environments/staging \
+            infrastructure/terraform/environments/prod \
+            infrastructure/terraform/modules/care-environment \
+            infrastructure/terraform/modules/cloud-run-service \
+            infrastructure/terraform/modules/github-oidc; do
+            echo "::group::${dir}"
+            if (cd "$dir" && tofu init -backend=false -input=false >/dev/null && tofu validate -no-color); then
+              echo "ok"
+            else
+              echo "::error::tofu validate failed in ${dir}"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  plan:
+    name: Plan ${{ inputs.environment }}
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    # Not a protected gate — a plan changes nothing. It exists so the GCP trust
+    # expression has an environment claim to match, and so the state-reading
+    # identity is separate from the one that deploys application revisions.
+    environment: infrastructure-plan
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Require infrastructure configuration
+        run: |
+          missing=""
+          for pair in \
+            "GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}" \
+            "GCP_REGION=${{ vars.GCP_REGION }}" \
+            "TF_STATE_BUCKET=${{ vars.TF_STATE_BUCKET }}" \
+            "GCP_WORKLOAD_IDENTITY_PROVIDER=${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}" \
+            "GCP_INFRA_SERVICE_ACCOUNT=${{ vars.GCP_INFRA_SERVICE_ACCOUNT }}"; do
+            name="${pair%%=*}"
+            value="${pair#*=}"
+            if [ -z "$value" ]; then
+              missing="${missing} ${name}"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::The 'infrastructure-plan' environment is missing:${missing}."
+            exit 1
+          fi
+
+      # google-github-actions/auth v3.0.0
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@140bb5113ffb6b65a7e9b937a81fa96cf5064462
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_INFRA_SERVICE_ACCOUNT }}
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@592200bd4b9bbf4772ace78f887668cd1c75d281
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      # backend.hcl and terraform.tfvars are gitignored — the repository holds
+      # only the .example files (ES-07). CI therefore supplies both from
+      # environment configuration, which is also what keeps a project id out of
+      # the repository (ADR-0008 section 34).
+      - name: Plan
+        id: plan
+        working-directory: infrastructure/terraform/environments/${{ inputs.environment }}
+        run: |
+          set -o pipefail
+          tofu init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" >/dev/null
+
+          set +e
+          tofu plan -input=false -lock=false -no-color \
+            -var "project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var "region=${{ vars.GCP_REGION }}" \
+            -var "image=${{ vars.INITIAL_IMAGE || 'placeholder' }}" \
+            -detailed-exitcode > plan.txt 2>&1
+          code=$?
+          set -e
+
+          echo "exitcode=${code}" >> "$GITHUB_OUTPUT"
+          case "$code" in
+            0) echo "no changes" ;;
+            2) echo "changes proposed" ;;
+            *) echo "::error::plan failed"; tail -40 plan.txt; exit 1 ;;
+          esac
+
+      # The plan file itself is not published. Actions logs and artifacts on a
+      # public repository are public, and a plan contains every value the plan
+      # touched (ES-08 section 64). What is published is the shape of the change
+      # and, specifically, anything destructive — which is the part a reviewer
+      # must not miss (ADR-0008 section 18).
+      - name: Summarize the plan
+        working-directory: infrastructure/terraform/environments/${{ inputs.environment }}
+        run: |
+          destructive="$(grep -E '^  # .* will be destroyed|^  # .* must be replaced' plan.txt || true)"
+          counts="$(grep -E '^Plan: ' plan.txt || echo 'Plan: no changes')"
+
+          {
+            echo "### Infrastructure plan — ${{ inputs.environment }}"
+            echo ""
+            echo "- OpenTofu: $(tofu version | head -1)"
+            echo "- result: ${{ steps.plan.outputs.exitcode == '0' && 'no changes' || 'changes proposed' }}"
+            echo "- ${counts}"
+            echo ""
+            if [ -n "$destructive" ]; then
+              echo "#### Destructive or privilege-affecting changes"
+              echo ""
+              echo '```text'
+              echo "$destructive"
+              echo '```'
+              echo ""
+              echo "Cloud SQL replacement, bucket or secret deletion, service-account replacement,"
+              echo "queue replacement and IAM broadening all require explicit review before an"
+              echo "apply (ADR-0008 section 18)."
+            else
+              echo "No resource is scheduled for destruction or replacement."
+            fi
+            echo ""
+            echo "The full plan is not published: on a public repository, logs and artifacts are"
+            echo "public, and a plan carries every value it touched. Run it locally for detail."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the plan output
+        if: always()
+        working-directory: infrastructure/terraform/environments/${{ inputs.environment }}
+        run: rm -f plan.txt
