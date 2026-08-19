@@ -1,8 +1,95 @@
-.venv
+# Build context exclusions for the development and fixture images.
+#
+# The production image does not use this file. It uses
+# docker/prod.Dockerfile.dockerignore, which is an allowlist, because a
+# production artifact must contain repository content and nothing else
+# (ADR-0008 section 36, unresolved-items.md P2). This file stays a denylist:
+# the development image runs the test suite and the tooling that goes with it,
+# so it legitimately needs most of the working tree.
+#
+# BuildKit resolves <dockerfile>.dockerignore first and falls back to this file,
+# so a legacy (non-BuildKit) production build still gets these exclusions rather
+# than none.
+
+# --- Version control and agent metadata -------------------------------------
 .git
+.gitignore
+.gitattributes
+.claude
+.cursorignore
+.cursorrules
+
+# --- Editor and IDE metadata ------------------------------------------------
+.idea
+.vscode
+*.swp
+*.swo
+
+# --- Python build and cache artifacts ---------------------------------------
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.pytest_cache
+.ruff_cache
+
+# --- Test results and coverage ----------------------------------------------
 htmlcov
-staticfiles
 .coverage
+.coverage.*
+coverage.xml
+test-results
+junit.xml
+
+# --- Generated application artifacts ----------------------------------------
+# Rebuilt inside the image by the assets stage; a stale local copy must never
+# win over a freshly compiled one.
+staticfiles
+locale/**/*.mo
 care/media/
 celerybeat-schedule
 celerybeat*
+
+# --- Local secrets and generated key material -------------------------------
+# jwks.b64.txt is generated on first settings import and is a private key set.
+.env
+.envs
+.env.*
+!.env.example
+secrets.sh
+jwks.b64.txt
+*.pem
+*.key
+*_rsa
+*_ed25519
+
+# --- Infrastructure state and local infrastructure configuration ------------
+**/.terraform
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.*
+**/terraform.tfvars
+**/*.auto.tfvars
+**/backend.hcl
+
+# --- Local database dumps and backups ---------------------------------------
+*.dump
+care_db.dump
+care-backups
+*.rdb
+*.sql.gz
+
+# --- Documentation build output ---------------------------------------------
+docs/_build
+docs/source/generated
+site
+
+# --- Scratch and local working directories ----------------------------------
+output
+import
+.nix-data
+tmp
+.tmp*
+*.log

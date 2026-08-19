@@ -1,0 +1,62 @@
+# Production build context — allowlist.
+#
+# WHY THIS FILE EXISTS
+#
+# docker/prod.Dockerfile copies the build context twice (`COPY . $APP_HOME` in
+# the assets stage and again in the runtime stage). With a denylist, whatever
+# untracked files the builder happened to have went into the image: on the
+# machine ES-07 was built from, 180 MB of local scratch, and a developer's
+# generated `jwks.b64.txt` with it (unresolved-items.md P2).
+#
+# ADR-0008 section 36 requires the production build context to be explicitly
+# constrained and the artifact to be derived from known repository content. An
+# allowlist is the only form that achieves it: a denylist can only exclude the
+# categories someone thought of, and the failure mode of a missed category is a
+# silently different image.
+#
+# BuildKit reads this file because it is named after the Dockerfile. The root
+# .dockerignore applies to every other build in the repository.
+#
+# MAINTENANCE
+#
+# Adding a top-level file or directory that the running application needs means
+# adding it here. `care.utils.tests.test_delivery_invariants` fails if an entry
+# named here has disappeared from the repository, and
+# `infrastructure/scripts/verify-image.sh` fails if the built image is missing
+# the runtime assets, so a mistake in either direction surfaces in CI rather
+# than in production.
+
+# Exclude everything, then re-include what the application is made of.
+*
+
+# --- Python dependency manifests --------------------------------------------
+!Pipfile
+!Pipfile.lock
+
+# --- Plugin installation (ADR: plug_config.py / install_plugins.py) ---------
+!install_plugins.py
+!plug_config.py
+!plugs/
+
+# --- Django project ---------------------------------------------------------
+!manage.py
+!care/
+!config/
+
+# --- Runtime role entrypoints (ES-06) ---------------------------------------
+!scripts/
+
+# --- Translation sources; catalogues are compiled in the assets stage -------
+!locale/
+
+# --- Reference data read by management commands -----------------------------
+!data/
+
+# --- Re-exclusions inside the allowed trees ---------------------------------
+# Included by the directory rules above, but never part of an image.
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+locale/**/*.mo
+care/media/**
+!care/media/.gitkeep
