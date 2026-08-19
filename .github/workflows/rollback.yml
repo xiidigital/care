@@ -1,0 +1,89 @@
+# Roll an environment back to a previously published digest.
+#
+# APPLICATION ROLLBACK IS NOT DATABASE ROLLBACK (ADR-0008 sections 13, 27).
+# Migrations applied by the release being rolled back stay applied. This is safe
+# when the older artifact can run against the current schema and unsafe when it
+# cannot, and no automation can decide which of those is true — so this workflow
+# asks the operator to say the environment's name out loud and prints the warning
+# where they will read it.
+#
+# It rebuilds nothing. Rollback means redeploying an artifact that already
+# exists; rebuilding an old commit produces a different artifact and proves
+# nothing about the one that used to work (ADR-0008 section 27).
+#
+# It goes through the same deployment path as a normal release, including
+# initialization: the older artifact's own init contract is what should decide
+# whether the environment it is being put back into is usable.
+
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to roll back"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      image_digest:
+        description: "sha256:... of the digest to roll back to"
+        required: true
+        type: string
+      confirm_environment:
+        description: "Type the environment name again to confirm"
+        required: true
+        type: string
+      source_sha:
+        description: "Commit that produced the digest, if known"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  confirm:
+    name: Confirm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check the confirmation and the digest
+        run: |
+          if [ "${{ inputs.confirm_environment }}" != "${{ inputs.environment }}" ]; then
+            echo "::error::Confirmation '${{ inputs.confirm_environment }}' does not match '${{ inputs.environment }}'."
+            exit 1
+          fi
+          case "${{ inputs.image_digest }}" in
+            sha256:*) ;;
+            *)
+              echo "::error::'${{ inputs.image_digest }}' is not a digest. Rollback redeploys a published artifact (ES-08 section 56)."
+              exit 1
+              ;;
+          esac
+
+      - name: Summary
+        run: |
+          {
+            echo "### Rollback requested"
+            echo ""
+            echo "- environment: \`${{ inputs.environment }}\`"
+            echo "- digest: \`${{ inputs.image_digest }}\`"
+            echo "- requested by: ${{ github.actor }}"
+            echo ""
+            echo "**The database is not rolled back.** Migrations applied by the release being"
+            echo "rolled back remain applied. If the schema is incompatible with this artifact,"
+            echo "fix forward instead."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  rollback:
+    name: Roll back ${{ inputs.environment }}
+    needs: confirm
+    uses: ./.github/workflows/deploy-app.yml
+    with:
+      environment: ${{ inputs.environment }}
+      image_digest: ${{ inputs.image_digest }}
+      source_sha: ${{ inputs.source_sha }}
+      acceptance: false
+      smoke: true

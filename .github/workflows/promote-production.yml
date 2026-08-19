@@ -1,0 +1,126 @@
+# Promote an accepted digest to production.
+#
+# Promotion is not deployment (ADR-0008 section 14). This workflow selects an
+# artifact that has already satisfied staging acceptance and installs that exact
+# artifact — the same bytes, identified by the same digest. It has no build step
+# and cannot acquire one without failing the delivery-invariants test.
+#
+# THE GATE
+#
+# `workflow_dispatch` only: no pull request and no branch push reaches this
+# (ADR-0008 section 41). The eligibility job runs first, without credentials,
+# and prints the digest, the source commit and the staging acceptance record, so
+# an approver sees what they are approving before the protected `production`
+# environment asks them (ES-08 section 158). Production deployment then runs in
+# that environment, and GCP will only mint a production deployment credential for
+# a job that declares it.
+#
+# PRODUCTION MAY NOT EXIST
+#
+# ES-08 section 67 requires this to be implemented and reviewable without
+# creating a production environment. It is: with no `production` GitHub
+# Environment configured, the deployment job fails at the configuration check
+# with a message naming what is missing, and nothing is created
+# (ES-08 sections 107, 183).
+
+name: Promote to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "sha256:... of a digest that passed staging acceptance"
+        required: true
+        type: string
+      source_sha:
+        description: "Commit the digest was built from"
+        required: false
+        type: string
+      dry_run:
+        description: "Show the intended deployment and change nothing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # No credentials, no environment. Its only job is to establish that the
+  # requested artifact exists, was accepted in staging, and is what the operator
+  # thinks it is (ES-08 sections 44, 128).
+  eligibility:
+    name: Promotion eligibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # to read the staging acceptance record
+    steps:
+      - name: Reject anything that is not a digest
+        run: |
+          case "${{ inputs.image_digest }}" in
+            sha256:*) ;;
+            *)
+              echo "::error::'${{ inputs.image_digest }}' is not a digest."
+              echo "::error::Promotion selects an immutable artifact. It does not resolve a tag,"
+              echo "::error::and it does not build from a commit (ES-08 section 43)."
+              exit 1
+              ;;
+          esac
+
+      # The record the staging workflow wrote when acceptance passed. Its
+      # absence means this digest has not been accepted — which is a refusal,
+      # not a warning (ES-08 section 147).
+      - name: Require a staging acceptance record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          digest_hex="${{ inputs.image_digest }}"
+          digest_hex="${digest_hex#sha256:}"
+          name="staging-accepted-${digest_hex}"
+
+          found="$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=${name}&per_page=1" \
+            --jq '.total_count')"
+
+          if [ "${found:-0}" -lt 1 ]; then
+            echo "::error::No staging acceptance record for ${{ inputs.image_digest }}."
+            echo "::error::Deploy this digest to staging and let acceptance pass first."
+            echo "::error::A digest that failed acceptance is not made promotable by fixing"
+            echo "::error::the environment around it; rerun acceptance (ES-08 sections 147, 148)."
+            exit 1
+          fi
+          echo "found the staging acceptance record ${name}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Production promotion requested"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| digest | \`${{ inputs.image_digest }}\` |"
+            echo "| source commit | \`${{ inputs.source_sha || 'not supplied' }}\` |"
+            echo "| staging acceptance | recorded |"
+            echo "| requested by | ${{ github.actor }} |"
+            echo ""
+            echo "The production environment gate decides whether this proceeds."
+            echo "No image is built by this workflow: the artifact above is deployed as it is."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  production:
+    name: Production
+    needs: eligibility
+    uses: ./.github/workflows/deploy-app.yml
+    with:
+      environment: production
+      image_digest: ${{ inputs.image_digest }}
+      source_sha: ${{ inputs.source_sha }}
+      # Production gets non-destructive smoke verification, not the staging
+      # acceptance suite: that suite dispatches tasks, writes objects and
+      # exhausts a rate-limit counter, none of which belongs in production
+      # (ADR-0008 section 45, ES-08 section 50).
+      acceptance: false
+      smoke: true
+      dry_run: ${{ inputs.dry_run }}
