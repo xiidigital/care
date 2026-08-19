@@ -213,28 +213,41 @@ care_verify_job_digest() {
 
 # Cloud Run's own readiness, not an HTTP probe: a service can answer while an
 # older revision still serves traffic.
+#
+# Readiness is "the revision that was last created is the revision that is
+# serving". Two named fields, compared -- rather than the Ready condition, whose
+# projection through gcloud's --format filters is ambiguous: `type:Ready` matches
+# more than one condition and flattens to `True,True,True`, which is not
+# something to build a deployment gate on.
+# The revision Cloud Run last created and the one it is serving, in one call so
+# the pair cannot be read from two different moments.
+care_service_revisions() {
+  gcloud run services describe "$1" \
+    --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+    --format='value[separator="|"](status.latestCreatedRevisionName,status.latestReadyRevisionName)' 2>/dev/null || true
+}
+
 care_wait_service_ready() {
   local service="$1" timeout="${2:-600}"
   local deadline=$((SECONDS + timeout))
-  local status
+  local reported="" created="" ready=""
 
   while [ "$SECONDS" -lt "$deadline" ]; do
-    status="$(gcloud run services describe "$service" \
-      --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
-      --format='value(status.conditions.filter("type:Ready").extract("status").flatten())' 2>/dev/null || true)"
-    case "$status" in
-      True) care_ok "${service} is ready (revision $(care_service_revision "$service"))"; return 0 ;;
-      False)
-        care_fail "${service} reported Ready=False"
-        gcloud run services describe "$service" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
-          --format='value(status.conditions)' >&2 || true
-        return 1
-        ;;
-    esac
+    reported="$(care_service_revisions "$service")"
+    created="${reported%%|*}"
+    ready="${reported##*|}"
+
+    if [ -n "$created" ] && [ "$created" = "$ready" ]; then
+      care_ok "${service} is ready (revision ${ready})"
+      return 0
+    fi
     sleep 5
   done
 
-  care_fail "${service} did not become ready within ${timeout}s"
+  care_fail "${service} did not become ready within ${timeout}s: created '${created:-unknown}', serving '${ready:-none}'"
+  gcloud run services describe "$service" \
+    --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+    --format='value(status.conditions)' >&2 || true
   return 1
 }
 

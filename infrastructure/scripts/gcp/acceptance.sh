@@ -132,9 +132,22 @@ REPORTED_VERSION="$(printf '%s' "$VERSION_BODY" | sed -n 's/.*"version": "\([^"]
 if [ -n "$REPORTED_VERSION" ]; then
   care_ok "API reports version ${REPORTED_VERSION}"
   record "app-version" "pass" "$REPORTED_VERSION"
-  if [ -n "$SOURCE_SHA" ] && [ "$REPORTED_VERSION" != "$SOURCE_SHA" ]; then
-    care_fail "API reports version ${REPORTED_VERSION}, expected the source commit ${SOURCE_SHA}"
-    record "app-version-match" "FAIL" "$REPORTED_VERSION"
+  # Prefix either way, because APP_VERSION is a build argument and the two
+  # publication paths abbreviate differently: CI passes the full commit sha,
+  # publish-image.sh defaults to twelve characters. Both identify one commit.
+  if [ -n "$SOURCE_SHA" ]; then
+    case "$SOURCE_SHA" in
+      "$REPORTED_VERSION"*) care_ok "reported version identifies the expected commit" ;;
+      *)
+        case "$REPORTED_VERSION" in
+          "$SOURCE_SHA"*) care_ok "reported version identifies the expected commit" ;;
+          *)
+            care_fail "API reports version ${REPORTED_VERSION}, expected the source commit ${SOURCE_SHA}"
+            record "app-version-match" "FAIL" "$REPORTED_VERSION"
+            ;;
+        esac
+        ;;
+    esac
   fi
 else
   care_fail "API did not report a version"
@@ -170,8 +183,12 @@ else
   record "worker-private" "FAIL" "worker is reachable anonymously"
 fi
 
+# An explicit empty body, because Cloud Run's frontend answers a POST with no
+# Content-Length with 411 before Django ever sees the request -- which would
+# prove nothing about which routes this role registers.
 API_TASK_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
-  -X POST "${API_URL}/internal/tasks/execute/" || echo 000)"
+  -X POST -H 'Content-Type: application/json' --data '' \
+  "${API_URL}/internal/tasks/execute/" || echo 000)"
 if [ "$API_TASK_STATUS" = "404" ]; then
   care_ok "API does not serve the task endpoint (404)"
   record "route-isolation" "pass" "404"

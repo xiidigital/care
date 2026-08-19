@@ -92,8 +92,12 @@ fi
 care_phase "Worker isolation"
 care_verify_worker_private || true
 
+# An explicit empty body, because Cloud Run's frontend answers a POST with no
+# Content-Length with 411 before Django ever sees the request -- which would
+# prove nothing about which routes this role registers.
 API_TASK_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
-  -X POST "${API_URL}/internal/tasks/execute/" || echo 000)"
+  -X POST -H 'Content-Type: application/json' --data '' \
+  "${API_URL}/internal/tasks/execute/" || echo 000)"
 if [ "$API_TASK_STATUS" = "404" ]; then
   care_ok "API does not serve the task endpoint (404)"
 else
