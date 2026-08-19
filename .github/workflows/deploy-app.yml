@@ -1,0 +1,211 @@
+# The GCP deployment adapter, as a reusable workflow.
+#
+# One implementation of "install this digest into that environment", called by
+# the staging deployment, the production promotion and the rollback workflows.
+# Duplicating it per environment is how staging and production drift apart
+# (ES-08 section 101), and how a production deployment ends up with an ordering
+# nobody chose (ADR-0008 section 12).
+#
+# It contains no environment identifiers. Everything specific to a target —
+# project, region, service names, the identity to authenticate as — comes from
+# the GitHub Environment named in `environment`, which is also what the GCP
+# workload-identity binding trusts (ES-08 sections 19, 123).
+#
+# It contains no build step, and must not: what it deploys already exists
+# (ADR-0008 section 5).
+
+name: Deploy application (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub Environment to deploy through: staging, production, ..."
+        required: true
+        type: string
+      image_digest:
+        description: "sha256:... of an already-published image"
+        required: true
+        type: string
+      source_sha:
+        description: "Commit the digest was built from, for the record and for /app_version/"
+        required: false
+        type: string
+        default: ""
+      acceptance:
+        description: "Run full staging acceptance against the environment afterwards"
+        required: false
+        type: boolean
+        default: false
+      smoke:
+        description: "Run non-destructive smoke verification afterwards"
+        required: false
+        type: boolean
+        default: true
+      dry_run:
+        description: "Print the intended deployment and change nothing"
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      image_digest:
+        description: "Digest that was deployed"
+        value: ${{ jobs.deploy.outputs.image_digest }}
+      previous_digest:
+        description: "Digest the environment ran before this deployment: the rollback candidate"
+        value: ${{ jobs.deploy.outputs.previous_digest }}
+      api_url:
+        value: ${{ jobs.deploy.outputs.api_url }}
+
+permissions:
+  contents: read
+
+# One deployment per environment at a time, and never cancelled mid-flight.
+#
+# cancel-in-progress is false deliberately. Cancelling between the init Job and
+# the API rollout leaves an environment whose schema has moved and whose
+# services have not, and no log that says so plainly (ADR-0008 section 47,
+# ES-08 section 52). A queued deployment waits instead.
+concurrency:
+  group: care-deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.image_digest }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: ${{ inputs.environment }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    outputs:
+      image_digest: ${{ steps.deploy.outputs.image_digest }}
+      previous_digest: ${{ steps.deploy.outputs.previous_digest }}
+      api_url: ${{ steps.deploy.outputs.api_url }}
+
+    env:
+      CARE_ENVIRONMENT: ${{ vars.CARE_ENVIRONMENT || inputs.environment }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      CARE_API_SERVICE: ${{ vars.CARE_API_SERVICE }}
+      CARE_WORKER_SERVICE: ${{ vars.CARE_WORKER_SERVICE }}
+      CARE_INIT_JOB: ${{ vars.CARE_INIT_JOB }}
+      CARE_APP_JOBS: ${{ vars.CARE_APP_JOBS }}
+      CARE_ARTIFACT_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}
+      CARE_SOURCE_SHA: ${{ inputs.source_sha }}
+
+    steps:
+      # Repository-controlled code only, at a revision the repository owns. Not
+      # a pull request head: this job holds deployment credentials
+      # (ES-08 section 154).
+      - uses: actions/checkout@v5
+
+      - name: Require deployment configuration
+        run: |
+          missing=""
+          for name in CARE_ENVIRONMENT GCP_PROJECT_ID GCP_REGION; do
+            if [ -z "${!name}" ]; then
+              missing="${missing} ${name}"
+            fi
+          done
+          if [ -z "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
+            missing="${missing} GCP_WORKLOAD_IDENTITY_PROVIDER"
+          fi
+          if [ -z "${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}" ]; then
+            missing="${missing} GCP_DEPLOY_SERVICE_ACCOUNT"
+          fi
+          if [ -n "$missing" ]; then
+            echo "::error::The '${{ inputs.environment }}' environment is missing:${missing}."
+            echo "::error::A deployment target is configuration, not a default. Set these as"
+            echo "::error::GitHub environment variables; see docs/xii/architecture/08-continuous-delivery.md."
+            exit 1
+          fi
+
+      - name: Reject anything that is not a digest
+        run: |
+          case "${{ inputs.image_digest }}" in
+            sha256:*) ;;
+            *)
+              echo "::error::'${{ inputs.image_digest }}' is not a digest. Deployment selects an immutable artifact; a tag can be moved after it is read (ADR-0008 section 4)."
+              exit 1
+              ;;
+          esac
+
+      # google-github-actions/auth v3.0.0
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@140bb5113ffb6b65a7e9b937a81fa96cf5064462
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      # setup-gcloud v3.0.1
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@6a7c903a70c8625ed6700fa299f5ddb4ca6022e9
+
+      - name: Show the plan
+        if: inputs.dry_run
+        run: infrastructure/scripts/gcp/deploy.sh --digest "${{ inputs.image_digest }}" --dry-run
+
+      # init, then worker, then API, then Jobs — with the deployed digest read
+      # back from each. The ordering and the gates are in the script, not in
+      # YAML, so an operator can run exactly this by hand
+      # (ES-08 sections 109, 189).
+      - name: Deploy
+        id: deploy
+        if: ${{ !inputs.dry_run }}
+        run: infrastructure/scripts/gcp/deploy.sh --digest "${{ inputs.image_digest }}"
+
+      - name: Staging acceptance
+        if: ${{ inputs.acceptance && !inputs.dry_run }}
+        run: |
+          infrastructure/scripts/gcp/acceptance.sh \
+            --digest "${{ inputs.image_digest }}" \
+            ${{ inputs.source_sha && format('--source-sha {0}', inputs.source_sha) || '' }}
+
+      - name: Smoke verification
+        if: ${{ inputs.smoke && !inputs.acceptance && !inputs.dry_run }}
+        run: |
+          infrastructure/scripts/gcp/smoke.sh \
+            --digest "${{ inputs.image_digest }}" \
+            ${{ inputs.source_sha && format('--source-sha {0}', inputs.source_sha) || '' }}
+
+      # A durable, non-secret record of what this deployment did, kept as a
+      # workflow artifact rather than committed back to the branch
+      # (ES-08 sections 53, 186).
+      - name: Write the deployment record
+        if: ${{ always() && !inputs.dry_run }}
+        run: |
+          cat > deployment-record.json <<EOF
+          {
+            "schema": "care.deployment-record/1",
+            "environment": "${{ inputs.environment }}",
+            "project": "${{ vars.GCP_PROJECT_ID }}",
+            "region": "${{ vars.GCP_REGION }}",
+            "image_digest": "${{ inputs.image_digest }}",
+            "source_commit": "${{ inputs.source_sha }}",
+            "previous_digest": "${{ steps.deploy.outputs.previous_digest }}",
+            "init_execution": "${{ steps.deploy.outputs.init_execution }}",
+            "api_revision": "${{ steps.deploy.outputs.api_revision }}",
+            "worker_revision": "${{ steps.deploy.outputs.worker_revision }}",
+            "api_url": "${{ steps.deploy.outputs.api_url }}",
+            "acceptance_requested": ${{ inputs.acceptance }},
+            "result": "${{ job.status }}",
+            "workflow_run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "deployed_by": "${{ github.actor }}"
+          }
+          EOF
+          python3 -c "import json;json.load(open('deployment-record.json'))"
+          cat deployment-record.json
+
+      - name: Upload the deployment record
+        if: ${{ always() && !inputs.dry_run }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: deployment-${{ inputs.environment }}-${{ github.run_id }}
+          path: deployment-record.json
+          if-no-files-found: warn
+          retention-days: 90

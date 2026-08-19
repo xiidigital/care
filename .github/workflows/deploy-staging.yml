@@ -1,0 +1,124 @@
+# Deploy a published digest to staging, then accept it.
+#
+# Staging is where a release candidate becomes promotable (ADR-0008
+# section 15). This workflow does not build: it takes a digest that already
+# exists, installs it, and runs acceptance against the running environment. If
+# acceptance fails, no accepted record is written and the normal production
+# promotion will refuse that digest (ES-08 sections 41, 147).
+#
+# The initial staging policy (ES-08 section 105): staging deployment is
+# deliberate, not automatic on every push to the integration branch. The build
+# workflow publishes a candidate on every trusted push and says what its digest
+# is; a maintainer deploys it here, or asks the build to chain into this one with
+# `deploy_staging: true`. The reason is that this fork's staging is also the
+# environment release decisions are made against, and an automatic redeploy on
+# every commit would keep moving it under whoever is looking at it.
+
+name: Deploy to staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "sha256:... of a published image"
+        required: true
+        type: string
+      source_sha:
+        description: "Commit the digest was built from (optional; verified against /app_version/)"
+        required: false
+        type: string
+      dry_run:
+        description: "Show the intended deployment and change nothing"
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      image_digest:
+        required: true
+        type: string
+      source_sha:
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      image_digest:
+        value: ${{ jobs.staging.outputs.image_digest }}
+      previous_digest:
+        value: ${{ jobs.staging.outputs.previous_digest }}
+
+permissions:
+  contents: read
+
+jobs:
+  staging:
+    name: Staging
+    uses: ./.github/workflows/deploy-app.yml
+    with:
+      environment: staging
+      image_digest: ${{ inputs.image_digest }}
+      source_sha: ${{ inputs.source_sha }}
+      acceptance: true
+      smoke: false
+      dry_run: ${{ inputs.dry_run }}
+
+  # The accepted-artifact record (ADR-0008 section 42). It exists only when the
+  # deployment and its acceptance both succeeded, it names the exact digest, and
+  # the production promotion looks for it by name. It is written by the workflow
+  # from the values that were actually deployed, never typed by an operator
+  # (ES-08 section 127).
+  record-acceptance:
+    name: Record accepted digest
+    needs: staging
+    if: ${{ success() && !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Build the record
+        run: |
+          digest="${{ needs.staging.outputs.image_digest }}"
+          cat > staging-accepted.json <<EOF
+          {
+            "schema": "care.staging-accepted/1",
+            "environment": "staging",
+            "image_digest": "${digest}",
+            "source_commit": "${{ inputs.source_sha }}",
+            "previous_digest": "${{ needs.staging.outputs.previous_digest }}",
+            "acceptance": "passed",
+            "workflow_run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "accepted_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "accepted_by": "${{ github.actor }}"
+          }
+          EOF
+          python3 -c "import json;json.load(open('staging-accepted.json'))"
+          cat staging-accepted.json
+          echo "digest_hex=${digest#sha256:}" >> "$GITHUB_ENV"
+
+      # The name carries the digest, so promotion can find the record for one
+      # specific artifact without reading every run in the repository's history.
+      - name: Upload the accepted record
+        uses: actions/upload-artifact@v5
+        with:
+          name: staging-accepted-${{ env.digest_hex }}
+          path: staging-accepted.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Summary
+        run: |
+          {
+            echo "### Staging accepted"
+            echo ""
+            echo "- digest: \`${{ needs.staging.outputs.image_digest }}\`"
+            echo "- source commit: \`${{ inputs.source_sha }}\`"
+            echo "- rollback candidate (previous digest): \`${{ needs.staging.outputs.previous_digest }}\`"
+            echo ""
+            echo "This digest is now eligible for production promotion."
+            echo "Promotion is a separate, approved workflow and has not run."
+          } >> "$GITHUB_STEP_SUMMARY"
