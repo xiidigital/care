@@ -68,9 +68,20 @@ locals {
       # Payloads reference clinical data. Never true in a deployed environment.
       CARE_TASK_LOG_PAYLOAD = "false"
 
-      # Identifies the running build at /app_version/, which is how the
-      # same-image requirement is checked from outside (ES-07 section 101).
-      APP_VERSION = var.image
+      # APP_VERSION is deliberately absent.
+      #
+      # It used to be set here to var.image, and that was right while OpenTofu
+      # owned the image. It is wrong now: ES-08 gave the image field to
+      # application delivery, so var.image is the *initial* image, and an
+      # environment variable derived from it overrides the value the image
+      # carries and makes /app_version/ report the build that was deployed
+      # months ago. Verified against staging, where the endpoint reported the
+      # previous digest while all five resources were running the new one.
+      #
+      # The image reports itself instead: docker/prod.Dockerfile bakes
+      # APP_VERSION from a build argument, CI passes the commit, and
+      # /app_version/ is then a property of the artifact rather than of a tfvars
+      # entry (ES-08 sections 49, 143).
     },
     var.current_domain != "" ? { CURRENT_DOMAIN = var.current_domain } : {},
 

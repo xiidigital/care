@@ -163,8 +163,18 @@ resource "google_cloud_run_v2_service" "this" {
     # Deliberately narrow. Everything else about this service — scaling,
     # concurrency, ingress, secrets, service account, probes — stays owned by
     # OpenTofu and a plan still reports drift in any of it.
+    # `client` and `client_version` are Cloud Run's record of which tool last
+    # wrote the resource. Deploying with gcloud stamps "gcloud" on them, and
+    # OpenTofu — which never sets them — then proposes unsetting them on every
+    # subsequent plan. That is a permanent diff produced by nothing but the act
+    # of deploying, and ES-08 section 139 does not allow accepting one.
+    #
+    # They are provenance, not configuration: nothing about the running service
+    # depends on their value.
     ignore_changes = [
       template[0].containers[0].image,
+      client,
+      client_version,
     ]
 
     precondition {

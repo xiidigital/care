@@ -283,8 +283,13 @@ resource "google_cloud_run_v2_job" "jobs" {
     # 145). The init Job especially — a deployment must be able to point it at
     # the digest it is about to roll out without an infrastructure apply, and
     # the next plan must not propose putting it back.
+    # `client` and `client_version` for the same reason as the services: they
+    # record which tool last wrote the Job, and a deployment writes it with
+    # gcloud (ES-08 section 139).
     ignore_changes = [
       template[0].template[0].containers[0].image,
+      client,
+      client_version,
     ]
 
     precondition {
