@@ -347,3 +347,65 @@ class InvariantDetectionTests(SimpleTestCase):
         (self.root / "care" / "media").mkdir(exist_ok=True)
         (self.root / "care" / "media" / ".gitkeep").write_text("", encoding="utf-8")
         self.assertEqual(invariants.check_production_build_context(), [])
+
+    def test_non_executable_invoked_script_is_detected(self):
+        # The defect the first real GitHub Actions run found: a script the
+        # workflow runs directly, recorded 0644 because it was written on a
+        # filesystem with no permission bits. Nothing local notices; the runner
+        # answers "Permission denied".
+        self.write_workflow(
+            "deploy-app.yml",
+            """
+            name: Deploy application (reusable)
+            on:
+              workflow_call:
+            jobs:
+              deploy:
+                runs-on: ubuntu-24.04
+                timeout-minutes: 60
+                steps:
+                  - run: infrastructure/scripts/gcp/deploy.sh --digest sha256:abc
+            """,
+        )
+        with mock.patch.object(
+            invariants,
+            "_index_modes",
+            return_value={"infrastructure/scripts/gcp/deploy.sh": "100644"},
+        ):
+            findings = invariants.check_invoked_scripts_are_executable()
+        self.assertTrue(
+            any("mode 100644" in finding.detail for finding in findings),
+            findings,
+        )
+
+        with mock.patch.object(
+            invariants,
+            "_index_modes",
+            return_value={"infrastructure/scripts/gcp/deploy.sh": "100755"},
+        ):
+            self.assertEqual(invariants.check_invoked_scripts_are_executable(), [])
+
+    def test_untracked_invoked_script_is_detected(self):
+        self.write_workflow(
+            "ci.yml",
+            """
+            name: CARE CI
+            on:
+              pull_request:
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-24.04
+                timeout-minutes: 15
+                steps:
+                  - run: |
+                      infrastructure/scripts/verify-image.sh --image care:ci
+            """,
+        )
+        with mock.patch.object(invariants, "_index_modes", return_value={}):
+            findings = invariants.check_invoked_scripts_are_executable()
+        self.assertTrue(
+            any("is not tracked" in finding.detail for finding in findings),
+            findings,
+        )

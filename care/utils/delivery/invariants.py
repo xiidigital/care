@@ -22,6 +22,7 @@ in a job that has not built the application.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -679,6 +680,108 @@ def check_upstream_base_recorded() -> list[Finding]:
     return findings
 
 
+def _invoked_repository_scripts() -> dict[str, list[str]]:
+    """
+    Repository scripts a delivery workflow runs directly, by workflow.
+
+    Only direct invocations: a line whose first word -- ignoring a list marker
+    and a ``run:`` key -- is a path into ``infrastructure/scripts``.
+    ``bash script.sh`` is not one, and neither is a script named in a comment.
+    """
+    invoked: dict[str, list[str]] = {}
+    for path in _workflow_paths():
+        if not path.is_file():
+            continue
+        found: list[str] = []
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            match = re.match(
+                r"\s*(?:-\s+)?(?:run:\s*)?(infrastructure/scripts/[\w./-]+\.sh)\b", raw
+            )
+            if match and match.group(1) not in found:
+                found.append(match.group(1))
+        if found:
+            invoked[path.name] = found
+    return invoked
+
+
+def _index_modes() -> dict[str, str] | None:
+    """
+    File modes as git records them, or None when git cannot be consulted.
+
+    The index rather than the filesystem: a Windows checkout has no executable
+    bit to read, and what a Linux runner will materialise is exactly what git
+    stored (ES-08 section 133 found this the hard way).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-s", "--", "infrastructure/scripts"],  # noqa: S607
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+
+    # "<mode> <object> <stage>	<path>", one line per tracked file.
+    modes: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        mode, _, remainder = line.partition(" ")
+        _, tab, path = remainder.partition("	")
+        if tab and path:
+            modes[path.strip()] = mode
+    return modes
+
+
+def check_invoked_scripts_are_executable() -> list[Finding]:
+    """
+    A script a workflow runs directly is executable in the index
+    (ES-08 sections 132, 133).
+
+    A repository developed on a filesystem with no permission bits records new
+    scripts as 0644, and every workflow step that runs one then fails with
+    "Permission denied" on the first real GitHub Actions run — after the build
+    it gated. Nothing local catches it, so it is an invariant.
+    """
+    invoked = _invoked_repository_scripts()
+    if not invoked:
+        return []
+
+    modes = _index_modes()
+    if modes is None:
+        # No git: a developer running this from an export. The check protects CI,
+        # and CI always has the checkout it ran from.
+        return []
+
+    findings = []
+    for workflow, scripts in sorted(invoked.items()):
+        for script in scripts:
+            mode = modes.get(script)
+            if mode is None:
+                findings.append(
+                    Finding(
+                        where=f".github/workflows/{workflow}",
+                        rule="invoked scripts are executable",
+                        detail=f"{script} is invoked but is not tracked",
+                    )
+                )
+            elif not mode.endswith("755"):
+                findings.append(
+                    Finding(
+                        where=script,
+                        rule="invoked scripts are executable",
+                        detail=(
+                            f"mode {mode}, invoked directly by {workflow}; "
+                            "fix with `git update-index --chmod=+x`"
+                        ),
+                    )
+                )
+    return findings
+
+
 CHECKS = (
     check_workflows_exist,
     check_permissions_declared,
@@ -696,6 +799,7 @@ CHECKS = (
     check_production_build_context,
     check_root_dockerignore_categories,
     check_upstream_base_recorded,
+    check_invoked_scripts_are_executable,
 )
 
 
