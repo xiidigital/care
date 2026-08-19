@@ -1,0 +1,290 @@
+# Validation for the maintained CARE fork.
+#
+# Runs on every pull request and on trusted branch pushes, with no deployment
+# credentials of any kind (ADR-0008 section 3). Nothing in this workflow
+# authenticates to GCP, reads a secret payload, or touches a deployed
+# environment: everything here is provable from the repository, and everything
+# that is not provable from the repository belongs to staging acceptance.
+#
+# It is also callable, so the build workflow gates artifact publication on the
+# same checks rather than a subset of them (ADR-0008 section 100).
+#
+# The upstream workflows (test-pull-request.yml, linter.yml) still run and are
+# left alone; this one covers the fork's own architecture — the production image
+# and its contents, the Redis-free composition, and the delivery invariants.
+# OpenTofu validation is in infra-check.yml, which also runs on pull requests.
+
+name: CARE CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - gcp
+      - "feature/**"
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_call:
+
+# Read-only. A pull request from a fork runs this workflow, and a fork PR must
+# not be able to write anything (ES-08 sections 61, 62).
+permissions:
+  contents: read
+
+concurrency:
+  group: care-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Needed to work out which files a change touched.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      # The version .pre-commit-config.yaml pins, not the newest: the formatter's
+      # output differs between minor versions, and CI disagreeing with the hook a
+      # developer runs is worse than either choice on its own. Note that the
+      # Pipfile's dev-packages pin a different one (0.14.14); that discrepancy is
+      # recorded in the unresolved items inventory.
+      - name: Install ruff
+        run: pip install "ruff==0.14.8"
+
+      # Repository-wide, and it passes.
+      - name: ruff check
+        run: ruff check --output-format=github .
+
+      # Formatting is checked on what the change touched, which is what this
+      # repository already enforces: linter.yml runs pre-commit over the pull
+      # request's diff, and pre-commit's ruff-format hook only sees staged files.
+      # A repository-wide `ruff format --check` reports 73 files that predate any
+      # such gate, and reformatting them is exactly the unrelated cleanup ES-08
+      # section 201 forbids. Recorded as a finding rather than fixed here.
+      - name: ruff format on changed files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+          fi
+
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="$(git rev-parse "${head}^" 2>/dev/null || echo '')"
+          fi
+
+          if [ -z "$base" ]; then
+            echo "no comparable base commit; formatting not checked for this event"
+            exit 0
+          fi
+
+          files="$(git diff --name-only --diff-filter=ACM "$base" "$head" -- '*.py' | tr '\n' ' ')"
+          if [ -z "$files" ]; then
+            echo "no Python files changed"
+            exit 0
+          fi
+
+          echo "checking: $files"
+          # shellcheck disable=SC2086
+          ruff format --check $files
+
+  application-tests:
+    name: Application regression suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The development image and the compose stack the repository already
+      # defines, driven by the Makefile targets a developer uses. CI must run
+      # what a developer runs, or it is testing something else
+      # (ES-08 sections 9, 150).
+      - name: Build the development image
+        run: docker buildx build --file docker/dev.Dockerfile --tag care_local --load .
+
+      - name: Start the stack
+        run: |
+          docker compose -f docker-compose.yaml -f docker-compose.local.yaml up -d --wait || \
+            (docker compose -f docker-compose.yaml -f docker-compose.local.yaml logs && exit 1)
+
+      - name: Check for missing migrations
+        run: make checkmigration
+
+      - name: Load fixtures
+        run: make load-fixtures
+
+      - name: Run the test suite
+        run: make test
+
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yaml -f docker-compose.local.yaml logs --tail 200
+
+  redis-free-profile:
+    name: Redis-free composition
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the development image
+        run: docker buildx build --file docker/dev.Dockerfile --tag care_local --load .
+
+      - name: Start the stack
+        run: |
+          docker compose -f docker-compose.yaml -f docker-compose.local.yaml up -d --wait || \
+            (docker compose -f docker-compose.yaml -f docker-compose.local.yaml logs && exit 1)
+
+      # The managed profile's selections, on the modules that are sensitive to
+      # them. Not the whole suite a second time: ES-08 section 10 asks for
+      # representative coverage that would detect architectural coupling, not a
+      # cross-product. These are the modules that would fail if something made
+      # Redis unconditional again (ADR-0008 section 31).
+      - name: Backend-sensitive tests under the Redis-free selections
+        run: |
+          docker compose exec -T \
+            -e CARE_CACHE_BACKEND=postgres \
+            -e CARE_RATE_LIMIT_BACKEND=postgres \
+            -e CARE_TASK_BACKEND=cloud_tasks \
+            -e GCP_PROJECT_ID=ci \
+            -e GCP_TASKS_QUEUE=ci \
+            -e GCP_WORKER_URL=http://worker.invalid \
+            backend bash -c "python manage.py test \
+              care.utils.tests.test_cache_backends \
+              care.utils.tests.test_cache_config \
+              care.utils.tests.test_cache_health \
+              care.utils.tests.test_cache_isolation \
+              care.utils.tests.test_cloud_tasks_backend \
+              care.utils.tests.test_ratelimit_backend \
+              care.utils.tests.test_ratelimit_modes \
+              care.utils.tests.test_ratelimit_semantics \
+              care.utils.tests.test_runtime_roles \
+              care.utils.tests.test_runtime_assets \
+              care.emr.tests.test_task_runtime \
+              care.security.tests.test_sync_permissions_roles_concurrency \
+              --shuffle"
+
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yaml -f docker-compose.local.yaml logs --tail 200
+
+  production-image:
+    name: Production image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The P2 regression guard, run before the build so the build context
+      # contains it. An allowlisted context must not carry these into the image,
+      # and the check below proves it on every pull request instead of once
+      # (ES-08 section 20).
+      - name: Plant untracked scratch files in the build context
+        run: |
+          mkdir -p ci-build-context-probe/nested
+          head -c 2000000 /dev/urandom > ci-build-context-probe/nested/scratch.bin
+          echo "ci-build-context-probe" > ci-build-context-probe-marker.txt
+          printf 'not-a-real-key\n' > jwks.b64.txt
+          mkdir -p test-results && echo x > test-results/junit.xml
+
+      # The repository's production Dockerfile, unmodified, with the commit as
+      # APP_VERSION so the running application can report which source built it
+      # (ES-08 section 22).
+      - name: Build the production image
+        run: |
+          docker build \
+            --file docker/prod.Dockerfile \
+            --build-arg APP_VERSION=${{ github.sha }} \
+            --tag care:ci \
+            --load \
+            .
+
+      - name: Verify image contents
+        run: |
+          infrastructure/scripts/verify-image.sh \
+            --image care:ci \
+            --inventory-out image-inventory.txt
+
+      - name: Verify the build context excluded the planted files
+        run: |
+          for path in ci-build-context-probe ci-build-context-probe-marker.txt jwks.b64.txt test-results; do
+            if docker run --rm --entrypoint /bin/sh care:ci -c "test -e /app/${path}"; then
+              echo "::error::${path} entered the production image; the build context is not controlled"
+              exit 1
+            fi
+          done
+          echo "planted scratch files are absent from the image"
+
+      # Bounded, and without Cloud SQL, Redis, GCS, Cloud Tasks, Secret Manager
+      # or SMTP (ADR-0008 section 23, ES-08 section 99).
+      - name: Verify the image starts and serves
+        run: infrastructure/scripts/verify-image-startup.sh --image care:ci
+
+      - name: Upload the image inventory
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: production-image-inventory-${{ github.sha }}
+          path: image-inventory.txt
+          retention-days: 14
+
+  delivery-invariants:
+    name: Delivery invariants
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      # The invariants are asserted by a test in the repository's own suite so
+      # they are runnable locally and reviewable as code, not as a workflow step
+      # nobody can reproduce (ES-08 section 81). Only PyYAML is needed: the test
+      # reads workflow sources and never imports the application.
+      - name: Install PyYAML
+        run: pip install "PyYAML==6.0.2"
+
+      - name: Check delivery invariants
+        run: python -m care.utils.delivery.invariants
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # gitleaks compares commits, so it needs history rather than a
+          # single-commit checkout.
+          fetch-depth: 0
+
+      # Pinned to a commit, not a tag: this decides whether a credential
+      # finding blocks publication, and a moved tag would change what runs
+      # (ES-08 sections 102, 168). gitleaks-action v2.3.9.
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"

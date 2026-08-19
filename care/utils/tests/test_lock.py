@@ -3,12 +3,18 @@
 from django.db import connections, transaction
 from django.test import SimpleTestCase, TransactionTestCase
 
-from care.utils.lock import Lock, LockConfigurationError, ObjectLocked, advisory_lock_key
+from care.utils.lock import (
+    Lock,
+    LockConfigurationError,
+    advisory_lock_key,
+)
 
 
 class AdvisoryLockKeyTests(SimpleTestCase):
     def test_key_is_stable_and_namespaced(self):
-        self.assertEqual(advisory_lock_key("sync_permissions_roles"), -2588850649238380186)
+        self.assertEqual(
+            advisory_lock_key("sync_permissions_roles"), -2588850649238380186
+        )
         self.assertNotEqual(advisory_lock_key("a"), advisory_lock_key("b"))
 
     def test_requires_an_atomic_transaction(self):
@@ -51,7 +57,10 @@ class AdvisoryLockPostgreSQLTests(TransactionTestCase):
         self.assertTrue(self.try_other("commit-release"))
 
     def test_rollback_and_exception_release_lock(self):
-        with self.assertRaises(ValueError):
-            with transaction.atomic(), Lock("rollback-release"):
-                raise ValueError("exercise rollback")
+        with (
+            self.assertRaises(ValueError),
+            transaction.atomic(),
+            Lock("rollback-release"),
+        ):
+            raise ValueError("exercise rollback")
         self.assertTrue(self.try_other("rollback-release"))

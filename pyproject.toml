@@ -126,6 +126,15 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["E402", "F401"] # for imports
 "**/tests/**" = ["DTZ001"]
+# A command-line checker whose whole output is a report (ES-08 delivery
+# invariants). Routing it through logging would put a level and a logger name in
+# front of every line of a report a human reads in a CI log.
+"care/utils/delivery/invariants.py" = ["T201"]
+# A standalone rendering script, deliberately not part of a package: it is run
+# as a file and imports nothing from the repository. Import-order enforcement is
+# off for it too, so that adding a repository-wide `ruff check` gate (ES-08) did
+# not turn into reformatting a documentation tool that nothing imports.
+"docs/xii/access-control/render_roles_diagram.py" = ["INP001", "I001"]
 
 [tool.ruff.lint.flake8-builtins]
 builtins-ignorelist = ["id", "list", "filter"]
