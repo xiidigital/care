@@ -34,6 +34,12 @@
 # `gcp`. Typing your own branch into `source_ref` gets you a failed run, not a
 # publication credential.
 #
+# Building does not deploy. Staging is `delivery-deploy-staging.yml`, dispatched
+# with the digest this run publishes — a separate entry point with separate
+# credentials, which is what ADR-0008 section 1.2 asks for. It also keeps the
+# reusable-workflow chain inside GitHub's four-level nesting limit; chaining a
+# deployment onto a build from a shim exceeds it and fails at startup.
+#
 # ORDERING: this shim resolves `@gcp`, so the ES-08 delivery implementation must
 # be merged to `gcp` before it can run. Until then a dispatch fails immediately
 # with "workflow was not found", which is the correct and visible failure.
@@ -48,11 +54,6 @@ on:
         required: true
         type: string
         default: "gcp"
-      deploy_staging:
-        description: "Deploy the published digest to staging when the build succeeds"
-        required: false
-        type: boolean
-        default: false
 
 # Nothing here needs more. The credential is requested by the implementation,
 # in the job that holds it, after source trust has been established.
@@ -65,4 +66,3 @@ jobs:
     uses: xiidigital/care/.github/workflows/build-image.yml@gcp
     with:
       source_ref: ${{ inputs.source_ref }}
-      deploy_staging: ${{ inputs.deploy_staging }}
