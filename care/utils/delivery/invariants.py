@@ -39,7 +39,6 @@ WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 #: another deployment topology, and rewriting them is not ES-08's job.
 DELIVERY_WORKFLOWS = (
     "ci.yml",
-    "verify-source.yml",
     "build-image.yml",
     "deploy-app.yml",
     "deploy-staging.yml",
@@ -992,9 +991,20 @@ def check_storage_backend_selection_is_supported() -> list[Finding]:
     return findings
 
 
-#: The reusable workflow that decides whether a revision belongs to the trusted
-#: release lineage. Named here because the rule below is about reaching it.
-SOURCE_TRUST_WORKFLOW = "verify-source.yml"
+#: The composite action that decides whether a revision belongs to the trusted
+#: release lineage. A composite action rather than a reusable workflow because
+#: GitHub limits reusable-workflow nesting depth, and the delivery chain already
+#: spends its levels on the control plane and on the build/deploy split -- a
+#: fourth level fails at startup with no log to say why.
+SOURCE_TRUST_ACTION = ".github/actions/verify-source"
+
+
+def _is_trust_gate(job: dict) -> bool:
+    """Whether a job runs the source-trust action."""
+    for step in job.get("steps") or []:
+        if isinstance(step, dict) and SOURCE_TRUST_ACTION in str(step.get("uses", "")):
+            return True
+    return False
 
 
 def _job_uses(job: dict) -> str:
@@ -1010,9 +1020,7 @@ def _needs(job: dict) -> list[str]:
 
 def _trust_jobs(jobs: dict) -> set[str]:
     """Jobs in one workflow that are the source-trust gate, or depend on it."""
-    direct = {
-        name for name, job in jobs.items() if SOURCE_TRUST_WORKFLOW in _job_uses(job)
-    }
+    direct = {name for name, job in jobs.items() if _is_trust_gate(job)}
     reached = set(direct)
     changed = True
     while changed:
@@ -1080,9 +1088,9 @@ def check_credentialed_jobs_verify_source_trust() -> list[Finding]:
             continue
         where = str(path.relative_to(REPO_ROOT)).replace("\\", "/")
 
-        if path.name == SOURCE_TRUST_WORKFLOW:
-            findings.extend(_gate_findings(where, jobs))
-            continue
+        findings.extend(
+            _gate_findings(where, {n: j for n, j in jobs.items() if _is_trust_gate(j)})
+        )
 
         trusted = _trust_jobs(jobs)
         for name, job in jobs.items():
@@ -1097,7 +1105,7 @@ def check_credentialed_jobs_verify_source_trust() -> list[Finding]:
                         rule="credentialed jobs verify source trust",
                         detail=(
                             f"job '{name}' requests id-token: write without "
-                            f"depending on a job that uses {SOURCE_TRUST_WORKFLOW}"
+                            f"depending on a job that runs {SOURCE_TRUST_ACTION}"
                         ),
                     )
                 )

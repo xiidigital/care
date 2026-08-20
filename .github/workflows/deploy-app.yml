@@ -86,9 +86,29 @@ jobs:
   # release lineage (ES-08 D10, Part D).
   verify:
     name: Source trust
-    uses: xiidigital/care/.github/workflows/verify-source.yml@gcp
-    with:
-      source_ref: ${{ inputs.source_ref }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    # No id-token, and no environment. This job is the gate, not a consumer:
+    # a gate able to authorize itself is not one.
+    permissions:
+      contents: read
+
+    outputs:
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+
+    steps:
+      # Full history: ancestry cannot be decided from a shallow clone, and a
+      # shallow clone fails *open* if the check is written carelessly.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: verify
+        uses: xiidigital/care/.github/actions/verify-source@gcp
+        with:
+          source_ref: ${{ inputs.source_ref }}
 
   deploy:
     name: Deploy ${{ inputs.image_digest }}

@@ -214,7 +214,7 @@ class InvariantDetectionTests(SimpleTestCase):
               contents: read
             jobs:
               production:
-                uses: ./.github/workflows/deploy-app.yml
+                uses: xiidigital/care/.github/workflows/deploy-app.yml@gcp
                 with:
                   environment: production
             """,
@@ -487,32 +487,6 @@ class InvariantDetectionTests(SimpleTestCase):
         # made the built revision a workflow input. An input is
         # attacker-reachable, so a job holding a credential must not run source
         # the trust gate has not cleared.
-        self.write_workflow(
-            "verify-source.yml",
-            """
-            name: Verify source trust
-            on:
-              workflow_call:
-                inputs:
-                  source_ref:
-                    required: true
-                    type: string
-                outputs:
-                  source_sha:
-                    value: ${{ jobs.verify.outputs.source_sha }}
-            permissions:
-              contents: read
-            jobs:
-              verify:
-                runs-on: ubuntu-24.04
-                timeout-minutes: 10
-                permissions:
-                  contents: read
-                steps:
-                  - run: echo verify
-            """,
-        )
-
         def build_image(needs, checkout):
             self.write_workflow(
                 "build-image.yml",
@@ -524,9 +498,18 @@ class InvariantDetectionTests(SimpleTestCase):
                   contents: read
                 jobs:
                   verify:
-                    uses: ./.github/workflows/verify-source.yml
-                    with:
-                      source_ref: gcp
+                    runs-on: ubuntu-24.04
+                    timeout-minutes: 10
+                    permissions:
+                      contents: read
+                    outputs:
+                      source_sha: ${{{{ steps.verify.outputs.source_sha }}}}
+                    steps:
+                      - uses: actions/checkout@v5
+                      - id: verify
+                        uses: xiidigital/care/.github/actions/verify-source@gcp
+                        with:
+                          source_ref: gcp
                   publish:
                     {needs}
                     runs-on: ubuntu-24.04
@@ -566,11 +549,11 @@ class InvariantDetectionTests(SimpleTestCase):
 
     def test_source_trust_gate_holding_a_credential_is_detected(self):
         self.write_workflow(
-            "verify-source.yml",
+            "build-image.yml",
             """
-            name: Verify source trust
+            name: Build
             on:
-              workflow_call:
+              workflow_dispatch:
             permissions:
               contents: read
             jobs:
@@ -582,7 +565,7 @@ class InvariantDetectionTests(SimpleTestCase):
                   contents: read
                   id-token: write
                 steps:
-                  - run: echo verify
+                  - uses: xiidigital/care/.github/actions/verify-source@gcp
             """,
         )
         findings = invariants.check_credentialed_jobs_verify_source_trust()
@@ -626,7 +609,7 @@ class InvariantDetectionTests(SimpleTestCase):
               contents: read
             jobs:
               staging:
-                uses: ./.github/workflows/deploy-nowhere.yml
+                uses: xiidigital/care/.github/workflows/deploy-nowhere.yml@gcp
                 with:
                   image_digest: sha256:abc
             """,
@@ -649,7 +632,7 @@ class InvariantDetectionTests(SimpleTestCase):
               contents: read
             jobs:
               staging:
-                uses: ./.github/workflows/deploy-app.yml
+                uses: xiidigital/care/.github/workflows/deploy-app.yml@gcp
             """,
         )
         self.assertTrue(
@@ -670,7 +653,7 @@ class InvariantDetectionTests(SimpleTestCase):
               contents: read
             jobs:
               staging:
-                uses: ./.github/workflows/deploy-app.yml
+                uses: xiidigital/care/.github/workflows/deploy-app.yml@gcp
                 with:
                   image_digest: sha256:abc
                   imgae_digest: sha256:abc
