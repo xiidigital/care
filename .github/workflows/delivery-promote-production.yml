@@ -47,6 +47,10 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      # The eligibility job reads the staging acceptance record — the artifact
+      # that makes a digest promotable — and a caller grants nothing it does not
+      # name, so this is required for the run to start at all.
+      actions: read
     uses: xiidigital/care/.github/workflows/promote-production.yml@gcp
     with:
       image_digest: ${{ inputs.image_digest }}
