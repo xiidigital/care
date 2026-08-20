@@ -482,6 +482,207 @@ class InvariantDetectionTests(SimpleTestCase):
                 invariants.check_storage_backend_selection_is_supported(), []
             )
 
+    def test_credentialed_job_without_source_trust_is_detected(self):
+        # D10 moved the delivery entry points onto the default branch, which
+        # made the built revision a workflow input. An input is
+        # attacker-reachable, so a job holding a credential must not run source
+        # the trust gate has not cleared.
+        self.write_workflow(
+            "verify-source.yml",
+            """
+            name: Verify source trust
+            on:
+              workflow_call:
+                inputs:
+                  source_ref:
+                    required: true
+                    type: string
+                outputs:
+                  source_sha:
+                    value: ${{ jobs.verify.outputs.source_sha }}
+            permissions:
+              contents: read
+            jobs:
+              verify:
+                runs-on: ubuntu-24.04
+                timeout-minutes: 10
+                permissions:
+                  contents: read
+                steps:
+                  - run: echo verify
+            """,
+        )
+
+        def build_image(needs, checkout):
+            self.write_workflow(
+                "build-image.yml",
+                f"""
+                name: Build
+                on:
+                  workflow_dispatch:
+                permissions:
+                  contents: read
+                jobs:
+                  verify:
+                    uses: ./.github/workflows/verify-source.yml
+                    with:
+                      source_ref: gcp
+                  publish:
+                    {needs}
+                    runs-on: ubuntu-24.04
+                    timeout-minutes: 60
+                    environment: artifact-publication
+                    permissions:
+                      contents: read
+                      id-token: write
+                    steps:
+                      - uses: actions/checkout@v5
+                {checkout}
+                """,
+            )
+
+        # No path to the gate at all.
+        build_image("runs-on-placeholder: x", "")
+        findings = invariants.check_credentialed_jobs_verify_source_trust()
+        self.assertTrue(
+            any("without depending on a job" in f.detail for f in findings), findings
+        )
+
+        # Depends on the gate, but checks out whatever the default ref is.
+        build_image("needs: verify", "")
+        findings = invariants.check_credentialed_jobs_verify_source_trust()
+        self.assertTrue(
+            any("instead of the verified source_sha" in f.detail for f in findings),
+            findings,
+        )
+
+        # Correct: depends on the gate and checks out the SHA it resolved.
+        build_image(
+            "needs: verify",
+            "        with:\n"
+            "                          ref: ${{ needs.verify.outputs.source_sha }}",
+        )
+        self.assertEqual(invariants.check_credentialed_jobs_verify_source_trust(), [])
+
+    def test_source_trust_gate_holding_a_credential_is_detected(self):
+        self.write_workflow(
+            "verify-source.yml",
+            """
+            name: Verify source trust
+            on:
+              workflow_call:
+            permissions:
+              contents: read
+            jobs:
+              verify:
+                runs-on: ubuntu-24.04
+                timeout-minutes: 10
+                environment: staging
+                permissions:
+                  contents: read
+                  id-token: write
+                steps:
+                  - run: echo verify
+            """,
+        )
+        findings = invariants.check_credentialed_jobs_verify_source_trust()
+        self.assertTrue(
+            any("requests id-token: write" in f.detail for f in findings), findings
+        )
+        self.assertTrue(
+            any("declares an environment" in f.detail for f in findings), findings
+        )
+
+    def test_unresolvable_reusable_workflow_call_is_detected(self):
+        self.write_workflow(
+            "deploy-app.yml",
+            """
+            name: Deploy application (reusable)
+            on:
+              workflow_call:
+                inputs:
+                  image_digest:
+                    required: true
+                    type: string
+            permissions:
+              contents: read
+            jobs:
+              deploy:
+                runs-on: ubuntu-24.04
+                timeout-minutes: 60
+                steps:
+                  - run: echo deploy
+            """,
+        )
+
+        # Target that does not exist.
+        self.write_workflow(
+            "deploy-staging.yml",
+            """
+            name: Deploy to staging
+            on:
+              workflow_dispatch:
+            permissions:
+              contents: read
+            jobs:
+              staging:
+                uses: ./.github/workflows/deploy-nowhere.yml
+                with:
+                  image_digest: sha256:abc
+            """,
+        )
+        self.assertTrue(
+            any(
+                "which does not exist" in f.detail
+                for f in invariants.check_reusable_workflow_calls_resolve()
+            )
+        )
+
+        # Required input omitted.
+        self.write_workflow(
+            "deploy-staging.yml",
+            """
+            name: Deploy to staging
+            on:
+              workflow_dispatch:
+            permissions:
+              contents: read
+            jobs:
+              staging:
+                uses: ./.github/workflows/deploy-app.yml
+            """,
+        )
+        self.assertTrue(
+            any(
+                "omits 'image_digest'" in f.detail
+                for f in invariants.check_reusable_workflow_calls_resolve()
+            )
+        )
+
+        # Input the callee does not declare.
+        self.write_workflow(
+            "deploy-staging.yml",
+            """
+            name: Deploy to staging
+            on:
+              workflow_dispatch:
+            permissions:
+              contents: read
+            jobs:
+              staging:
+                uses: ./.github/workflows/deploy-app.yml
+                with:
+                  image_digest: sha256:abc
+                  imgae_digest: sha256:abc
+            """,
+        )
+        self.assertTrue(
+            any(
+                "does not declare" in f.detail
+                for f in invariants.check_reusable_workflow_calls_resolve()
+            )
+        )
+
     def test_untracked_invoked_script_is_detected(self):
         self.write_workflow(
             "ci.yml",

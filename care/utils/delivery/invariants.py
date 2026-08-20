@@ -39,6 +39,7 @@ WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 #: another deployment topology, and rewriting them is not ES-08's job.
 DELIVERY_WORKFLOWS = (
     "ci.yml",
+    "verify-source.yml",
     "build-image.yml",
     "deploy-app.yml",
     "deploy-staging.yml",
@@ -972,6 +973,219 @@ def check_storage_backend_selection_is_supported() -> list[Finding]:
     return findings
 
 
+#: The reusable workflow that decides whether a revision belongs to the trusted
+#: release lineage. Named here because the rule below is about reaching it.
+SOURCE_TRUST_WORKFLOW = "verify-source.yml"
+
+
+def _job_uses(job: dict) -> str:
+    return job.get("uses", "") if isinstance(job, dict) else ""
+
+
+def _needs(job: dict) -> list[str]:
+    needs = job.get("needs") if isinstance(job, dict) else None
+    if needs is None:
+        return []
+    return [needs] if isinstance(needs, str) else list(needs)
+
+
+def _trust_jobs(jobs: dict) -> set[str]:
+    """Jobs in one workflow that are the source-trust gate, or depend on it."""
+    direct = {
+        name for name, job in jobs.items() if SOURCE_TRUST_WORKFLOW in _job_uses(job)
+    }
+    reached = set(direct)
+    changed = True
+    while changed:
+        changed = False
+        for name, job in jobs.items():
+            if name in reached:
+                continue
+            if any(dep in reached for dep in _needs(job)):
+                reached.add(name)
+                changed = True
+    return reached
+
+
+def _gate_findings(where: str, jobs: dict) -> list[Finding]:
+    """The trust gate must hold nothing it could use to authorize itself."""
+    findings = []
+    for name, job in jobs.items():
+        perms = job.get("permissions") or {}
+        if isinstance(perms, dict) and perms.get("id-token") == "write":
+            findings.append(
+                Finding(
+                    where=where,
+                    rule="source trust gate holds no credential",
+                    detail=f"job '{name}' requests id-token: write",
+                )
+            )
+        if job.get("environment"):
+            findings.append(
+                Finding(
+                    where=where,
+                    rule="source trust gate holds no credential",
+                    detail=f"job '{name}' declares an environment",
+                )
+            )
+    return findings
+
+
+def check_credentialed_jobs_verify_source_trust() -> list[Finding]:
+    """
+    No job holding a deployment credential runs unverified source
+    (ES-08 D10, ADR-0008 section 5a).
+
+    Moving the delivery entry points onto the default branch so GitHub would
+    register them (D10) made the built revision a workflow *input*. An input is
+    attacker-reachable: anyone who can dispatch can type a ref. Two properties
+    keep that from being a privilege escalation, and both are checked here.
+
+    First, every job that requests ``id-token: write`` must depend, directly or
+    transitively, on the job that proves the revision is reachable from the
+    release lineage. Second, every checkout in such a job must name the SHA that
+    job resolved -- not the ref that was typed, and not the workflow's own
+    commit. Re-resolving a ref after it has been checked is a
+    time-of-check/time-of-use gap: a branch can move in between.
+
+    The gate itself must hold no credential, or it could be made to authorize
+    itself.
+    """
+    findings = []
+    for path in _workflow_paths():
+        if not path.is_file():
+            continue
+        document = _load(path)
+        jobs = _jobs(document)
+        if not jobs:
+            continue
+        where = str(path.relative_to(REPO_ROOT)).replace("\\", "/")
+
+        if path.name == SOURCE_TRUST_WORKFLOW:
+            findings.extend(_gate_findings(where, jobs))
+            continue
+
+        trusted = _trust_jobs(jobs)
+        for name, job in jobs.items():
+            perms = job.get("permissions") or {}
+            if not (isinstance(perms, dict) and perms.get("id-token") == "write"):
+                continue
+
+            if name not in trusted:
+                findings.append(
+                    Finding(
+                        where=where,
+                        rule="credentialed jobs verify source trust",
+                        detail=(
+                            f"job '{name}' requests id-token: write without "
+                            f"depending on a job that uses {SOURCE_TRUST_WORKFLOW}"
+                        ),
+                    )
+                )
+                continue
+
+            for step in job.get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                if "actions/checkout" not in str(step.get("uses", "")):
+                    continue
+                ref = str((step.get("with") or {}).get("ref", ""))
+                if "outputs.source_sha" not in ref:
+                    findings.append(
+                        Finding(
+                            where=where,
+                            rule="credentialed jobs verify source trust",
+                            detail=(
+                                f"job '{name}' checks out "
+                                + (f"ref '{ref}'" if ref else "the default ref")
+                                + " instead of the verified source_sha"
+                            ),
+                        )
+                    )
+    return findings
+
+
+def check_reusable_workflow_calls_resolve() -> list[Finding]:
+    """
+    Every reusable-workflow call names a target that exists and accepts what it
+    is given (ES-08 D10 Part F).
+
+    A local ``uses: ./.github/workflows/x.yml`` resolves against the *caller's*
+    commit, not against whatever branch the implementation happens to live on.
+    Once the entry points live on the default branch and the implementation on
+    the release lineage, that is easy to get wrong in a way no local check
+    notices and GitHub reports only at dispatch time, after an operator has
+    already asked for a deployment.
+
+    Checked here: the target exists, it declares ``workflow_call``, every key
+    passed in ``with:`` is an input it declares, and every input it marks
+    required is supplied.
+    """
+    findings = []
+    for path in _workflow_paths():
+        if not path.is_file():
+            continue
+        document = _load(path)
+        jobs = _jobs(document)
+        if not jobs:
+            continue
+        where = str(path.relative_to(REPO_ROOT)).replace("\\", "/")
+
+        for name, job in jobs.items():
+            uses = _job_uses(job)
+            if not uses.startswith("./.github/workflows/"):
+                continue
+
+            # removeprefix, not lstrip: lstrip strips a character *set*,
+            # which eats the dot in ".github" as well.
+            target = REPO_ROOT / uses.removeprefix("./")
+            if not target.is_file():
+                findings.append(
+                    Finding(
+                        where=where,
+                        rule="reusable workflow calls resolve",
+                        detail=f"job '{name}' calls '{uses}', which does not exist",
+                    )
+                )
+                continue
+
+            called = _load(target)
+            # PyYAML reads a bare `on:` key as the boolean True.
+            triggers = called.get("on", called.get(True)) or {}
+            if not isinstance(triggers, dict) or "workflow_call" not in triggers:
+                findings.append(
+                    Finding(
+                        where=where,
+                        rule="reusable workflow calls resolve",
+                        detail=f"job '{name}' calls '{uses}', which has no workflow_call trigger",
+                    )
+                )
+                continue
+
+            declared = (triggers.get("workflow_call") or {}).get("inputs") or {}
+            supplied = job.get("with") or {}
+
+            for key in supplied:
+                if key not in declared:
+                    findings.append(
+                        Finding(
+                            where=where,
+                            rule="reusable workflow calls resolve",
+                            detail=f"job '{name}' passes '{key}', which {uses} does not declare",
+                        )
+                    )
+            for key, spec in declared.items():
+                if (spec or {}).get("required") and key not in supplied:
+                    findings.append(
+                        Finding(
+                            where=where,
+                            rule="reusable workflow calls resolve",
+                            detail=f"job '{name}' omits '{key}', which {uses} requires",
+                        )
+                    )
+    return findings
+
+
 CHECKS = (
     check_workflows_exist,
     check_permissions_declared,
@@ -993,6 +1207,8 @@ CHECKS = (
     check_cloud_tasks_selection_is_complete,
     check_role_startup_supplies_database_variables,
     check_storage_backend_selection_is_supported,
+    check_credentialed_jobs_verify_source_trust,
+    check_reusable_workflow_calls_resolve,
 )
 
 
