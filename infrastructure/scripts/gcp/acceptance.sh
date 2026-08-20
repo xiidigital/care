@@ -380,9 +380,24 @@ fi
 if [ "$SKIP_STORAGE" -eq 0 ]; then
   care_phase "Cloud Storage"
   BUCKET="${CARE_ACCEPTANCE_BUCKET:-}"
+
+  # Ask the deployment which bucket it uses, rather than searching the project
+  # for one. The name is on the running service (config.tf sets
+  # CARE_FACILITY_STORAGE_BUCKET), and reading a service description is a
+  # permission this identity already exercises for every digest and composition
+  # check above. Listing buckets project-wide is a broader grant, and ES-08
+  # section 117 says not to widen an identity to make a check pass.
+  if [ -z "$BUCKET" ]; then
+    BUCKET="$(read_env "$CARE_API_SERVICE" "CARE_FACILITY_STORAGE_BUCKET")"
+  fi
+
+  # Last resort, and explicitly tolerant of failure. Without `|| true` a denied
+  # or empty list aborts the whole script under `set -euo pipefail`, before the
+  # care_fail below can report anything -- which is how a real run ended at
+  # "==> Cloud Storage" with exit 1 and no message.
   if [ -z "$BUCKET" ]; then
     BUCKET="$(gcloud storage buckets list --project "$GCP_PROJECT_ID" \
-      --filter="name:${CARE_NAME_PREFIX}-facility" --format='value(name)' 2>/dev/null | head -1)"
+      --filter="name:${CARE_NAME_PREFIX}-facility" --format='value(name)' 2>/dev/null | head -1 || true)"
   fi
 
   if [ -z "$BUCKET" ]; then
