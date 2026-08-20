@@ -2475,127 +2475,90 @@ because "the suite passes" is a staging precondition and it does not.
 Recorded while implementing automated CI and controlled delivery. P2 is closed
 above; these are what ES-08 found or deliberately left.
 
-### D1. Real GitHub Actions execution — CI closed, delivery still blocked
+### D1. Real GitHub Actions execution — RESOLVED
 
-**Status:** Partly closed. **Recorded 2026-08-19, updated 2026-08-20.**
-**Severity:** blocks ES-08 section 134.
+**Status:** Closed 2026-08-20.
 
-**Closed.** ES-08 section 133 asks for a real GitHub Actions run of the common
-CI/build validation path. It has happened, and it is green:
+ES-08 sections 133 and 134 both have real evidence. The complete chain executed
+through GitHub Actions, dispatched from the default-branch control plane:
+
+| stage | run | result |
+|---|---|---|
+| build and publish | [32406259063](https://github.com/xiidigital/care/actions/runs/32406259063) | success |
+| staging deployment and acceptance | [32411111409](https://github.com/xiidigital/care/actions/runs/32411111409) | success |
+| promotion eligibility | [32412389243](https://github.com/xiidigital/care/actions/runs/32412389243) | eligible, held at the production gate |
 
 | | |
 |---|---|
-| workflow | `CARE CI` (`.github/workflows/ci.yml`) |
-| run | [32340865564](https://github.com/xiidigital/care/actions/runs/32340865564) |
-| source commit | `efa1d552fd62244ab89142ebecc311e47abd2e6f` |
-| runner | `ubuntu-24.04`, GitHub-hosted |
-| result | 6/6 jobs success |
+| source commit | `bd45a537432ce6e9a7f1752de5fbb41fe9fe50b2` |
+| digest | `sha256:90c634ef669d6f0fe45c7757892b1de0b0ef49a8e24a592f4cd54189fc513c2d` |
+| upstream base | `81149a358c22ff8cf6a3a512f7cdddc136de0b6f` (ohcnetwork/care) |
+| init execution | `care-staging-init-ks7xw` |
+| worker revision | `care-staging-worker-00007-qrr` |
+| API revision | `care-staging-api-00006-49r` |
 
-Jobs: Format and lint, Application regression suite, Production image, Redis-free
-composition, Delivery invariants, Secret scan. The workflow syntax resolves, the
-job graph runs, the untrusted-PR path carries `contents: read` and no id-token,
-and the secret scan gates as designed.
+Staging acceptance passed every check, and the deployed `/app_version/` reports
+`bd45a537…` — the commit that built the digest.
 
-Three earlier runs failed
-([32301845452](https://github.com/xiidigital/care/actions/runs/32301845452),
-[32303955622](https://github.com/xiidigital/care/actions/runs/32303955622),
-[32305734815](https://github.com/xiidigital/care/actions/runs/32305734815)) on
-defects local execution could not find. See D11.
+### D2. Workload Identity Federation — RESOLVED
 
-**Still blocked.** Section 134 requires a real trusted workflow deploying a
-CI-built digest to staging. No image has been published by GitHub Actions,
-because the workflow that publishes one cannot be started. See D10.
+**Status:** Closed 2026-08-20.
 
-**What is therefore still unproven.** OIDC exchange against GCP, environment
-protection gating a credential, reusable-workflow composition
-(`build-image.yml` -> `ci.yml`, `deploy-staging.yml` -> `deploy-app.yml`),
-digest handoff between workflows, the accepted-digest record, and staging
-acceptance run from CI. Every one of those is a property of a run that has not
-occurred.
+The exchange has been observed, repeatedly, in real runs. No service-account key
+exists or was created; `google-github-actions/auth` writes a short-lived
+credential derived from the run's OIDC assertion and removes it at job end
+("Removed exported credentials at ..." appears in every run).
 
-### D2. Workload Identity Federation is declared, and no exchange has been observed
+| | |
+|---|---|
+| provider | `projects/272331402273/locations/global/workloadIdentityPools/care-github/providers/github` |
+| publication identity | `care-ci-publisher@project-990c4414-a33c-47f2-9f4.iam.gserviceaccount.com` |
+| staging deployment identity | `care-deploy-staging@project-990c4414-a33c-47f2-9f4.iam.gserviceaccount.com` |
+| infrastructure identity | `care-infra@project-990c4414-a33c-47f2-9f4.iam.gserviceaccount.com` |
 
-**Status:** Open. **Recorded 2026-08-19, updated 2026-08-20.** **Severity:**
-blocks every credentialed workflow.
+Each was obtained by the job declaring the matching GitHub Environment, and by
+no other. The publication identity pushed to Artifact Registry; the staging
+identity deployed init, worker, API and both scheduled Jobs and ran acceptance.
 
-The pool, the provider, the four automation identities and their claim
-restrictions are declared in `modules/github-oidc` and instantiated by the
-bootstrap root behind `github_repository`. All four roots validate.
+The bootstrap had already been applied by an operator before this closeout; that
+is what D12 describes, and it remains the one step CI cannot perform for itself.
 
-The repository now carries variables that name a provider resource
-(`GCP_WORKLOAD_IDENTITY_PROVIDER`, pool `care-github`, provider `github`) and a
-project, so an apply appears to have been performed by an operator. That is not
-evidence: **no workflow has ever performed the exchange**, because no
-credentialed workflow has ever started (D10), and no tooling on the reviewing
-workstation can confirm the resources exist — `gcloud`, `tofu` and any GCP
-credential are all absent there (D12).
+### D10. The delivery workflows cannot be started — RESOLVED
 
-The trust expression itself is verified by reading, not by running: the provider
-carries `attribute_condition = "assertion.repository == '<repo>'"`, and each
-service account's impersonation binding is a `principalSet` keyed on
-`attribute.environment`, so a job that does not declare the matching GitHub
-Environment cannot become that identity. Whether GCP agrees is what an exchange
-would show.
+**Status:** Closed 2026-08-20. **Recorded 2026-08-20.**
 
-### D10. The delivery workflows cannot be started
+GitHub registers a `workflow_dispatch` entry point only for a workflow file
+present on the repository's default branch, and pushing the file on a branch is
+not sufficient — it must be merged. Both merges were performed:
 
-**Status:** Open, blocked on two merges. **Recorded 2026-08-20, updated
-2026-08-20.** **Severity:** blocks ES-08 section 134 and everything downstream.
+| | |
+|---|---|
+| `feature/ci-controlled-delivery` -> `gcp` | fast-forward to `801927a64` |
+| `feature/ci-workflow-control-plane` -> `develop` | fast-forward to `8c828c63e` |
 
-**The requirement, established rather than assumed.** GitHub registers a
-`workflow_dispatch` entry point only for a workflow file present on the
-repository's default branch (`develop`). Pushing the file on a branch is **not**
-sufficient, which was worth proving rather than believing: after
-`feature/ci-workflow-control-plane` was pushed carrying five `delivery-*.yml`
-dispatch workflows,
+Registration, from GitHub rather than from the repository:
 
 ```
-$ gh api repos/xiidigital/care/actions/workflows --jq '.workflows[].path'
-.github/workflows/ci.yml
-.github/workflows/deploy.yml
-.github/workflows/docs.yml
-.github/workflows/linter.yml
-.github/workflows/release.yml
-.github/workflows/reusable-test.yml
-.github/workflows/test-merge-queue.yml
-.github/workflows/test-pull-request.yml
-.github/workflows/validate-pr-title.yml
-
-$ gh workflow run delivery-build.yml --ref feature/ci-workflow-control-plane
-HTTP 404: workflow delivery-build.yml not found on the default branch
+$ gh workflow list
+Delivery — build and publish       active  338848125
+Delivery — deploy to staging       active  338848127
+Delivery — infrastructure          active  338848129
+Delivery — promote to production   active  338848131
+Delivery — roll back               active  338848133
 ```
 
-Not one `delivery-*` workflow is registered, and the dispatch 404s against the
-very ref that carries it. **The definitions must be merged into `develop`.**
+All five are dispatchable and have been dispatched. The complete chain ran:
+build [32406259063](https://github.com/xiidigital/care/actions/runs/32406259063),
+staging [32411111409](https://github.com/xiidigital/care/actions/runs/32411111409),
+promotion eligibility
+[32412389243](https://github.com/xiidigital/care/actions/runs/32412389243).
 
-**What has been built.** The control plane exists and is reviewable:
+The rejection path was exercised too, which matters more than the happy one:
+dispatching with `source_ref=develop` — a real ref, not reachable from `gcp` —
+failed at the gate with `CI` and `Publish to Artifact Registry` **skipped**
+([32406180653](https://github.com/xiidigital/care/actions/runs/32406180653)).
 
-- five dispatch shims plus `DELIVERY.md` on `feature/ci-workflow-control-plane`,
-  five new files and zero modifications — no application code, no
-  infrastructure, no upstream workflow touched;
-- [PR #1](https://github.com/xiidigital/care/pull/1) proposes them to `develop`;
-- the architectural rule is ADR-0008 section 5a;
-- the security model that makes a ref input safe is `verify-source.yml` plus two
-  invariants (`check_credentialed_jobs_verify_source_trust`,
-  `check_reusable_workflow_calls_resolve`).
-
-**Two merges are required, in order.**
-
-1. `feature/ci-controlled-delivery` -> `gcp`. The release lineage currently
-   contains **none** of the ES-08 implementation — no delivery workflows, no
-   `infrastructure/scripts/gcp/`, no `modules/github-oidc`, no
-   `care/utils/delivery`. The shims resolve `@gcp`, so until this lands a
-   dispatch fails with "workflow was not found".
-2. `feature/ci-workflow-control-plane` -> `develop` (PR #1), which is what
-   registers the entry points.
-
-Neither was performed: merging into a public repository's default and release
-branches is a repository-owner decision, and ES-08 continuation instructions
-were to stop at exactly this boundary and report the requirement.
-
-**Known failing check on PR #1.** `PR Title JIRA Validation` requires titles to
-begin `[ENG-nnn]`. This fork's ES-08 work has no JIRA ticket and inventing one
-would cite an unrelated real issue. Recorded rather than worked around.
+Four defects were found only by running this, all recorded in D13.
 
 ### D11. Two startup defects were only findable in a real container — RESOLVED
 
@@ -2630,76 +2593,116 @@ Verified against the real production image locally (6/6) and on the runner
 
 ### D12. Infrastructure verification depends on an operator bootstrap
 
-**Status:** Open, reclassified. **Recorded 2026-08-20, updated 2026-08-20.**
-**Severity:** operator/bootstrap constraint, not a design gap.
+**Status:** Open, narrowed. **Recorded 2026-08-20, updated 2026-08-20.**
+**Severity:** operator/bootstrap constraint; blocks the post-deployment drift
+check.
 
-`gcloud`, `tofu` and `terraform` are not installed on the reviewing workstation,
-and there is no `~/.config/gcloud`, no application-default credential and no
-`GOOGLE_APPLICATION_CREDENTIALS`. Nothing there can authenticate to GCP or read
-OpenTofu state, so `tofu fmt -check`, `tofu validate`, `tofu plan` and
-`tofu plan -detailed-exitcode` cannot be run locally and post-deployment drift
-cannot be checked from there.
+The local-tooling half is resolved: `gcloud` and OpenTofu are no longer needed
+on a workstation. `delivery-infrastructure.yml` runs `fmt`, `validate` and
+`plan` in CI under the `infrastructure-plan` environment, and it has been
+dispatched and reached a real authenticated plan.
 
-**This is largely by design and should not be fixed by installing tooling.**
-`infra-check.yml` runs `fmt` and `validate` with no credentials on every pull
-request, and plans an environment through the `infrastructure-plan` environment;
-`infra-apply.yml` applies through the protected `infrastructure-apply`
-environment. CI is the intended place for all of it, and
-`delivery-infrastructure.yml` is the operator's entry point. Once D10 is closed
-the local tool requirement disappears for everything except bootstrap.
+What remains is genuinely circular and cannot move into CI: GitHub authenticates
+by Workload Identity Federation, the pool and identities are created by
+`infrastructure/terraform/bootstrap`, so the workflow that would create them
+needs them to exist. That bootstrap has been applied — D2 is closed on the
+strength of real exchanges — but **not with
+`grant_infrastructure_roles = true`**, and the authenticated plan showed why
+that matters:
 
-**The bootstrap boundary, precisely.** It is genuinely circular and cannot be
-closed by CI:
+```
+Error: the user does not have permission to access Project "..." or it may not exist
+  with module.care.data.google_project.this
+```
 
-- GitHub Actions authenticates to GCP by Workload Identity Federation;
-- the WIF pool, provider and the four automation identities are created by the
-  bootstrap root (`infrastructure/terraform/bootstrap`, behind
-  `github_repository`);
-- therefore the workflow that could apply them needs them to already exist.
+The infrastructure identity holds state-bucket access and no project roles. Two
+things are therefore outstanding, and both are one operator action:
 
-The minimal one-time operator action is: `tofu apply` of
-`infrastructure/terraform/bootstrap` with `github_repository` set, by an
-authenticated human, creating the state bucket, the pool, the provider, the four
-service accounts and their environment-scoped impersonation bindings. **No
-service-account key is created and none may be** — the whole point of the pool
-is that GitHub presents a short-lived OIDC assertion instead. Everything after
-that first apply runs through `delivery-infrastructure.yml`.
+1. re-apply the bootstrap root with `grant_infrastructure_roles = true`;
+2. that apply now also grants `roles/browser`, added to the declared role list
+   because `data "google_project"` needs `resourcemanager.projects.get` and none
+   of the admin roles carries it — `projectIamAdmin` grants get/setIamPolicy
+   *on* the project, which is a different permission.
 
-Repository variables already name a provider resource
-(`projects/272331402273/.../workloadIdentityPools/care-github/providers/github`),
-suggesting an operator has performed this apply. That remains unconfirmed: see
-D2 — no exchange has been observed, because no credentialed workflow can start.
+No service-account key is involved in either, by design. Until then the
+post-deployment drift check (ES-08 Part O) cannot run.
 
-### D3. Recent Views is not covered by automated staging acceptance
+### D13. Five defects only a real dispatch could find — RESOLVED
 
-**Status:** Open, accepted. **Recorded 2026-08-19.** **Severity:** acceptance
-coverage.
+**Status:** Resolved 2026-08-20. **Severity:** all blocked the delivery chain.
 
-Everything else in ES-08 section 39's list is checked by
-`infrastructure/scripts/gcp/acceptance.sh`. Recent Views is not, because it needs
-an authenticated user acting through the API, and there is no automatable way to
-get one in staging that is also correct:
+Every one of these produced `startup_failure` or an abort — no log, no
+annotation, and for the startup failures no message beyond "This run likely
+failed because of a workflow file issue". Nothing local reproduces any of them.
 
-- staging refuses the dev fixture loader, deliberately, and ES-08 section 119
-  requires that separation to be preserved;
-- ES-07 verified it by creating a temporary Cloud Run Job and a synthetic
-  superuser and deleting both afterwards (see gcp-configuration.md section 11).
-  Automating that would need `run.jobs.create` at project level for the
-  deployment identity, which is exactly the broadening ES-08 section 116 asks to
-  avoid;
-- a management command that seeds an acceptance user would be application source
-  added for CI's benefit, which section 111 restricts to proven blockers.
+**1. Reusable-workflow nesting depth.** `build-image -> deploy-staging ->
+deploy-app -> verify-source` would not start. Measured against real runs rather
+than the documentation: three workflows deep runs, four does not. Chaining a
+deployment onto a build was removed — the control plane provides
+`delivery-deploy-staging.yml` as its own entry point, which is what ADR-0008
+section 1.2 asked for anyway — and the trust gate became a **composite action**,
+which costs no nesting level at all.
 
-So it stays manually verified, on the ES-07 evidence, and the acceptance script
-says so rather than implying coverage. A future phase that adds a staging-only
-acceptance Job — infrastructure-owned, so no identity gains creation rights — can
-close it.
+**2. `./` resolves against the caller's commit.**
+`uses: ./.github/workflows/ci.yml` does not mean "next to this file". Called at
+`@gcp` from the default branch, `build-image.yml` looked for its dependencies in
+develop's tree, where the delivery implementation deliberately does not exist.
+Every delivery workflow now names its dependencies explicitly at `@gcp`. The
+three upstream CARE workflows using `./` are untouched: they are never called
+across refs.
 
-**Advisory locking, by contrast, is covered indirectly and honestly.**
-`sync_permissions_roles` takes a transaction-scoped advisory lock and runs on
-every init, so a green init exercises the path. Nothing deliberately contends for
-the lock in staging: deadlocking the staging database is not a check
-(ES-08 section 176).
+**3. Callers cap callee permissions.** A called workflow cannot request more
+than its caller was granted, and exceeding it does not fail a step — the run
+never starts. This bit at three levels of one chain: the shims capping
+build-image, deploy-staging capping deploy-app, and the promotion shim granting
+`contents`/`id-token` while promote-production's eligibility job also needs
+`actions: read` to read the acceptance record.
+
+**4. Ready is not serving.** The first acceptance failed `/ping/`, `/health/`
+and `/app_version/` against a deployment that was correct. A Cloud Run revision
+reporting Ready is not the same as the URL routing to it; acceptance probed
+seventeen seconds later and got a 500 from Google's frontend, not from Django.
+The API phase now waits, bounded, for the URL to answer before asserting — and
+the wait decides nothing, so a genuinely dead API still fails.
+
+**5. An abort that hid its own error handling.** Acceptance ended at
+"==> Cloud Storage" with exit 1 and no message. The bucket was found by listing
+every bucket in the project, which the staging identity cannot do; the script
+was written to report that, but under `set -euo pipefail` the failing command
+substitution aborted before its own `care_fail` could run. The bucket name is
+now read from the running service, where config.tf put it — a permission the
+identity already exercises — with the listing kept only as a `|| true` fallback.
+No IAM was broadened.
+
+Three of these are now invariants:
+`check_reusable_workflow_calls_resolve` rejects a `./` reference in a delivery
+workflow and resolves every target, and
+`check_callers_grant_what_callees_request` compares granted against requested by
+rank, so `read` where `write` is needed, and unmentioned-therefore-`none`, both
+report.
+
+### D3. Recent Views is manual acceptance evidence, not automated
+
+**Status:** Open, accepted, re-evaluated 2026-08-20 against real automation.
+
+Re-examined now that staging acceptance actually runs in CI. Everything else in
+ES-08 section 39's list is automated and passing: `/ping/`, `/health/`,
+`/app_version/`, worker private IAM, worker/API route isolation in both
+directions, the Redis-free composition, console email, PostgreSQL rate limiting,
+Cloud Tasks dispatch and execution, the Cloud Storage round trip, scheduled Job
+execution, and cleanup.
+
+Recent Views is still not among them, and the reason has not changed: reaching
+it through the API needs an authenticated session against real patient data,
+and the acceptance identity deliberately has neither. Automating it would mean
+granting the CI identity materially broader application privilege — which
+ES-08 section 117 forbids doing to make a check pass, and which would be a worse
+trade than the gap it closes.
+
+**This is therefore recorded as manual, live-environment evidence, verified
+during ES-07, and it is not claimed as automated coverage.** The automated
+acceptance suite does not report on Recent Views at all, rather than reporting a
+pass it did not earn.
 
 ### D4. The repository is not `ruff format` clean repository-wide
 

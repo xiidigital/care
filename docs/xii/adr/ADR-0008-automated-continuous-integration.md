@@ -346,6 +346,20 @@ identity bindings accept only the matching GitHub Environment claim, so a
 workflow that does not run in the protected environment cannot become the
 protected identity.
 
+Three practical constraints were established by running this, not by reading the
+documentation, and they shape any control plane of this kind:
+
+- **Reusable-workflow nesting is shallower than it looks.** A chain three
+  workflows deep runs; four does not, and the failure is a startup failure with
+  no log. The trust gate is therefore a composite action, which costs no nesting
+  level, and a build does not chain a deployment onto itself.
+- **`./.github/workflows/x.yml` resolves against the calling run's commit**, not
+  against the file that contains it. A workflow reachable from the control plane
+  SHALL name its dependencies at an explicit ref.
+- **A called workflow cannot exceed its caller's permissions**, and an explicit
+  `permissions:` block defaults everything it does not name to `none`. A calling
+  job SHALL grant every permission its callee requests, including read.
+
 These properties are machine-checked by
 `care.utils.delivery.invariants`, so a workflow edited to skip the gate, to
 check out an unverified ref, or to give the gate a credential fails CI rather

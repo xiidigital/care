@@ -734,3 +734,62 @@ as is the shim-to-implementation wiring (`check_reusable_workflow_calls_resolve`
 The shims resolve `@gcp`. The delivery implementation must be merged to `gcp`
 before they can run; until then a dispatch fails visibly with "workflow was not
 found" rather than silently doing the wrong thing.
+
+---
+
+## Executed chain (2026-08-20)
+
+The first complete run of the delivery chain through GitHub Actions, dispatched
+from the default-branch control plane.
+
+| | |
+|---|---|
+| `gcp` at merge | `801927a64` |
+| `develop` at merge | `8c828c63e` |
+| source commit built | `bd45a537432ce6e9a7f1752de5fbb41fe9fe50b2` |
+| digest | `sha256:90c634ef669d6f0fe45c7757892b1de0b0ef49a8e24a592f4cd54189fc513c2d` |
+| image | `us-central1-docker.pkg.dev/project-990c4414-a33c-47f2-9f4/care-staging/care@sha256:90c634ef…` |
+| upstream base | `81149a358c22ff8cf6a3a512f7cdddc136de0b6f` |
+
+| stage | run |
+|---|---|
+| build and publish | [32406259063](https://github.com/xiidigital/care/actions/runs/32406259063) |
+| staging deploy + acceptance | [32411111409](https://github.com/xiidigital/care/actions/runs/32411111409) |
+| promotion eligibility | [32412389243](https://github.com/xiidigital/care/actions/runs/32412389243) |
+| untrusted ref refused | [32406180653](https://github.com/xiidigital/care/actions/runs/32406180653) |
+
+Deployment order, as it ran: init Job updated → init executed
+(`care-staging-init-ks7xw`) → worker updated and ready
+(`care-staging-worker-00007-qrr`) → worker IAM checked → API updated and ready
+(`care-staging-api-00006-49r`) → scheduled Jobs updated → acceptance.
+
+**Same-digest proof**, read from deployed revision and Job metadata rather than
+inferred from tags: `care-staging-api`, `care-staging-worker`,
+`care-staging-init`, `care-staging-cleanup-token-slots` and
+`care-staging-cleanup-uploads` each report the requested digest. The running API
+reports `bd45a537…` at `/app_version/` — the commit that built it.
+
+**Nothing was rebuilt between stages.** The staging workflow consumed the digest
+the build published.
+
+### What the rejection path proves
+
+Dispatching the build with `source_ref=develop` — a real branch, not reachable
+from `gcp` — failed at the gate:
+
+```
+Refusing to build or deploy 4f4f9033587549bc4a76bc3db16e56a691715426.
+It is not reachable from 'gcp' (bd45a537432ce6e9a7f1752de5fbb41fe9fe50b2).
+Only revisions a maintainer has already merged to the release lineage may
+obtain a deployment identity.
+```
+
+`CI` and `Publish to Artifact Registry` were **skipped**. The untrusted revision
+never reached the credentialed job.
+
+### Production
+
+Eligibility passed — it located `staging-accepted-90c634ef…`, the record the
+staging workflow wrote — and the run then **held at the `production`
+environment's required-reviewer gate**. It was cancelled without approval.
+Production was not deployed and no production infrastructure was created.
