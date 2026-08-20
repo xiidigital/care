@@ -385,6 +385,103 @@ class InvariantDetectionTests(SimpleTestCase):
         ):
             self.assertEqual(invariants.check_invoked_scripts_are_executable(), [])
 
+    def test_role_startup_without_database_variables_is_detected(self):
+        # The defect the real GitHub Actions run found: the startup
+        # verification configured the containers with DATABASE_URL alone, but
+        # scripts/wait_for_db.sh -- which both role entrypoints run before they
+        # bind -- reads POSTGRES_*. psycopg fell back to a local unix socket and
+        # every role failed to serve.
+        wait_for_db = self.root / "scripts" / "wait_for_db.sh"
+        wait_for_db.parent.mkdir(parents=True, exist_ok=True)
+        wait_for_db.write_text(
+            textwrap.dedent(
+                """
+                #!/bin/bash
+                python << END
+                con = psycopg.connect(
+                    user="${POSTGRES_USER}",
+                    password="${POSTGRES_PASSWORD}",
+                    host="${POSTGRES_HOST}",
+                    port="${POSTGRES_PORT}",
+                )
+                database="${POSTGRES_DB}"
+                END
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        scripts = self.root / "infrastructure" / "scripts"
+        scripts.mkdir(parents=True)
+        verify = scripts / "verify-image-startup.sh"
+
+        def write_startup(env_lines):
+            verify.write_text(
+                textwrap.dedent(
+                    """
+                    #!/usr/bin/env bash
+                    COMMON_ENV=(
+                      -e "DATABASE_URL=${DATABASE_URL}"
+                    %s)
+                    docker run "${COMMON_ENV[@]}" "$IMAGE" ./start.sh
+                    docker run "${COMMON_ENV[@]}" "$IMAGE" ./start-worker.sh
+                    """
+                )
+                % env_lines,
+                encoding="utf-8",
+            )
+
+        with mock.patch.object(invariants, "WAIT_FOR_DB_SOURCE", wait_for_db):
+            write_startup("")
+            findings = invariants.check_role_startup_supplies_database_variables()
+            self.assertTrue(
+                any(
+                    "POSTGRES_HOST" in finding.detail
+                    and "verify-image-startup.sh" in finding.where
+                    for finding in findings
+                ),
+                findings,
+            )
+
+            write_startup(
+                '  -e "POSTGRES_HOST=${PG_HOST}"\n'
+                '  -e "POSTGRES_PORT=${PG_PORT}"\n'
+                '  -e "POSTGRES_USER=${PG_USER}"\n'
+                '  -e "POSTGRES_PASSWORD=${PG_PASSWORD}"\n'
+                '  -e "POSTGRES_DB=${PG_DB}"\n'
+            )
+            self.assertEqual(
+                invariants.check_role_startup_supplies_database_variables(), []
+            )
+
+    def test_unsupported_storage_backend_is_detected(self):
+        # The second defect the real container start revealed: the startup
+        # verification selected a "local" object-storage provider that
+        # config/storage.py has never accepted, so every role raised
+        # ImproperlyConfigured before it could bind.
+        storage = self.root / "config" / "storage.py"
+        storage.parent.mkdir(parents=True, exist_ok=True)
+        storage.write_text(
+            'SUPPORTED_STORAGE_BACKENDS = ("s3", "gcs")\n', encoding="utf-8"
+        )
+
+        scripts = self.root / "infrastructure" / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        verify = scripts / "verify-image-startup.sh"
+
+        with mock.patch.object(invariants, "STORAGE_SETTINGS_SOURCE", storage):
+            verify.write_text('  -e "CARE_STORAGE_BACKEND=local"\n', encoding="utf-8")
+            findings = invariants.check_storage_backend_selection_is_supported()
+            self.assertTrue(
+                any("CARE_STORAGE_BACKEND=local" in f.detail for f in findings),
+                findings,
+            )
+
+            verify.write_text('  -e "CARE_STORAGE_BACKEND=gcs"\n', encoding="utf-8")
+            self.assertEqual(
+                invariants.check_storage_backend_selection_is_supported(), []
+            )
+
     def test_untracked_invoked_script_is_detected(self):
         self.write_workflow(
             "ci.yml",

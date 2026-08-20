@@ -856,6 +856,122 @@ def check_cloud_tasks_selection_is_complete() -> list[Finding]:
     return findings
 
 
+#: The role entrypoints that wait for PostgreSQL before they bind. Anything that
+#: starts one of these has to configure it the way a deployment does.
+ROLE_ENTRYPOINTS = ("./start.sh", "./start-worker.sh")
+
+WAIT_FOR_DB_SOURCE = REPO_ROOT / "scripts" / "wait_for_db.sh"
+
+
+def _wait_for_db_variables() -> list[str]:
+    """The POSTGRES_* names ``scripts/wait_for_db.sh`` connects with."""
+    if not WAIT_FOR_DB_SOURCE.is_file():
+        return []
+    text = WAIT_FOR_DB_SOURCE.read_text(encoding="utf-8")
+    return sorted(set(re.findall(r"\$\{(POSTGRES_[A-Z0-9_]+)\}", text)))
+
+
+def check_role_startup_supplies_database_variables() -> list[Finding]:
+    """
+    Anything that starts a role entrypoint supplies what its wait loop reads
+    (ES-08 section 99).
+
+    ``scripts/wait_for_db.sh`` -- which start.sh and start-worker.sh both run
+    before binding -- connects with POSTGRES_HOST/PORT/USER/PASSWORD/DB and
+    never reads DATABASE_URL. The managed environment sets both deliberately
+    (modules/care-environment/config.tf and secrets.tf). A caller that supplies
+    only DATABASE_URL is not a degraded run: psycopg falls back to a local unix
+    socket, the loop exhausts its 30 attempts and the role never serves, which
+    is how a green local check became a red CI job.
+    """
+    required = _wait_for_db_variables()
+    if not required:
+        return []
+
+    scripts = REPO_ROOT / "infrastructure" / "scripts"
+    if not scripts.is_dir():
+        return []
+
+    findings = []
+    for path in sorted(scripts.rglob("*.sh")):
+        text = path.read_text(encoding="utf-8")
+        if not any(entrypoint in text for entrypoint in ROLE_ENTRYPOINTS):
+            continue
+        missing = [name for name in required if not re.search(rf"{name}=", text)]
+        if missing:
+            findings.append(
+                Finding(
+                    where=str(path.relative_to(REPO_ROOT)).replace("\\", "/"),
+                    rule="role startup supplies database variables",
+                    detail=(
+                        "starts a role entrypoint without "
+                        + ", ".join(missing)
+                        + " (scripts/wait_for_db.sh reads these, not DATABASE_URL)"
+                    ),
+                )
+            )
+    return findings
+
+
+STORAGE_SETTINGS_SOURCE = REPO_ROOT / "config" / "storage.py"
+
+
+def _supported_storage_backends() -> list[str]:
+    """The values ``CARE_STORAGE_BACKEND`` accepts, read from the validator."""
+    if not STORAGE_SETTINGS_SOURCE.is_file():
+        return []
+    text = STORAGE_SETTINGS_SOURCE.read_text(encoding="utf-8")
+    match = re.search(r"SUPPORTED_STORAGE_BACKENDS\s*=\s*\((.*?)\)", text, re.DOTALL)
+    if not match:
+        return []
+    return re.findall(r'"([a-z0-9_]+)"', match.group(1))
+
+
+def check_storage_backend_selection_is_supported() -> list[Finding]:
+    """
+    Anything that selects an object-storage provider names one that exists
+    (ES-08 sections 23, 99).
+
+    ``config/storage.py`` validates the name at settings import, so a caller
+    that invents one does not degrade to a local directory -- it raises
+    ImproperlyConfigured before the role binds. The startup verification
+    selected a "local" provider that has never existed, and only a real
+    container start revealed it.
+    """
+    supported = _supported_storage_backends()
+    if not supported:
+        return []
+
+    sources = [*_workflow_paths()]
+    scripts = REPO_ROOT / "infrastructure" / "scripts"
+    if scripts.is_dir():
+        sources.extend(sorted(scripts.rglob("*.sh")))
+
+    findings = []
+    for path in sources:
+        if not path.is_file():
+            continue
+        for value in set(
+            re.findall(
+                r"CARE_STORAGE_BACKEND=\"?([A-Za-z0-9_]+)", path.read_text("utf-8")
+            )
+        ):
+            if value not in supported:
+                findings.append(
+                    Finding(
+                        where=str(path.relative_to(REPO_ROOT)).replace("\\", "/"),
+                        rule="storage backend selection is supported",
+                        detail=(
+                            f"selects CARE_STORAGE_BACKEND={value}, which "
+                            f"config/storage.py rejects (supported: "
+                            + ", ".join(supported)
+                            + ")"
+                        ),
+                    )
+                )
+    return findings
+
+
 CHECKS = (
     check_workflows_exist,
     check_permissions_declared,
@@ -875,6 +991,8 @@ CHECKS = (
     check_upstream_base_recorded,
     check_invoked_scripts_are_executable,
     check_cloud_tasks_selection_is_complete,
+    check_role_startup_supplies_database_variables,
+    check_storage_backend_selection_is_supported,
 )
 
 
