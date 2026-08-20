@@ -27,6 +27,15 @@ on:
         description: "sha256:... of an already-published image"
         required: true
         type: string
+      # Which revision's delivery scripts run. Distinct from source_sha below:
+      # that one records which revision built the *image*. Usually the same
+      # commit; they are different concepts and the control plane keeps them
+      # apart (ADR-0008 section 5a).
+      source_ref:
+        description: "Source ref whose delivery scripts run (must be reachable from gcp)"
+        required: false
+        type: string
+        default: "gcp"
       source_sha:
         description: "Commit the digest was built from, for the record and for /app_version/"
         required: false
@@ -71,8 +80,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Source trust before the deployment credential exists. This job checks out
+  # and executes repository scripts under an identity that can change a running
+  # environment, so what it executes must already have been merged to the
+  # release lineage (ES-08 D10, Part D).
+  verify:
+    name: Source trust
+    uses: ./.github/workflows/verify-source.yml
+    with:
+      source_ref: ${{ inputs.source_ref }}
+
   deploy:
     name: Deploy ${{ inputs.image_digest }}
+    needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     environment: ${{ inputs.environment }}
@@ -98,10 +118,13 @@ jobs:
       CARE_SOURCE_SHA: ${{ inputs.source_sha }}
 
     steps:
-      # Repository-controlled code only, at a revision the repository owns. Not
-      # a pull request head: this job holds deployment credentials
-      # (ES-08 section 154).
+      # Repository-controlled code only, at a revision proved to be reachable
+      # from the release lineage, by SHA rather than by the ref that was typed.
+      # Not a pull request head: this job holds deployment credentials
+      # (ES-08 section 154, D10 Part D).
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.verify.outputs.source_sha }}
 
       - name: Require deployment configuration
         run: |

@@ -23,6 +23,11 @@ on:
         description: "sha256:... of a published image"
         required: true
         type: string
+      source_ref:
+        description: "Source ref whose delivery scripts run (must be reachable from gcp)"
+        required: false
+        type: string
+        default: "gcp"
       source_sha:
         description: "Commit the digest was built from (optional; verified against /app_version/)"
         required: false
@@ -37,6 +42,10 @@ on:
       image_digest:
         required: true
         type: string
+      source_ref:
+        required: false
+        type: string
+        default: "gcp"
       source_sha:
         required: false
         type: string
@@ -60,6 +69,7 @@ jobs:
     uses: ./.github/workflows/deploy-app.yml
     with:
       environment: staging
+      source_ref: ${{ inputs.source_ref }}
       image_digest: ${{ inputs.image_digest }}
       source_sha: ${{ inputs.source_sha }}
       acceptance: true

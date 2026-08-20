@@ -35,7 +35,17 @@ on:
           - dev
           - staging
           - prod
+      source_ref:
+        description: "Source ref whose infrastructure sources are planned (must be reachable from gcp)"
+        required: false
+        type: string
+        default: "gcp"
   workflow_call:
+    inputs:
+      source_ref:
+        required: false
+        type: string
+        default: "gcp"
 
 permissions:
   contents: read
@@ -96,10 +106,20 @@ jobs:
           done
           exit "$status"
 
+  # Source trust before the infrastructure credential exists. `validate` runs
+  # on untrusted pull requests and holds nothing; `plan` reads real state and
+  # must only ever execute sources from the release lineage (ES-08 D10 Part D).
+  verify:
+    name: Source trust
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' }}
+    uses: ./.github/workflows/verify-source.yml
+    with:
+      source_ref: ${{ inputs.source_ref || 'gcp' }}
+
   plan:
     name: Plan ${{ inputs.environment }}
     if: github.event_name == 'workflow_dispatch'
-    needs: validate
+    needs: [validate, verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -113,7 +133,11 @@ jobs:
       id-token: write
 
     steps:
+      # The verified commit, by SHA. This job holds the infrastructure
+      # credential (ES-08 D10 Part D).
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.verify.outputs.source_sha }}
 
       - name: Require infrastructure configuration
         run: |

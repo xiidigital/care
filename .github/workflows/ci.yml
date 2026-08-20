@@ -27,6 +27,15 @@ on:
       - "docs/**"
       - "**/*.md"
   workflow_call:
+    inputs:
+      source_sha:
+        description: >-
+          Commit to validate. Supplied by a caller that has already proved this
+          revision is reachable from the release lineage (verify-source.yml).
+          Empty on pull_request and push, where the event decides the revision.
+        required: false
+        type: string
+        default: ""
 
 # Read-only. A pull request from a fork runs this workflow, and a fork PR must
 # not be able to write anything (ES-08 sections 61, 62).
@@ -45,6 +54,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          # The revision the caller proved trusted, or the event's own commit.
+          ref: ${{ inputs.source_sha || github.sha }}
           # Needed to work out which files a change touched.
           fetch-depth: 0
 
@@ -77,7 +88,7 @@ jobs:
             head="${{ github.event.pull_request.head.sha }}"
           else
             base="${{ github.event.before }}"
-            head="${{ github.sha }}"
+            head="${{ inputs.source_sha || github.sha }}"
           fi
 
           if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
@@ -105,6 +116,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The revision the caller proved trusted, or the event's own commit.
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -140,6 +154,9 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The revision the caller proved trusted, or the event's own commit.
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -193,6 +210,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The revision the caller proved trusted, or the event's own commit.
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -256,6 +276,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The revision the caller proved trusted, or the event's own commit.
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - uses: actions/setup-python@v6
         with:
@@ -278,6 +301,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          # The revision the caller proved trusted, or the event's own commit.
+          ref: ${{ inputs.source_sha || github.sha }}
           # The commit scan needs the commits being introduced, which a
           # single-commit checkout does not have.
           fetch-depth: 0
@@ -332,7 +357,7 @@ jobs:
             head="${{ github.event.pull_request.head.sha }}"
           else
             base="${{ github.event.before }}"
-            head="${{ github.sha }}"
+            head="${{ inputs.source_sha || github.sha }}"
           fi
 
           if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
