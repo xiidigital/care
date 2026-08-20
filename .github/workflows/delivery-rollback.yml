@@ -38,6 +38,16 @@ permissions:
 jobs:
   rollback:
     name: Roll back ${{ inputs.environment }}
+    # A called workflow cannot request more than its caller was granted, and
+    # the implementation's credentialed job asks for `id-token: write`. Granting
+    # it here is permission to *request* an OIDC token, not a credential: the
+    # token is only exchanged for a GCP identity by the job that declares the
+    # matching GitHub Environment, and the workload identity binding accepts
+    # nothing else. Scoped to this job rather than the workflow so the grant is
+    # visible where it is used.
+    permissions:
+      contents: read
+      id-token: write
     uses: xiidigital/care/.github/workflows/rollback.yml@gcp
     with:
       environment: ${{ inputs.environment }}

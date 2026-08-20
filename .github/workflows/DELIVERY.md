@@ -30,9 +30,14 @@ Three separate things, decided separately:
 ## What this does not mean
 
 **`develop` is not a deployment target.** Nothing here builds or deploys
-`develop`. These files contain no credential, declare no environment, and do no
-work — each one calls an implementation pinned to `@gcp` and passes along an
-operator's request.
+`develop`. These files declare no environment and do no work — each one calls an
+implementation pinned to `@gcp` and passes along an operator's request.
+
+Each calling job does grant `id-token: write`, because a called workflow cannot
+request more than its caller was granted. That is permission to *request* an
+OIDC token, not a credential: the token is exchanged for a GCP identity only by
+the job that declares the matching GitHub Environment, and the workload identity
+binding accepts no other environment claim. A shim obtains nothing by asking.
 
 **A feature branch cannot publish or deploy.** `source_ref` is an input, and an
 input is attacker-reachable, so it is not trusted. The implementation's first
