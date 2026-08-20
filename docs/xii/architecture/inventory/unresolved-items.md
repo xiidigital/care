@@ -2591,41 +2591,83 @@ asserting it fails when violated.
 Verified against the real production image locally (6/6) and on the runner
 (run [32340865564](https://github.com/xiidigital/care/actions/runs/32340865564)).
 
-### D12. Infrastructure verification depends on an operator bootstrap
+### D12. One operator bootstrap apply remains
 
-**Status:** Open, narrowed. **Recorded 2026-08-20, updated 2026-08-20.**
-**Severity:** operator/bootstrap constraint; blocks the post-deployment drift
-check.
+**Status:** Open, narrowed to a single action. **Recorded 2026-08-20, updated
+2026-08-20.** **Severity:** blocks the post-deployment drift check (ES-08 Part
+O) and nothing else.
 
-The local-tooling half is resolved: `gcloud` and OpenTofu are no longer needed
-on a workstation. `delivery-infrastructure.yml` runs `fmt`, `validate` and
-`plan` in CI under the `infrastructure-plan` environment, and it has been
-dispatched and reached a real authenticated plan.
+**Resolved.** The local-tooling half is gone. `gcloud` and OpenTofu are not
+needed on a workstation: `delivery-infrastructure.yml` runs `fmt`, `validate`
+and `plan` in CI under the `infrastructure-plan` environment, and it has been
+dispatched and reaches a real authenticated plan.
 
-What remains is genuinely circular and cannot move into CI: GitHub authenticates
-by Workload Identity Federation, the pool and identities are created by
-`infrastructure/terraform/bootstrap`, so the workflow that would create them
-needs them to exist. That bootstrap has been applied — D2 is closed on the
-strength of real exchanges — but **not with
-`grant_infrastructure_roles = true`**, and the authenticated plan showed why
-that matters:
+**The OIDC path itself is proven working for this identity.** In run
+[32414817565](https://github.com/xiidigital/care/actions/runs/32414817565):
+
+| step | result |
+|---|---|
+| Source trust | success |
+| `tofu fmt`, `tofu validate` | success |
+| **Authenticate to Google Cloud** | **success** — `care-infra` via WIF, no key |
+| `tofu init` / state read | success |
+| `tofu plan` | failure |
+| Apply staging | skipped, as designed |
+
+So this is not an authentication problem and not a CI defect. GitHub obtains the
+`care-infra` identity correctly; that identity simply holds no project
+permissions yet.
+
+**What is missing, exactly.** `grant_infrastructure_roles` is `false` by default
+and **has never been applied**, so `care-infra` holds only the state-bucket
+binding. The plan fails on project-level reads:
 
 ```
 Error: the user does not have permission to access Project "..." or it may not exist
-  with module.care.data.google_project.this
+Error 403 reading Project Service .../iam.googleapis.com
+Error reading IAM Member: Role "roles/logging.viewer"
 ```
 
-The infrastructure identity holds state-bucket access and no project roles. Two
-things are therefore outstanding, and both are one operator action:
+Every one of those is covered by the enumerated `infrastructure_roles` —
+`serviceusage.serviceUsageAdmin`, `resourcemanager.projectIamAdmin`, and
+`roles/browser`, added in `da7b563b4` because `data "google_project"` needs
+`resourcemanager.projects.get` and no admin role carries it. The declaration is
+correct and complete; it is the grant that has not been made.
 
-1. re-apply the bootstrap root with `grant_infrastructure_roles = true`;
-2. that apply now also grants `roles/browser`, added to the declared role list
-   because `data "google_project"` needs `resourcemanager.projects.get` and none
-   of the admin roles carries it — `projectIamAdmin` grants get/setIamPolicy
-   *on* the project, which is a different permission.
+**The remaining action, precisely.** One authenticated operator apply:
 
-No service-account key is involved in either, by design. Until then the
-post-deployment drift check (ES-08 Part O) cannot run.
+```
+cd infrastructure/terraform/bootstrap
+tofu init
+tofu apply \
+  -var project_id=project-990c4414-a33c-47f2-9f4 \
+  -var region=us-central1 \
+  -var github_repository=xiidigital/care \
+  -var grant_infrastructure_roles=true
+```
+
+Two things make this an operator action rather than a CI one, and both are
+structural:
+
+1. **The circularity.** GitHub authenticates by WIF; the pool and identities are
+   created by this root; so the workflow that would create them needs them to
+   exist. `care-infra` also cannot grant itself project roles — it holds no
+   `projectIamAdmin` — and an identity that could would be a privilege-escalation
+   path the architecture deliberately excludes.
+2. **The state.** This root runs on **local state by design** (`versions.tf`):
+   it creates the bucket the other roots use, so it cannot keep state there. The
+   apply must run where that state already lives — the workstation that first
+   applied it, or after `tofu init -migrate-state` against the bucket's
+   `bootstrap` prefix. Applying from a fresh clone with no state would try to
+   create a pool, a provider and four service accounts that already exist.
+
+**No service-account key is created or needed by any of this**, and none exists.
+After that apply, infrastructure planning and application run through GitHub
+OIDC/WIF with no long-lived credential — which is the steady state, and which is
+already demonstrated by every other identity in the chain.
+
+This is a bootstrap boundary, not a CI defect. It is the one step in the
+architecture that cannot verify itself.
 
 ### D13. Five defects only a real dispatch could find — RESOLVED
 

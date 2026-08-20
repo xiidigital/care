@@ -793,3 +793,34 @@ Eligibility passed — it located `staging-accepted-90c634ef…`, the record the
 staging workflow wrote — and the run then **held at the `production`
 environment's required-reviewer gate**. It was cancelled without approval.
 Production was not deployed and no production infrastructure was created.
+
+### Post-deployment drift check — outstanding
+
+The one part of the chain that has not run. `delivery-infrastructure.yml` is
+registered and dispatchable, and in run
+[32414817565](https://github.com/xiidigital/care/actions/runs/32414817565) it
+passed source trust, `fmt`, `validate` and — importantly —
+**authenticated to GCP as `care-infra` through OIDC/WIF**, then failed at
+`tofu plan` on project-level reads.
+
+That is not an authentication failure and not a workflow defect. The identity
+holds only its state-bucket binding, because `grant_infrastructure_roles` is
+`false` by default and has never been applied. The roles it needs are already
+enumerated in the bootstrap declaration, including `roles/browser` for
+`data "google_project"`.
+
+One authenticated operator apply of `infrastructure/terraform/bootstrap` with
+`grant_infrastructure_roles = true` closes it — run where that root's local
+state lives, since it creates the bucket the other roots use and therefore keeps
+its own state outside it. No service-account key is involved. See D12.
+
+Until then, the ownership boundary this check exists to prove — OpenTofu owns
+infrastructure configuration, application delivery owns runtime image revisions,
+and OpenTofu must not try to restore the image it first created — is
+**asserted by the configuration but not yet demonstrated by a clean plan**.
+
+What *is* demonstrated: staging has run the CI-built digest
+`sha256:90c634ef…` since run 32411111409, no deployment or rollback workflow has
+run against it since, and the live API still reports
+`bd45a537432ce6e9a7f1752de5fbb41fe9fe50b2` at `/app_version/` with `/ping/` 200
+and `/health/` reporting Database and Cache (postgres) both 200.
