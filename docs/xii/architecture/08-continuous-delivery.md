@@ -661,3 +661,76 @@ fork's project, and the delivery invariants test enforces that
   auditable (ADR-0008 section 41).
 - **Keep permanently running CI compute.** GitHub-hosted runners only
   (ADR-0008 section 49).
+
+
+---
+
+## The default-branch control plane
+
+*Added by ES-08 D10.*
+
+GitHub registers a `workflow_dispatch` entry point only for a workflow present
+on the repository's **default branch**, and pushing the file on a branch is not
+enough — it must be merged. The delivery implementation lives on the `gcp`
+release lineage, so the operator-facing entry points live on `develop` instead,
+as thin shims:
+
+| entry point (on `develop`) | calls (on `gcp`) |
+| --- | --- |
+| `delivery-build.yml` | `build-image.yml@gcp` |
+| `delivery-deploy-staging.yml` | `deploy-staging.yml@gcp` |
+| `delivery-promote-production.yml` | `promote-production.yml@gcp` |
+| `delivery-rollback.yml` | `rollback.yml@gcp` |
+| `delivery-infrastructure.yml` | `infra-check.yml@gcp`, `infra-apply.yml@gcp` |
+
+A shim holds no credential, declares no GitHub Environment and does no work. The
+rule it embodies is ADR-0008 section 5a:
+
+```
+workflow definition location  !=  source revision  !=  deployed image
+```
+
+`develop` is not a deployment target and hosting these files does not make it
+one: nothing in them builds or deploys `develop`.
+
+### Running a release
+
+```bash
+# 1. build a trusted revision -- source_ref must already be reachable from gcp
+gh workflow run delivery-build.yml -f source_ref=gcp
+
+# 2. deploy the digest that build published; never a tag, never a branch
+gh workflow run delivery-deploy-staging.yml \
+    -f image_digest=sha256:... -f source_sha=<commit>
+
+# 3. promote, after staging acceptance recorded that digest
+gh workflow run delivery-promote-production.yml -f image_digest=sha256:...
+```
+
+### Why a ref input is not a privilege escalation
+
+`source_ref` is attacker-reachable — anyone who may dispatch may type a ref — so
+it is not trusted. `verify-source.yml` runs first, holding no credential and
+declaring no environment. It resolves the ref and asserts
+
+```
+git merge-base --is-ancestor <resolved-sha> origin/gcp
+```
+
+Reachability, not string comparison: a tag or explicit commit already merged to
+`gcp` is accepted, and a branch that merely *contains* `gcp` is not. Nothing an
+untrusted contributor can push is reachable from `gcp` until a maintainer merges
+it, which is the review boundary this leans on.
+
+Every credentialed job then depends on that gate and checks out **the SHA it
+resolved**, never the ref that was typed: re-resolving a ref after checking it
+would let a branch move in between.
+
+Both properties are machine-checked (`check_credentialed_jobs_verify_source_trust`),
+as is the shim-to-implementation wiring (`check_reusable_workflow_calls_resolve`).
+
+### Ordering
+
+The shims resolve `@gcp`. The delivery implementation must be merged to `gcp`
+before they can run; until then a dispatch fails visibly with "workflow was not
+found" rather than silently doing the wrong thing.

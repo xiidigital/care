@@ -2539,55 +2539,63 @@ would show.
 
 ### D10. The delivery workflows cannot be started
 
-**Status:** Open, externally blocked. **Recorded 2026-08-20.** **Severity:**
-blocks ES-08 section 134 and everything downstream of it.
+**Status:** Open, blocked on two merges. **Recorded 2026-08-20, updated
+2026-08-20.** **Severity:** blocks ES-08 section 134 and everything downstream.
 
-**The defect.** Every workflow in the delivery chain past CI is reachable only
-by `workflow_dispatch`, or by a push to `gcp`:
-
-| workflow | triggers |
-|---|---|
-| `build-image.yml` | push to `gcp`, `workflow_dispatch`, `workflow_call` |
-| `deploy-staging.yml` | `workflow_dispatch`, `workflow_call` |
-| `promote-production.yml` | `workflow_dispatch` |
-| `rollback.yml` | `workflow_dispatch` |
-| `infra-apply.yml` | `workflow_dispatch` |
-| `infra-check.yml` (plan half) | `workflow_dispatch` |
-
-GitHub only accepts a `workflow_dispatch` for a workflow that exists **on the
-default branch**. This repository's default branch is `develop`, which carries
-the inherited upstream CARE workflows and none of the fork's delivery
-workflows. The API is unambiguous:
+**The requirement, established rather than assumed.** GitHub registers a
+`workflow_dispatch` entry point only for a workflow file present on the
+repository's default branch (`develop`). Pushing the file on a branch is **not**
+sufficient, which was worth proving rather than believing: after
+`feature/ci-workflow-control-plane` was pushed carrying five `delivery-*.yml`
+dispatch workflows,
 
 ```
-$ gh workflow run build-image.yml --ref feature/ci-controlled-delivery
-HTTP 404: workflow build-image.yml not found on the default branch
+$ gh api repos/xiidigital/care/actions/workflows --jq '.workflows[].path'
+.github/workflows/ci.yml
+.github/workflows/deploy.yml
+.github/workflows/docs.yml
+.github/workflows/linter.yml
+.github/workflows/release.yml
+.github/workflows/reusable-test.yml
+.github/workflows/test-merge-queue.yml
+.github/workflows/test-pull-request.yml
+.github/workflows/validate-pr-title.yml
+
+$ gh workflow run delivery-build.yml --ref feature/ci-workflow-control-plane
+HTTP 404: workflow delivery-build.yml not found on the default branch
 ```
 
-The same 404 is returned for `deploy-staging.yml`, `promote-production.yml` and
-`infra-check.yml`. `ci.yml` runs only because it triggers on `push` to
-`feature/**`, which needs no default-branch registration.
+Not one `delivery-*` workflow is registered, and the dispatch 404s against the
+very ref that carries it. **The definitions must be merged into `develop`.**
 
-**Why this is not a workflow bug.** The trigger design is correct and
-deliberate: ADR-0008 makes `gcp` the trusted release branch, so a push there
-producing a release candidate is the intended path, and the operational
-workflows are dispatch-only so that deployment is an explicit act. Nothing here
-should be changed to make a feature branch produce a release artifact —
-broadening `build-image.yml` to `feature/**` would hand the publication
-credential to any branch, which is exactly the trust condition ES-08 section 62
-exists to hold.
+**What has been built.** The control plane exists and is reviewable:
 
-**To close, one of:**
+- five dispatch shims plus `DELIVERY.md` on `feature/ci-workflow-control-plane`,
+  five new files and zero modifications — no application code, no
+  infrastructure, no upstream workflow touched;
+- [PR #1](https://github.com/xiidigital/care/pull/1) proposes them to `develop`;
+- the architectural rule is ADR-0008 section 5a;
+- the security model that makes a ref input safe is `verify-source.yml` plus two
+  invariants (`check_credentialed_jobs_verify_source_trust`,
+  `check_reusable_workflow_calls_resolve`).
 
-1. Land the branch on `gcp` — the designed path. A push to `gcp` builds and
-   publishes a digest, after which `deploy-staging` is dispatchable *if* the
-   workflows are also on the default branch.
-2. Land the workflows on the default branch (`develop`), which is what makes
-   every dispatch-only workflow reachable at all. Note that (1) alone does not
-   make `deploy-staging.yml` dispatchable; only default-branch presence does.
+**Two merges are required, in order.**
 
-Both are repository-owner decisions on a public repository, and neither was
-authorized for this continuation.
+1. `feature/ci-controlled-delivery` -> `gcp`. The release lineage currently
+   contains **none** of the ES-08 implementation — no delivery workflows, no
+   `infrastructure/scripts/gcp/`, no `modules/github-oidc`, no
+   `care/utils/delivery`. The shims resolve `@gcp`, so until this lands a
+   dispatch fails with "workflow was not found".
+2. `feature/ci-workflow-control-plane` -> `develop` (PR #1), which is what
+   registers the entry points.
+
+Neither was performed: merging into a public repository's default and release
+branches is a repository-owner decision, and ES-08 continuation instructions
+were to stop at exactly this boundary and report the requirement.
+
+**Known failing check on PR #1.** `PR Title JIRA Validation` requires titles to
+begin `[ENG-nnn]`. This fork's ES-08 work has no JIRA ticket and inventing one
+would cite an unrelated real issue. Recorded rather than worked around.
 
 ### D11. Two startup defects were only findable in a real container — RESOLVED
 
@@ -2620,27 +2628,47 @@ asserting it fails when violated.
 Verified against the real production image locally (6/6) and on the runner
 (run [32340865564](https://github.com/xiidigital/care/actions/runs/32340865564)).
 
-### D12. The reviewing workstation has no GCP or OpenTofu tooling
+### D12. Infrastructure verification depends on an operator bootstrap
 
-**Status:** Open, environmental. **Recorded 2026-08-20.** **Severity:** blocks
-local infrastructure verification.
+**Status:** Open, reclassified. **Recorded 2026-08-20, updated 2026-08-20.**
+**Severity:** operator/bootstrap constraint, not a design gap.
 
-`gcloud`, `tofu` and `terraform` are not installed, and there is no
-`~/.config/gcloud`, no application-default credential and no
-`GOOGLE_APPLICATION_CREDENTIALS`. Nothing on this workstation can authenticate
-to GCP or read OpenTofu state.
+`gcloud`, `tofu` and `terraform` are not installed on the reviewing workstation,
+and there is no `~/.config/gcloud`, no application-default credential and no
+`GOOGLE_APPLICATION_CREDENTIALS`. Nothing there can authenticate to GCP or read
+OpenTofu state, so `tofu fmt -check`, `tofu validate`, `tofu plan` and
+`tofu plan -detailed-exitcode` cannot be run locally and post-deployment drift
+cannot be checked from there.
 
-Consequences for ES-08 acceptance: `tofu fmt -check`, `tofu validate`,
-`tofu plan` and `tofu plan -detailed-exitcode` cannot be run locally, so
-post-deployment drift cannot be checked from here, and no applied WIF resource
-can be inspected directly (D2).
+**This is largely by design and should not be fixed by installing tooling.**
+`infra-check.yml` runs `fmt` and `validate` with no credentials on every pull
+request, and plans an environment through the `infrastructure-plan` environment;
+`infra-apply.yml` applies through the protected `infrastructure-apply`
+environment. CI is the intended place for all of it, and
+`delivery-infrastructure.yml` is the operator's entry point. Once D10 is closed
+the local tool requirement disappears for everything except bootstrap.
 
-This is not necessarily a gap in the design. `infra-check.yml` runs
-`fmt`/`validate` on every pull request with no credentials, and plans an
-environment through the `infrastructure-plan` environment — so CI is the
-intended place for both. That path is unreachable for the same reason
-everything else is (D10).
+**The bootstrap boundary, precisely.** It is genuinely circular and cannot be
+closed by CI:
 
+- GitHub Actions authenticates to GCP by Workload Identity Federation;
+- the WIF pool, provider and the four automation identities are created by the
+  bootstrap root (`infrastructure/terraform/bootstrap`, behind
+  `github_repository`);
+- therefore the workflow that could apply them needs them to already exist.
+
+The minimal one-time operator action is: `tofu apply` of
+`infrastructure/terraform/bootstrap` with `github_repository` set, by an
+authenticated human, creating the state bucket, the pool, the provider, the four
+service accounts and their environment-scoped impersonation bindings. **No
+service-account key is created and none may be** — the whole point of the pool
+is that GitHub presents a short-lived OIDC assertion instead. Everything after
+that first apply runs through `delivery-infrastructure.yml`.
+
+Repository variables already name a provider resource
+(`projects/272331402273/.../workloadIdentityPools/care-github/providers/github`),
+suggesting an operator has performed this apply. That remains unconfirmed: see
+D2 — no exchange has been observed, because no credentialed workflow can start.
 
 ### D3. Recent Views is not covered by automated staging acceptance
 

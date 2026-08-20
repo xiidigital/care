@@ -290,6 +290,69 @@ If a rebuild is required, the result SHALL be considered a new artifact and SHAL
 
 ---
 
+## 5a. Workflow definitions are a control plane
+
+*Added after ES-08 finding D10.*
+
+GitHub registers a `workflow_dispatch` entry point only for a workflow file that
+exists on the repository's **default branch**. A delivery workflow that lives
+only on a release lineage therefore cannot be started by an operator at all; the
+API answers `HTTP 404: workflow ... not found on the default branch`. Pushing the
+branch is not sufficient — the definitions must be merged to the default branch.
+
+Delivery workflow definitions are therefore repository-level control-plane
+configuration, and they SHALL be permitted to live on the repository default
+branch independently of the application revision they build or deploy.
+
+Three things which were previously conflated SHALL be treated as separate:
+
+| concept | decided by |
+| --- | --- |
+| workflow definition location | the default branch |
+| source revision | an explicit, **verified** input |
+| deployed artifact | an immutable digest |
+
+The following consequences are normative.
+
+**The presence of a workflow on the default branch SHALL NOT make the default
+branch a deployment target.** A control-plane workflow SHALL NOT build or deploy
+its own branch merely because it is defined there. It SHALL identify the source
+revision explicitly.
+
+**Source trust SHALL be evaluated independently of workflow-definition
+location.** Once the built revision is a workflow input it is
+attacker-reachable: anyone who may dispatch a workflow may type a ref. A
+revision SHALL be treated as trusted if, and only if, it is already reachable
+from the managed-cloud release lineage, determined by commit ancestry rather
+than by comparing the input string. A branch that merely *contains* the release
+lineage SHALL NOT qualify.
+
+**Trust SHALL be established before a credential exists.** The job that decides
+source trust SHALL hold no deployment credential and SHALL declare no GitHub
+Environment; a gate able to authorize itself is not a gate. Every job requesting
+`id-token: write` SHALL depend on it.
+
+**Credentialed jobs SHALL check out the resolved commit SHA**, not the ref that
+was supplied. Re-resolving a ref after checking it is a
+time-of-check/time-of-use gap: a branch may move between the two reads.
+
+**Application delivery SHALL remain by immutable digest.** A control-plane
+deployment entry point SHALL accept a digest and SHALL NOT accept a branch or a
+tag as the artifact selector.
+
+**Environment protection SHALL NOT be relaxed to accommodate a control plane.**
+A shim on the default branch obtains no identity of its own: the workload
+identity bindings accept only the matching GitHub Environment claim, so a
+workflow that does not run in the protected environment cannot become the
+protected identity.
+
+These properties are machine-checked by
+`care.utils.delivery.invariants`, so a workflow edited to skip the gate, to
+check out an unverified ref, or to give the gate a credential fails CI rather
+than review.
+
+---
+
 ## 6. Artifact portability
 
 The application image SHALL NOT encode a specific deployment instance.
