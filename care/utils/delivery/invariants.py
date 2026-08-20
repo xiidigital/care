@@ -1274,6 +1274,36 @@ def check_reusable_workflow_calls_resolve() -> list[Finding]:
     return findings
 
 
+#: GitHub permission strength. An explicit `permissions:` block defaults every
+#: permission it does not name to `none`, so "not mentioned" is a refusal.
+PERMISSION_RANK = {"none": 0, "read": 1, "write": 2}
+
+
+def _requested_permissions(workflow: Path) -> dict[str, str]:
+    """The strongest permission each of a workflow's jobs asks for."""
+    requested: dict[str, str] = {}
+    for job in _jobs(_load(workflow)).values():
+        perms = job.get("permissions") or {}
+        if not isinstance(perms, dict):
+            continue
+        for key, value in perms.items():
+            if PERMISSION_RANK.get(value, 0) > PERMISSION_RANK.get(
+                requested.get(key, "none"), 0
+            ):
+                requested[key] = value
+    return requested
+
+
+def _permission_shortfall(granted: dict, requested: dict[str, str]) -> list[str]:
+    """Permissions a callee asks for that its caller does not grant."""
+    return sorted(
+        f"{key}: {value}"
+        for key, value in requested.items()
+        if PERMISSION_RANK.get(granted.get(key, "none"), 0)
+        < PERMISSION_RANK.get(value, 0)
+    )
+
+
 def check_callers_grant_what_callees_request() -> list[Finding]:
     """
     A job calling a reusable workflow grants at least what that workflow asks
@@ -1314,27 +1344,7 @@ def check_callers_grant_what_callees_request() -> list[Finding]:
             if not isinstance(granted, dict):
                 continue
 
-            # read is weaker than write, and an explicit permissions block
-            # defaults everything it does not name to none -- so a callee asking
-            # for `actions: read` is refused by a caller that grants only
-            # `contents: read` and `id-token: write`. Compare by rank, not by
-            # equality, and not only for write: that is how promote-production's
-            # eligibility job, which reads the acceptance record, was missed.
-            rank = {"none": 0, "read": 1, "write": 2}
-            requested: dict[str, str] = {}
-            for callee in _jobs(_load(target)).values():
-                perms = callee.get("permissions") or {}
-                if not isinstance(perms, dict):
-                    continue
-                for key, value in perms.items():
-                    if rank.get(value, 0) > rank.get(requested.get(key, "none"), 0):
-                        requested[key] = value
-
-            missing = sorted(
-                f"{key}: {value}"
-                for key, value in requested.items()
-                if rank.get(granted.get(key, "none"), 0) < rank.get(value, 0)
-            )
+            missing = _permission_shortfall(granted, _requested_permissions(target))
             if missing:
                 findings.append(
                     Finding(
