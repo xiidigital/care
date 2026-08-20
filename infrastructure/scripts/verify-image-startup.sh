@@ -106,6 +106,25 @@ if [ -z "$DATABASE_URL" ]; then
   DATABASE_URL="postgres://care:care@${RUN_ID}-db:5432/care"
 fi
 
+# scripts/wait_for_db.sh -- which start.sh and start-worker.sh both invoke
+# before binding -- connects with POSTGRES_HOST/PORT/USER/PASSWORD/DB and never
+# reads DATABASE_URL. The managed environment sets both for that reason
+# (modules/care-environment/config.tf sets the four plain values,
+# secrets.tf projects POSTGRES_PASSWORD), so a verification that supplies only
+# DATABASE_URL configures the container in a way no environment ever does: the
+# wait loop falls back to a local unix socket, exhausts its 30 attempts and the
+# role never serves. Split the URL back into the parts the wait script reads.
+if [[ "$DATABASE_URL" =~ ^[a-zA-Z+]+://([^:/?#]+):([^@/?#]*)@([^:/?#]+):([0-9]+)/([^?#]+)$ ]]; then
+  PG_USER="${BASH_REMATCH[1]}"
+  PG_PASSWORD="${BASH_REMATCH[2]}"
+  PG_HOST="${BASH_REMATCH[3]}"
+  PG_PORT="${BASH_REMATCH[4]}"
+  PG_DB="${BASH_REMATCH[5]}"
+else
+  echo "error: --database-url must be postgres://user:password@host:port/dbname" >&2
+  exit 1
+fi
+
 # The Redis-free managed composition (ADR-0004, ADR-0005, ADR-0006), configured
 # as staging is. REDIS_URL is deliberately absent: if any of this needed Redis
 # the containers would not start, which is the point of checking here.
@@ -115,11 +134,22 @@ fi
 COMMON_ENV=(
   -e "DJANGO_SETTINGS_MODULE=config.settings.deployment"
   -e "DATABASE_URL=${DATABASE_URL}"
+  -e "POSTGRES_HOST=${PG_HOST}"
+  -e "POSTGRES_PORT=${PG_PORT}"
+  -e "POSTGRES_USER=${PG_USER}"
+  -e "POSTGRES_PASSWORD=${PG_PASSWORD}"
+  -e "POSTGRES_DB=${PG_DB}"
   -e "DJANGO_SECRET_KEY=startup-verification-only-not-a-deployment-key"
   -e "DJANGO_SECURE_SSL_REDIRECT=false"
   -e "DJANGO_ALLOWED_HOSTS=[\"*\"]"
   -e "DJANGO_EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend"
-  -e "CARE_STORAGE_BACKEND=local"
+  # config/storage.py accepts s3 and gcs only; there is no "local" provider, and
+  # naming one raises ImproperlyConfigured before the role can bind. gcs is what
+  # the staging composition this verifies actually selects
+  # (care/utils/tests/test_staging_composition.py). It resolves no credentials
+  # here: building the STORAGES entry is settings construction, and nothing in
+  # this script reads or writes an object.
+  -e "CARE_STORAGE_BACKEND=gcs"
   -e "CARE_CACHE_BACKEND=postgres"
   -e "CARE_RATE_LIMIT_BACKEND=postgres"
   -e "CARE_TASK_BACKEND=cloud_tasks"
