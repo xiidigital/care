@@ -1098,6 +1098,27 @@ def check_credentialed_jobs_verify_source_trust() -> list[Finding]:
             if not (isinstance(perms, dict) and perms.get("id-token") == "write"):
                 continue
 
+            # A job whose whole body is a call to another delivery workflow is
+            # forwarding the permission, not spending it. The gate belongs to
+            # the workflow that actually checks out and runs something, and that
+            # workflow is checked on its own account.
+            forwarded_to = _local_workflow_target(_job_uses(job))
+            if forwarded_to and (WORKFLOW_DIR / forwarded_to).is_file():
+                callee_jobs = _jobs(_load(WORKFLOW_DIR / forwarded_to))
+                if _trust_jobs(callee_jobs):
+                    continue
+                findings.append(
+                    Finding(
+                        where=where,
+                        rule="credentialed jobs verify source trust",
+                        detail=(
+                            f"job '{name}' forwards id-token: write to "
+                            f"{forwarded_to}, which has no source-trust gate"
+                        ),
+                    )
+                )
+                continue
+
             if name not in trusted:
                 findings.append(
                     Finding(
@@ -1253,6 +1274,69 @@ def check_reusable_workflow_calls_resolve() -> list[Finding]:
     return findings
 
 
+def check_callers_grant_what_callees_request() -> list[Finding]:
+    """
+    A job calling a reusable workflow grants at least what that workflow asks
+    for (ES-08 D10 Part F).
+
+    GitHub caps a called workflow's permissions at the caller's. Ask for more
+    and the run does not fail a step -- it never starts, and a startup failure
+    carries no log, no annotation and no message beyond "a workflow file issue".
+    This cost two debugging cycles at two different levels of the same chain:
+    the control-plane shim capping build-image, and deploy-staging capping
+    deploy-app.
+
+    Checked one level at a time, which is enough: every workflow in the chain is
+    itself checked, so a gap anywhere is reported where it is.
+    """
+    findings = []
+    for path in _workflow_paths():
+        if not path.is_file():
+            continue
+        document = _load(path)
+        jobs = _jobs(document)
+        if not jobs:
+            continue
+        where = str(path.relative_to(REPO_ROOT)).replace("\\", "/")
+        workflow_permissions = document.get("permissions") or {}
+
+        for name, job in jobs.items():
+            target_name = _local_workflow_target(_job_uses(job))
+            if target_name is None:
+                continue
+            target = WORKFLOW_DIR / target_name
+            if not target.is_file():
+                continue
+
+            granted = job.get("permissions")
+            if granted is None:
+                granted = workflow_permissions
+            if not isinstance(granted, dict):
+                continue
+
+            requested = set()
+            for callee in _jobs(_load(target)).values():
+                perms = callee.get("permissions") or {}
+                if isinstance(perms, dict):
+                    requested |= {k for k, v in perms.items() if v == "write"}
+
+            missing = sorted(p for p in requested if granted.get(p) != "write")
+            if missing:
+                findings.append(
+                    Finding(
+                        where=where,
+                        rule="callers grant what callees request",
+                        detail=(
+                            f"job '{name}' calls {target_name}, whose jobs request "
+                            + ", ".join(f"{p}: write" for p in missing)
+                            + "; a called workflow cannot exceed its caller, so "
+                            "the run would not start"
+                        ),
+                    )
+                )
+    return findings
+
+
 CHECKS = (
     check_workflows_exist,
     check_permissions_declared,
@@ -1276,6 +1360,7 @@ CHECKS = (
     check_storage_backend_selection_is_supported,
     check_credentialed_jobs_verify_source_trust,
     check_reusable_workflow_calls_resolve,
+    check_callers_grant_what_callees_request,
 )
 
 

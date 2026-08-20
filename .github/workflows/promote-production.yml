@@ -129,6 +129,13 @@ jobs:
   production:
     name: Production
     needs: eligibility
+    # A called workflow cannot request more than its caller was granted, and
+    # deploy-app's deployment job asks for `id-token: write`. Granting it here is
+    # permission to *request* an OIDC token, not a credential: the exchange only
+    # happens in the job that declares the matching GitHub Environment.
+    permissions:
+      contents: read
+      id-token: write
     uses: xiidigital/care/.github/workflows/deploy-app.yml@gcp
     with:
       environment: production
