@@ -97,6 +97,16 @@ variable "infrastructure_roles" {
   EOT
   type        = list(string)
   default = [
+    # Read the project's own metadata. `data "google_project" "this"` needs
+    # resourcemanager.projects.get, which none of the admin roles below carry --
+    # projectIamAdmin grants get/setIamPolicy on the project, not get on the
+    # project itself. Without it a plan fails before it reads any resource:
+    # "the user does not have permission to access Project ... or it may not
+    # exist", which reads like a missing project rather than a missing role.
+    # roles/browser is the smallest predefined role that supplies it, and it is
+    # read-only (ES-08 section 114: name the permission, do not reach for
+    # roles/editor).
+    "roles/browser",
     "roles/run.admin",
     "roles/cloudsql.admin",
     "roles/storage.admin",
