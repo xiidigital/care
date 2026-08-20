@@ -1124,6 +1124,30 @@ def check_credentialed_jobs_verify_source_trust() -> list[Finding]:
     return findings
 
 
+#: This repository, as a reusable-workflow reference must spell it. GitHub does
+#: not expand an expression in `uses:`, so the owner and name are literal.
+SELF_REPOSITORY = "xiidigital/care"
+
+
+def _local_workflow_target(uses: str) -> str | None:
+    """
+    The workflow file a `uses:` names, when it is one of this repository's own.
+
+    Two spellings, and the difference matters. `./.github/workflows/x.yml`
+    resolves against the commit of the *run*, not the commit of the file that
+    contains it — so a reusable workflow called from another ref looks for its
+    own dependencies in the caller's tree, where they need not exist. That is a
+    startup failure with no log and no annotation. The explicit
+    `owner/repo/.github/workflows/x.yml@ref` form resolves where it says.
+    """
+    if uses.startswith("./.github/workflows/"):
+        return uses.removeprefix("./.github/workflows/")
+    prefix = f"{SELF_REPOSITORY}/.github/workflows/"
+    if uses.startswith(prefix):
+        return uses.removeprefix(prefix).split("@", 1)[0]
+    return None
+
+
 def check_reusable_workflow_calls_resolve() -> list[Finding]:
     """
     Every reusable-workflow call names a target that exists and accepts what it
@@ -1152,12 +1176,28 @@ def check_reusable_workflow_calls_resolve() -> list[Finding]:
 
         for name, job in jobs.items():
             uses = _job_uses(job)
-            if not uses.startswith("./.github/workflows/"):
+            target_name = _local_workflow_target(uses)
+            if target_name is None:
                 continue
 
-            # removeprefix, not lstrip: lstrip strips a character *set*,
-            # which eats the dot in ".github" as well.
-            target = REPO_ROOT / uses.removeprefix("./")
+            # A delivery workflow is reachable from the default-branch control
+            # plane, which calls it at an explicit ref. Its own dependencies
+            # must therefore be spelled explicitly too: `./` would send it
+            # looking in the control plane's tree.
+            if uses.startswith("./"):
+                findings.append(
+                    Finding(
+                        where=where,
+                        rule="reusable workflow calls resolve",
+                        detail=(
+                            f"job '{name}' calls '{uses}'; `./` resolves against "
+                            "the calling run's commit, so use "
+                            f"'{SELF_REPOSITORY}/.github/workflows/{target_name}@<ref>'"
+                        ),
+                    )
+                )
+
+            target = WORKFLOW_DIR / target_name
             if not target.is_file():
                 findings.append(
                     Finding(

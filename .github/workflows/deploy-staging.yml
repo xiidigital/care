@@ -66,7 +66,7 @@ permissions:
 jobs:
   staging:
     name: Staging
-    uses: ./.github/workflows/deploy-app.yml
+    uses: xiidigital/care/.github/workflows/deploy-app.yml@gcp
     with:
       environment: staging
       source_ref: ${{ inputs.source_ref }}

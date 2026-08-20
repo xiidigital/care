@@ -76,7 +76,7 @@ jobs:
   # Source trust before the infrastructure credential exists (ES-08 D10 Part D).
   verify:
     name: Source trust
-    uses: ./.github/workflows/verify-source.yml
+    uses: xiidigital/care/.github/workflows/verify-source.yml@gcp
     with:
       source_ref: ${{ inputs.source_ref }}
 

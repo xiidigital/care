@@ -84,7 +84,7 @@ jobs:
   # tautology that costs a minute and keeps one code path.
   verify:
     name: Source trust
-    uses: ./.github/workflows/verify-source.yml
+    uses: xiidigital/care/.github/workflows/verify-source.yml@gcp
     with:
       source_ref: ${{ inputs.source_ref || github.sha }}
 
@@ -96,7 +96,7 @@ jobs:
   ci:
     name: CI
     needs: verify
-    uses: ./.github/workflows/ci.yml
+    uses: xiidigital/care/.github/workflows/ci.yml@gcp
     with:
       source_sha: ${{ needs.verify.outputs.source_sha }}
 

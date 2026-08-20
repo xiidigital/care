@@ -95,7 +95,7 @@ jobs:
   rollback:
     name: Roll back ${{ inputs.environment }}
     needs: confirm
-    uses: ./.github/workflows/deploy-app.yml
+    uses: xiidigital/care/.github/workflows/deploy-app.yml@gcp
     with:
       environment: ${{ inputs.environment }}
       image_digest: ${{ inputs.image_digest }}

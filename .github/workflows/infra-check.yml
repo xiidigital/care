@@ -112,7 +112,7 @@ jobs:
   verify:
     name: Source trust
     if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' }}
-    uses: ./.github/workflows/verify-source.yml
+    uses: xiidigital/care/.github/workflows/verify-source.yml@gcp
     with:
       source_ref: ${{ inputs.source_ref || 'gcp' }}
 
