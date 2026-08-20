@@ -2846,3 +2846,76 @@ or:
 Stop after ES-08.
 
 Do not begin ES-09.
+
+---
+
+## 204. Real GitHub Actions evidence (2026-08-20)
+
+Recorded after the branch was published and the workflows were executed on
+GitHub. This section states what actually ran, and what did not.
+
+### 204.1 Repository configuration
+
+| | |
+|---|---|
+| remote | `https://github.com/xiidigital/care.git` |
+| repository | `xiidigital/care`, public, `viewerPermission: ADMIN` |
+| default branch | `develop` |
+| branch published | `feature/ci-controlled-delivery` |
+
+GitHub Environments, all five present, names matching the workflows exactly:
+
+| environment | protection |
+|---|---|
+| `artifact-publication` | none — gates a credential, not a human |
+| `staging` | none |
+| `infrastructure-plan` | none |
+| `infrastructure-apply` | required reviewer |
+| `production` | required reviewer |
+
+Repository variables (five, non-secret identifiers only) and **zero repository
+secrets**: `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_WORKLOAD_IDENTITY_PROVIDER`,
+`ARTIFACT_REGISTRY_REPOSITORY`, `IMAGE_NAME`. No runtime secret payload is held
+by GitHub; application secrets remain in Secret Manager.
+
+### 204.2 What ran
+
+`CARE CI` is green on a GitHub-hosted `ubuntu-24.04` runner:
+
+| run | commit | result |
+|---|---|---|
+| [32301845452](https://github.com/xiidigital/care/actions/runs/32301845452) | `60b7bf02` | failure |
+| [32303955622](https://github.com/xiidigital/care/actions/runs/32303955622) | `03958953` | failure |
+| [32305734815](https://github.com/xiidigital/care/actions/runs/32305734815) | `9f280a9a` | failure — production image, 6/6 startup checks red |
+| [32340865564](https://github.com/xiidigital/care/actions/runs/32340865564) | `efa1d552` | **success — 6/6 jobs** |
+
+The green run covers sections 133's CI half: workflow syntax resolves, the job
+graph runs, `contents: read` holds at workflow level with no id-token on any
+untrusted-PR job, the pinned gitleaks gate passes on both the tree and the
+introduced commits, and the production image builds, is inventoried, excludes a
+planted build context, and **starts and serves** — init exits zero, api and
+task_worker both answer `/ping/`, route isolation holds in both directions, and
+the api reports the Redis-free path.
+
+The defects that made the earlier runs red, and their guards, are D11.
+
+### 204.3 What did not run, and why
+
+No image has been published by GitHub Actions. `build-image.yml`,
+`deploy-staging.yml`, `promote-production.yml`, `rollback.yml`,
+`infra-apply.yml` and the plan half of `infra-check.yml` are reachable only by
+`workflow_dispatch` or by a push to `gcp`, and GitHub registers a
+`workflow_dispatch` only for a workflow present on the **default** branch —
+`develop`, which carries none of them. See D10 for the exact API responses and
+the two ways to close it.
+
+Consequently sections 134 and everything downstream remain unproven: no
+CI-built digest, no OIDC exchange, no staging deployment, no same-digest proof,
+no CI-run acceptance, no accepted-digest record, no post-deployment drift check.
+None of these were weakened or worked around to produce a result.
+
+### 204.4 Verdict
+
+**NOT READY.** Section 133 is satisfied for the CI/build validation path.
+Section 134 is not, and the blocker is repository configuration (D10), not
+workflow correctness.

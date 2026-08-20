@@ -2475,51 +2475,172 @@ because "the suite passes" is a staging precondition and it does not.
 Recorded while implementing automated CI and controlled delivery. P2 is closed
 above; these are what ES-08 found or deliberately left.
 
-### D1. Real GitHub Actions execution has not happened
+### D1. Real GitHub Actions execution — CI closed, delivery still blocked
 
-**Status:** Open, externally blocked. **Recorded 2026-08-19.** **Severity:**
-blocks the ES-08 acceptance items that require a CI run.
+**Status:** Partly closed. **Recorded 2026-08-19, updated 2026-08-20.**
+**Severity:** blocks ES-08 section 134.
 
-**What is blocked.** ES-08 section 133 requires at least one real GitHub Actions
-run of the common CI/build path, and section 134 requires at least one real
-trusted workflow deploying a CI-built digest to staging. Neither has occurred,
-because the workflows exist only on a local branch: ES-08 section 3 says not to
-push unless explicitly instructed, and no instruction was given. A workflow file
-that GitHub has never seen has never run.
+**Closed.** ES-08 section 133 asks for a real GitHub Actions run of the common
+CI/build validation path. It has happened, and it is green:
 
-**What was verified instead, and what it does not cover.** Every check the
-workflows perform was executed locally against the same targets, using the same
-scripts the workflows invoke — the production image built and inspected, the
-image started and probed, the digest published to Artifact Registry, staging
-deployed and accepted, OpenTofu validated and planned. That establishes that the
-commands work and that the environment behaves. It does not establish that
-GitHub Actions resolves the workflow syntax, that the reusable-workflow
-composition wires up, that OIDC exchange produces a usable credential, that
-environment protection gates what it should, or that a fork pull request is
-refused — all of which are properties of the platform and can only be observed
-there (ES-08 section 132).
+| | |
+|---|---|
+| workflow | `CARE CI` (`.github/workflows/ci.yml`) |
+| run | [32340865564](https://github.com/xiidigital/care/actions/runs/32340865564) |
+| source commit | `efa1d552fd62244ab89142ebecc311e47abd2e6f` |
+| runner | `ubuntu-24.04`, GitHub-hosted |
+| result | 6/6 jobs success |
 
-**To close.** Push the branch, open a pull request, and let CI run; configure the
-GitHub Environments and variables (08-continuous-delivery.md sections 3 and 4);
-apply the bootstrap root so the identities exist; run the build workflow; deploy
-the resulting digest to staging through the workflow. Section 133 and 134
-evidence is a run id and a URL, and neither exists yet.
+Jobs: Format and lint, Application regression suite, Production image, Redis-free
+composition, Delivery invariants, Secret scan. The workflow syntax resolves, the
+job graph runs, the untrusted-PR path carries `contents: read` and no id-token,
+and the secret scan gates as designed.
 
-### D2. Workload Identity Federation is declared but not applied
+Three earlier runs failed
+([32301845452](https://github.com/xiidigital/care/actions/runs/32301845452),
+[32303955622](https://github.com/xiidigital/care/actions/runs/32303955622),
+[32305734815](https://github.com/xiidigital/care/actions/runs/32305734815)) on
+defects local execution could not find. See D11.
 
-**Status:** Open, sequenced. **Recorded 2026-08-19.** **Severity:** procedural.
+**Still blocked.** Section 134 requires a real trusted workflow deploying a
+CI-built digest to staging. No image has been published by GitHub Actions,
+because the workflow that publishes one cannot be started. See D10.
+
+**What is therefore still unproven.** OIDC exchange against GCP, environment
+protection gating a credential, reusable-workflow composition
+(`build-image.yml` -> `ci.yml`, `deploy-staging.yml` -> `deploy-app.yml`),
+digest handoff between workflows, the accepted-digest record, and staging
+acceptance run from CI. Every one of those is a property of a run that has not
+occurred.
+
+### D2. Workload Identity Federation is declared, and no exchange has been observed
+
+**Status:** Open. **Recorded 2026-08-19, updated 2026-08-20.** **Severity:**
+blocks every credentialed workflow.
 
 The pool, the provider, the four automation identities and their claim
 restrictions are declared in `modules/github-oidc` and instantiated by the
-bootstrap root behind `github_repository`. All four roots validate. Nothing has
-been applied: the bootstrap root runs on local state from an operator
-workstation, and applying it also requires deciding the repository's GitHub
-configuration, which is repository-admin work rather than code (ES-08 section
-196).
+bootstrap root behind `github_repository`. All four roots validate.
 
-The chicken-and-egg is inherent and documented rather than hidden: federation
-must exist before CI can authenticate, so the first apply is an operator's
-(ES-08 section 75).
+The repository now carries variables that name a provider resource
+(`GCP_WORKLOAD_IDENTITY_PROVIDER`, pool `care-github`, provider `github`) and a
+project, so an apply appears to have been performed by an operator. That is not
+evidence: **no workflow has ever performed the exchange**, because no
+credentialed workflow has ever started (D10), and no tooling on the reviewing
+workstation can confirm the resources exist — `gcloud`, `tofu` and any GCP
+credential are all absent there (D12).
+
+The trust expression itself is verified by reading, not by running: the provider
+carries `attribute_condition = "assertion.repository == '<repo>'"`, and each
+service account's impersonation binding is a `principalSet` keyed on
+`attribute.environment`, so a job that does not declare the matching GitHub
+Environment cannot become that identity. Whether GCP agrees is what an exchange
+would show.
+
+### D10. The delivery workflows cannot be started
+
+**Status:** Open, externally blocked. **Recorded 2026-08-20.** **Severity:**
+blocks ES-08 section 134 and everything downstream of it.
+
+**The defect.** Every workflow in the delivery chain past CI is reachable only
+by `workflow_dispatch`, or by a push to `gcp`:
+
+| workflow | triggers |
+|---|---|
+| `build-image.yml` | push to `gcp`, `workflow_dispatch`, `workflow_call` |
+| `deploy-staging.yml` | `workflow_dispatch`, `workflow_call` |
+| `promote-production.yml` | `workflow_dispatch` |
+| `rollback.yml` | `workflow_dispatch` |
+| `infra-apply.yml` | `workflow_dispatch` |
+| `infra-check.yml` (plan half) | `workflow_dispatch` |
+
+GitHub only accepts a `workflow_dispatch` for a workflow that exists **on the
+default branch**. This repository's default branch is `develop`, which carries
+the inherited upstream CARE workflows and none of the fork's delivery
+workflows. The API is unambiguous:
+
+```
+$ gh workflow run build-image.yml --ref feature/ci-controlled-delivery
+HTTP 404: workflow build-image.yml not found on the default branch
+```
+
+The same 404 is returned for `deploy-staging.yml`, `promote-production.yml` and
+`infra-check.yml`. `ci.yml` runs only because it triggers on `push` to
+`feature/**`, which needs no default-branch registration.
+
+**Why this is not a workflow bug.** The trigger design is correct and
+deliberate: ADR-0008 makes `gcp` the trusted release branch, so a push there
+producing a release candidate is the intended path, and the operational
+workflows are dispatch-only so that deployment is an explicit act. Nothing here
+should be changed to make a feature branch produce a release artifact —
+broadening `build-image.yml` to `feature/**` would hand the publication
+credential to any branch, which is exactly the trust condition ES-08 section 62
+exists to hold.
+
+**To close, one of:**
+
+1. Land the branch on `gcp` — the designed path. A push to `gcp` builds and
+   publishes a digest, after which `deploy-staging` is dispatchable *if* the
+   workflows are also on the default branch.
+2. Land the workflows on the default branch (`develop`), which is what makes
+   every dispatch-only workflow reachable at all. Note that (1) alone does not
+   make `deploy-staging.yml` dispatchable; only default-branch presence does.
+
+Both are repository-owner decisions on a public repository, and neither was
+authorized for this continuation.
+
+### D11. Two startup defects were only findable in a real container — RESOLVED
+
+**Status:** Resolved 2026-08-20 in `74b1c4a5b`, guarded in `efa1d552f`.
+
+The first real CI runs failed the production-image job with all six startup
+checks red. Two independent defects, both in
+`infrastructure/scripts/verify-image-startup.sh`, and both the same class of
+mistake — the script configured the image in a way no environment configures
+it:
+
+1. It supplied `DATABASE_URL` alone. `scripts/wait_for_db.sh`, which `start.sh`
+   and `start-worker.sh` both run before binding, connects with
+   `POSTGRES_HOST/PORT/USER/PASSWORD/DB` and never reads `DATABASE_URL`; the
+   managed environment sets both deliberately. psycopg fell back to a local unix
+   socket, exhausted its 30 attempts, and no role served.
+2. It selected `CARE_STORAGE_BACKEND=local`, a provider `config/storage.py` has
+   never accepted. It validates at settings import, so gunicorn could not boot a
+   worker. Staging selects `gcs`, which resolves no credentials during a startup
+   check.
+
+The second was hidden behind the first: only fixing the database wiring revealed
+it. Both are now delivery invariants derived from the source of truth —
+`check_role_startup_supplies_database_variables` reads the names
+`wait_for_db.sh` connects with, and
+`check_storage_backend_selection_is_supported` reads
+`SUPPORTED_STORAGE_BACKENDS` from the validator — each with a detection test
+asserting it fails when violated.
+
+Verified against the real production image locally (6/6) and on the runner
+(run [32340865564](https://github.com/xiidigital/care/actions/runs/32340865564)).
+
+### D12. The reviewing workstation has no GCP or OpenTofu tooling
+
+**Status:** Open, environmental. **Recorded 2026-08-20.** **Severity:** blocks
+local infrastructure verification.
+
+`gcloud`, `tofu` and `terraform` are not installed, and there is no
+`~/.config/gcloud`, no application-default credential and no
+`GOOGLE_APPLICATION_CREDENTIALS`. Nothing on this workstation can authenticate
+to GCP or read OpenTofu state.
+
+Consequences for ES-08 acceptance: `tofu fmt -check`, `tofu validate`,
+`tofu plan` and `tofu plan -detailed-exitcode` cannot be run locally, so
+post-deployment drift cannot be checked from here, and no applied WIF resource
+can be inspected directly (D2).
+
+This is not necessarily a gap in the design. `infra-check.yml` runs
+`fmt`/`validate` on every pull request with no credentials, and plans an
+environment through the `infrastructure-plan` environment — so CI is the
+intended place for both. That path is unreachable for the same reason
+everything else is (D10).
+
 
 ### D3. Recent Views is not covered by automated staging acceptance
 
