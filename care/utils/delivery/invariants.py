@@ -1314,13 +1314,27 @@ def check_callers_grant_what_callees_request() -> list[Finding]:
             if not isinstance(granted, dict):
                 continue
 
-            requested = set()
+            # read is weaker than write, and an explicit permissions block
+            # defaults everything it does not name to none -- so a callee asking
+            # for `actions: read` is refused by a caller that grants only
+            # `contents: read` and `id-token: write`. Compare by rank, not by
+            # equality, and not only for write: that is how promote-production's
+            # eligibility job, which reads the acceptance record, was missed.
+            rank = {"none": 0, "read": 1, "write": 2}
+            requested: dict[str, str] = {}
             for callee in _jobs(_load(target)).values():
                 perms = callee.get("permissions") or {}
-                if isinstance(perms, dict):
-                    requested |= {k for k, v in perms.items() if v == "write"}
+                if not isinstance(perms, dict):
+                    continue
+                for key, value in perms.items():
+                    if rank.get(value, 0) > rank.get(requested.get(key, "none"), 0):
+                        requested[key] = value
 
-            missing = sorted(p for p in requested if granted.get(p) != "write")
+            missing = sorted(
+                f"{key}: {value}"
+                for key, value in requested.items()
+                if rank.get(granted.get(key, "none"), 0) < rank.get(value, 0)
+            )
             if missing:
                 findings.append(
                     Finding(
@@ -1328,7 +1342,7 @@ def check_callers_grant_what_callees_request() -> list[Finding]:
                         rule="callers grant what callees request",
                         detail=(
                             f"job '{name}' calls {target_name}, whose jobs request "
-                            + ", ".join(f"{p}: write" for p in missing)
+                            + ", ".join(missing)
                             + "; a called workflow cannot exceed its caller, so "
                             "the run would not start"
                         ),
