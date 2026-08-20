@@ -26,6 +26,23 @@
 name: Promote to production
 
 on:
+  # Callable, so the default-branch control plane can be the operator's entry
+  # point while this implementation stays on the release lineage (ES-08 D10).
+  # `choice` is a workflow_dispatch-only type; the callable form takes strings
+  # and validates them in the job.
+  workflow_call:
+    inputs:
+      image_digest:
+        required: true
+        type: string
+      source_sha:
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       image_digest:

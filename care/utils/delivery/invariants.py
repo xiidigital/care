@@ -344,12 +344,31 @@ def check_production_is_gated() -> list[Finding]:
     triggers = document.get(True) or document.get("on") or {}
     trigger_names = set(triggers) if isinstance(triggers, (dict, list)) else {triggers}
 
-    if trigger_names != {"workflow_dispatch"}:
+    # A human asks for a promotion; nothing else may. `workflow_call` is
+    # permitted because D10 puts the operator's entry point on the default
+    # branch and this implementation on the release lineage, so the dispatch
+    # arrives through a shim -- a person still starts it. What stays forbidden
+    # is any trigger that fires on its own: a push, a schedule, or the
+    # completion of another run.
+    automatic = trigger_names - {"workflow_dispatch", "workflow_call"}
+    if automatic:
         findings.append(
             Finding(
                 where="promote-production.yml",
                 rule="production promotion is manual",
-                detail=f"triggers are {sorted(trigger_names)}; only workflow_dispatch may promote",
+                detail=(
+                    f"triggers {sorted(automatic)} fire without a person asking; "
+                    "only workflow_dispatch, or a workflow_call from a dispatch "
+                    "entry point, may promote"
+                ),
+            )
+        )
+    if "workflow_dispatch" not in trigger_names:
+        findings.append(
+            Finding(
+                where="promote-production.yml",
+                rule="production promotion is manual",
+                detail="no workflow_dispatch trigger; promotion must be startable by a person",
             )
         )
 

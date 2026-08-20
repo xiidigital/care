@@ -19,6 +19,22 @@
 name: Infrastructure apply
 
 on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      confirm_environment:
+        required: true
+        type: string
+      allow_destructive:
+        required: false
+        type: boolean
+        default: false
+      source_ref:
+        required: false
+        type: string
+        default: "gcp"
   workflow_dispatch:
     inputs:
       environment:

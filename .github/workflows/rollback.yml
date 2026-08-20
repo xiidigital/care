@@ -18,6 +18,21 @@
 name: Rollback
 
 on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      image_digest:
+        required: true
+        type: string
+      confirm_environment:
+        required: true
+        type: string
+      source_sha:
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       environment:
