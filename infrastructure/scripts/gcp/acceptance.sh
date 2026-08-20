@@ -80,6 +80,28 @@ record() { RESULTS+=("$1|$2|$3"); }
 # ---------------------------------------------------------------------------
 
 care_phase "API"
+
+# Wait for the URL to serve before asserting anything about it.
+#
+# A Cloud Run revision reporting Ready is not the same as the service URL
+# routing to it: the deployment reported `care-staging-api is ready` and this
+# check, seventeen seconds later, got a 500 from Google's frontend rather than
+# from Django -- the signature of no healthy instance behind the URL yet. The
+# API was serving normally by the time anyone looked, so the acceptance was
+# reporting on its own timing rather than on the deployment.
+#
+# Bounded, and it does not decide anything: if the API never answers, the
+# assertion below still runs and still fails, with the status it actually got.
+# The loop only removes the race.
+API_READY_TIMEOUT="${API_READY_TIMEOUT:-180}"
+api_deadline=$((SECONDS + API_READY_TIMEOUT))
+while [ "$SECONDS" -lt "$api_deadline" ]; do
+  if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${API_URL}/ping/" || echo 000)" = "200" ]; then
+    break
+  fi
+  sleep 5
+done
+
 PING_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${API_URL}/ping/" || echo 000)"
 if [ "$PING_STATUS" = "200" ]; then
   care_ok "API /ping/ 200"
