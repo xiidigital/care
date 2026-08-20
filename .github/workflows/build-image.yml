@@ -43,10 +43,6 @@ on:
         required: false
         type: string
         default: "gcp"
-      deploy_staging:
-        description: "Deploy the published digest to staging after publication"
-        type: boolean
-        default: false
   workflow_call:
     inputs:
       source_ref:
@@ -54,9 +50,6 @@ on:
         required: false
         type: string
         default: ""
-      deploy_staging:
-        type: boolean
-        default: false
     outputs:
       image_digest:
         description: "Immutable digest of the published image"
@@ -289,19 +282,3 @@ jobs:
             echo "Deploy it with the \`Deploy to staging\` workflow and this digest."
             echo "Nothing has been deployed by this run."
           } >> "$GITHUB_STEP_SUMMARY"
-
-  # Deployment is a separate workflow with separate credentials. It is called
-  # here only when asked for, and it receives the digest this run produced —
-  # never a branch name, and never HEAD, which may have moved since the build
-  # (ES-08 section 155).
-  deploy-staging:
-    name: Staging
-    needs: [verify, publish]
-    if: inputs.deploy_staging
-    uses: ./.github/workflows/deploy-staging.yml
-    with:
-      image_digest: ${{ needs.publish.outputs.image_digest }}
-      source_sha: ${{ needs.publish.outputs.source_sha }}
-      # The same verified revision that built the image runs the deployment,
-      # by SHA. Re-verified by the callee rather than trusted from here.
-      source_ref: ${{ needs.verify.outputs.source_sha }}
