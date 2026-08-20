@@ -65,8 +65,23 @@ jobs:
     name: fmt and validate
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+
+    # Deliberately not gated on source trust: this job holds no credential and
+    # exists to validate untrusted pull requests, where there is nothing to
+    # verify against. It therefore takes the requested ref as given — which is
+    # safe precisely because it can do nothing with it. The `plan` job below is
+    # the one that reads real state, and that one uses the verified SHA.
+    permissions:
+      contents: read
+
     steps:
+      # The sources under test. Without a ref this resolves to the *calling*
+      # run's commit, and a call from the default-branch control plane lands on
+      # a tree with no infrastructure/ directory at all — `tofu fmt` then fails
+      # with "No file or directory", which says nothing about the sources.
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
       # opentofu/setup-opentofu v2.0.2
       - name: Set up OpenTofu
