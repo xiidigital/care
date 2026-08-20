@@ -1,0 +1,46 @@
+# Delivery control plane: redeploy a previously published digest.
+#
+# See delivery-build.yml for why this file is on the default branch.
+#
+# Rollback is a deployment of an existing immutable artifact, not a revert of
+# source and not a rebuild (ADR-0008 section 48). The digest to return to is
+# reported by every deployment as its "previous digest", so the value typed here
+# comes from a run record rather than from memory.
+
+name: Delivery — roll back
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to roll back"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      image_digest:
+        description: "sha256:... of the digest to roll back to"
+        required: true
+        type: string
+      confirm_environment:
+        description: "Type the environment name again to confirm"
+        required: true
+        type: string
+      source_sha:
+        description: "Commit that produced the digest, if known"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: Roll back ${{ inputs.environment }}
+    uses: xiidigital/care/.github/workflows/rollback.yml@gcp
+    with:
+      environment: ${{ inputs.environment }}
+      image_digest: ${{ inputs.image_digest }}
+      confirm_environment: ${{ inputs.confirm_environment }}
+      source_sha: ${{ inputs.source_sha }}

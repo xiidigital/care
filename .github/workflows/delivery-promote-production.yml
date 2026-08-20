@@ -1,0 +1,44 @@
+# Delivery control plane: promote a staging-accepted digest to production.
+#
+# See delivery-build.yml for why this file is on the default branch.
+#
+# This shim does not weaken the production gate, and cannot. The gate is the
+# `production` GitHub Environment and its required reviewer, declared by the
+# implementation on the release lineage; the GCP trust binding for the
+# production deployment identity accepts only that environment claim. A shim
+# that called the implementation without it would obtain nothing.
+#
+# The eligibility rule is likewise the implementation's: promotion looks for the
+# staging acceptance record naming this exact digest, and refuses a digest that
+# has none.
+
+name: Delivery — promote to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "sha256:... of a digest that passed staging acceptance"
+        required: true
+        type: string
+      source_sha:
+        description: "Commit that produced the digest"
+        required: false
+        type: string
+      dry_run:
+        description: "Show the intended promotion and change nothing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  production:
+    name: Production
+    uses: xiidigital/care/.github/workflows/promote-production.yml@gcp
+    with:
+      image_digest: ${{ inputs.image_digest }}
+      source_sha: ${{ inputs.source_sha }}
+      dry_run: ${{ inputs.dry_run }}

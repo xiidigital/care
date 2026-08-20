@@ -1,0 +1,68 @@
+# Delivery control plane: build and publish an immutable application image.
+#
+# ---------------------------------------------------------------------------
+# Why this file is on the default branch
+# ---------------------------------------------------------------------------
+#
+# GitHub registers a `workflow_dispatch` entry point only for a workflow that
+# exists on the repository's *default* branch. The managed-cloud delivery
+# implementation lives on the `gcp` release lineage, so before this file existed
+# none of it could be started by hand:
+#
+#   $ gh workflow run build-image.yml --ref feature/ci-controlled-delivery
+#   HTTP 404: workflow build-image.yml not found on the default branch
+#
+# That was ES-08 finding D10. The fix is a control plane on `develop`, and the
+# rule it establishes (ADR-0008 section 5a):
+#
+#   workflow definition location  !=  source revision  !=  deployed image
+#
+# ---------------------------------------------------------------------------
+# What this does NOT mean
+# ---------------------------------------------------------------------------
+#
+# `develop` is not a deployment target and this file does not make it one.
+# Nothing here builds `develop`. This workflow contains no credential, names no
+# environment, and does no work: it is a registration shim whose only job is to
+# call the implementation on the release lineage and hand it an operator's
+# request.
+#
+# The implementation is pinned to `@gcp` — the managed-cloud release lineage —
+# so the *code that runs* is always maintainer-reviewed, whatever this file
+# says. And the *revision it builds* is checked separately: build-image.yml
+# calls verify-source.yml, which refuses any commit not already reachable from
+# `gcp`. Typing your own branch into `source_ref` gets you a failed run, not a
+# publication credential.
+#
+# ORDERING: this shim resolves `@gcp`, so the ES-08 delivery implementation must
+# be merged to `gcp` before it can run. Until then a dispatch fails immediately
+# with "workflow was not found", which is the correct and visible failure.
+
+name: Delivery — build and publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Source ref or commit to build. Must already be reachable from gcp."
+        required: true
+        type: string
+        default: "gcp"
+      deploy_staging:
+        description: "Deploy the published digest to staging when the build succeeds"
+        required: false
+        type: boolean
+        default: false
+
+# Nothing here needs more. The credential is requested by the implementation,
+# in the job that holds it, after source trust has been established.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and publish
+    uses: xiidigital/care/.github/workflows/build-image.yml@gcp
+    with:
+      source_ref: ${{ inputs.source_ref }}
+      deploy_staging: ${{ inputs.deploy_staging }}

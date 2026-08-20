@@ -1,0 +1,49 @@
+# Delivery control plane: deploy an already-published digest to staging.
+#
+# See delivery-build.yml for why this file is on the default branch. The same
+# three rules hold here:
+#
+#   this file is a registration shim and holds no credential;
+#   the implementation is pinned to the `gcp` release lineage;
+#   the deployment selects an immutable digest, never a branch and never a tag.
+#
+# A digest is required rather than defaulted. There is no sensible default for
+# "which artifact should staging run", and a workflow that guesses is a workflow
+# that eventually deploys the wrong thing quietly (ADR-0008 section 4).
+
+name: Delivery — deploy to staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "sha256:... of an image published by the build workflow"
+        required: true
+        type: string
+      source_sha:
+        description: "Commit that produced the digest; verified against /app_version/"
+        required: false
+        type: string
+      source_ref:
+        description: "Source ref whose delivery scripts run. Must be reachable from gcp."
+        required: false
+        type: string
+        default: "gcp"
+      dry_run:
+        description: "Show the intended deployment and change nothing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  staging:
+    name: Staging
+    uses: xiidigital/care/.github/workflows/deploy-staging.yml@gcp
+    with:
+      image_digest: ${{ inputs.image_digest }}
+      source_sha: ${{ inputs.source_sha }}
+      source_ref: ${{ inputs.source_ref }}
+      dry_run: ${{ inputs.dry_run }}

@@ -1,0 +1,68 @@
+# Delivery control plane: plan or apply managed infrastructure.
+#
+# See delivery-build.yml for why this file is on the default branch.
+#
+# Infrastructure delivery is a separate path from application delivery
+# (ADR-0008 section 18): an application release does not run this, and a change
+# here does not rebuild the application. One entry point with an explicit
+# action, because "plan" and "apply" differ by their blast radius and not by
+# their inputs — and apply carries a confirmation and a protected environment
+# that plan does not.
+
+name: Delivery — infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "plan reads state; apply changes it"
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+      environment:
+        description: "Environment root"
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      confirm_environment:
+        description: "apply only: type the environment name again to confirm"
+        required: false
+        type: string
+        default: ""
+      allow_destructive:
+        description: "apply only: permit a plan that destroys or replaces resources"
+        required: false
+        type: boolean
+        default: false
+      source_ref:
+        description: "Source ref whose infrastructure sources are used. Must be reachable from gcp."
+        required: false
+        type: string
+        default: "gcp"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan ${{ inputs.environment }}
+    if: inputs.action == 'plan'
+    uses: xiidigital/care/.github/workflows/infra-check.yml@gcp
+    with:
+      source_ref: ${{ inputs.source_ref }}
+
+  apply:
+    name: Apply ${{ inputs.environment }}
+    if: inputs.action == 'apply'
+    uses: xiidigital/care/.github/workflows/infra-apply.yml@gcp
+    with:
+      environment: ${{ inputs.environment }}
+      confirm_environment: ${{ inputs.confirm_environment }}
+      allow_destructive: ${{ inputs.allow_destructive }}
+      source_ref: ${{ inputs.source_ref }}
