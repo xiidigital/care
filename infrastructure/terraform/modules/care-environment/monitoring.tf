@@ -177,20 +177,22 @@ resource "google_monitoring_alert_policy" "scheduler_failures" {
 
   conditions {
     display_name = "failed scheduler attempts"
-    condition_threshold {
-      filter = join(" AND ", [
+    condition_matched_log {
+      filter = join("\n", [
         "resource.type = \"cloud_scheduler_job\"",
-        "metric.type = \"cloudscheduler.googleapis.com/job/attempt_count\"",
-        "metric.labels.response_code != \"success\"",
+        "log_id(\"cloudscheduler.googleapis.com/executions\")",
+        "jsonPayload.@type = \"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\"",
+        "severity >= ERROR",
+        "resource.labels.job_id =~ \"^${local.name_prefix}-cleanup-\"",
       ])
-      comparison      = "COMPARISON_GT"
-      threshold_value = 0
-      duration        = "0s"
+    }
+  }
 
-      aggregations {
-        alignment_period   = "3600s"
-        per_series_aligner = "ALIGN_SUM"
-      }
+  alert_strategy {
+    auto_close = "604800s"
+
+    notification_rate_limit {
+      period = "300s"
     }
   }
 
