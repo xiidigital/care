@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-06
-- **Last Updated:** 2026-08-19
+- **Last Updated:** 2026-08-30
 - **Decision Makers:** CARE Fork Maintainers
 - **Supersedes:** None
 - **Superseded by:** None
@@ -1485,8 +1485,8 @@ workflow GitHub has never seen has never run (ES-08 sections 133, 134, 197).
 - [x] Worker-before-API deployment ordering implemented. In the script, not in YAML, and each deployed digest is read back.
 - [x] Staging acceptance workflow implemented. `acceptance.sh`, executed against the real staging environment.
 - [x] Same-digest promotion semantics verified. Deployment and promotion accept a digest and refuse a tag; promotion has no build step, asserted by a test.
-- [x] Production deployment workflow implemented. `promote-production.yml`; no production environment was created (ES-08 section 67).
-- [x] Production approval gate implemented. Protected `production` environment, after an eligibility job that shows the digest. **Not exercised:** requires the GitHub environment to exist.
+- [x] Production deployment workflow implemented. `promote-production.yml`; ES-08 created no production resources. A production environment was provisioned later under ADR-0009/ES-09.
+- [x] Production approval gate implemented. The protected `production` environment exists and promotion eligibility has run. **Deployment through this gate remains unexercised:** its production variables are not configured.
 - [x] Environment deployment concurrency protection implemented. One group per environment, cancellation disabled.
 - [x] Production smoke verification implemented. `smoke.sh`; non-destructive, no synthetic state.
 - [x] Application rollback to a previous immutable digest implemented or operationally documented. `rollback.sh`, `rollback.yml`, and the previous digest recorded from the platform at every deployment.
@@ -1497,11 +1497,12 @@ workflow GitHub has never seen has never run (ES-08 sections 133, 134, 197).
 - [x] Release/deployment metadata recorded. Build, deployment and acceptance records, none committed to the branch.
 - [x] Public-repository credential boundary verified. No key material, no secret payload, no tfvars and no state in the repository; asserted by the delivery-invariants test.
 
-Open, and tracked in `inventory/unresolved-items.md` Part D8:
+Current status, tracked in `inventory/unresolved-items.md` Part D8:
 
-- [ ] A real GitHub Actions run of the CI/build path (D1). Blocked: the branch has not been pushed.
-- [ ] A real trusted workflow deploying a CI-built digest to staging (D1). Same blocker; the same scripts were executed manually against staging instead, which proves the environment behaves and does not prove the platform wiring.
-- [ ] Workload Identity Federation applied, and the GitHub environments and variables configured (D2). Declared and validated; requires an operator apply and repository-admin configuration.
+- [x] A real GitHub Actions run of the CI/build path (D1).
+- [x] A real trusted workflow deploying a CI-built digest to staging (D1).
+- [x] Workload Identity Federation applied and exercised for publication, staging and infrastructure planning (D2).
+- [ ] The GitHub production deployment path exercised. Eligibility reached the protected gate; production variables remain unconfigured.
 - [ ] Recent Views covered by automated acceptance (D3). Manually verified in ES-07; automating it would require broadening the deployment identity.
 
 ---

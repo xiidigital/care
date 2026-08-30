@@ -1,6 +1,6 @@
 # ES-08: Continuous Integration, Immutable Artifact Build and Controlled Delivery
 
-- **Status:** Draft
+- **Status:** Implemented; superseded for production activation by ES-09
 - **Related ADR:** ADR-0008: Automated Continuous Integration, Immutable Artifacts and Controlled Environment Delivery
 - **Depends on:** completed ES-01 through ES-07, RF1, RF2, pre-staging hardening, staging readiness
 - **Target branch:** `feature/ci-controlled-delivery`
@@ -2919,3 +2919,26 @@ None of these were weakened or worked around to produce a result.
 **NOT READY.** Section 133 is satisfied for the CI/build validation path.
 Section 134 is not, and the blocker is repository configuration (D10), not
 workflow correctness.
+
+---
+
+## 205. Superseding closeout evidence (2026-08-30)
+
+Section 204 is retained as the contemporaneous report from the first CI run. It
+is no longer the current verdict.
+
+The later ES-08 chain completed through GitHub Actions:
+
+| stage | run | result |
+|---|---|---|
+| build and publish | `32406259063` | success |
+| staging deployment and acceptance | `32411111409` | success |
+| promotion eligibility | `32412389243` | eligible; held at production gate |
+
+D1, D2, D10, D11 and D13 record the corresponding evidence. Production was
+later provisioned and smoke-tested manually; that work belongs to ADR-0009 and
+ES-09 and does not retroactively count as a GitHub production deployment.
+
+**ES-08 verdict: IMPLEMENTED.** Automated production deployment remains
+unexercised because the protected environment's production variables have not
+been configured. Clinical activation is explicitly outside ES-08.

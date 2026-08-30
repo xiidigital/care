@@ -2782,21 +2782,24 @@ binding in the maintainers' project.
 The release architecture does not depend on this. A public mirror or a second
 registry can be added without changing the build contract (ES-08 section 125).
 
-### D6. No production environment exists
+### D6. Production environment and activation boundary — PARTIALLY RESOLVED
 
-**Status:** Open by decision. **Recorded 2026-08-19.**
+**Status:** Infrastructure resolved 2026-08-30; automated promotion and clinical
+activation remain open under ADR-0009/ES-09.
 
-`promote-production.yml` and the production half of `deploy-app.yml` are
-implemented and validated, and no production resource was created to test them —
-ES-08 sections 67 and 107 require exactly that. Run against an unconfigured
-`production` environment the workflow fails at its configuration check and names
-what is missing.
+A production GCP environment and Firebase frontend now exist. Backend and
+frontend non-destructive smoke verification passed, and the production deploy
+identity exists. The deployment was manual, so it is evidence for the running
+environment rather than evidence for `promote-production.yml`.
 
-Consequences to be aware of before a first production release: the
-`production` GitHub Environment and its variables do not exist; the
-`care-deploy-prod` identity has no grants, because no production environment root
-has been applied to give it any; and the emergency-promotion question is
-deliberately unanswered (ES-08 section 129).
+The protected GitHub `production` Environment exists, but it has no production
+variables. The gated workflow has reached promotion eligibility and stopped at
+the intended control boundary. Configure and exercise it only in an authorized
+change window.
+
+This closes the original "no environment" finding. It does not make the service
+ready for real patient data: approved identities, recovery, governance and
+go-live signoff remain in the ES-09 clinical activation checklist.
 
 ### D8. `/app_version/` reported a stale build — RESOLVED
 

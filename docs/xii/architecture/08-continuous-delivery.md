@@ -392,17 +392,20 @@ approving (ES-08 section 158). The acceptance record is a workflow artifact
 named `staging-accepted-<digest hex>`, written by the staging workflow from the
 values actually deployed — not typed by an operator (ES-08 section 127).
 
-There is no emergency bypass. With no production environment yet, designing one
-would be designing for a situation nobody has met (ES-08 section 129).
+There is no emergency bypass. ES-08 intentionally defined none before a
+production environment existed (ES-08 section 129); ADR-0009 preserves the
+protected gate and requires an explicit activation review instead of adding an
+implicit bypass.
 
 Production gets smoke verification, not the acceptance suite: that suite
 dispatches tasks, writes objects and exhausts a rate-limit counter
 (ADR-0008 section 45).
 
-**No production environment exists today.** The workflow is implemented and
-validated; run against an unconfigured `production` environment it fails at the
-configuration check, naming what is missing, and creates nothing
-(ES-08 sections 107, 183).
+**Current state (2026-08-30):** a production GCP environment and Firebase
+frontend exist and pass non-destructive smoke verification. They were deployed
+manually. The protected GitHub `production` environment exists, but its required
+production variables are not configured, so the automated production deploy
+remains deliberately unexercised. See ADR-0009 and ES-09.
 
 ---
 
