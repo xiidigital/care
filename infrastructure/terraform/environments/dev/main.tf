@@ -108,6 +108,7 @@ module "care" {
   current_domain       = var.current_domain
 
   optional_secrets = var.optional_secrets
+  extra_env        = var.extra_env
 
   # Development data. The Job is created but never executed by an apply — it is
   # invoked by hand, because it is destructive to whatever is already there.

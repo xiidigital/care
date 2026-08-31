@@ -31,6 +31,28 @@ image = "us-central1-docker.pkg.dev/your-gcp-project-id/care-dev/care:REPLACE_ME
 #   SENTRY_DSN     = ["api", "worker", "init"]
 # }
 
+# Direct Firebase patient login. This needs no server-side Firebase secret.
+# extra_env = {
+#   FIREBASE_AUTH_ENABLED           = "true"
+#   FIREBASE_AUTH_PROJECT_ID        = "your-firebase-project-id"
+#   FIREBASE_AUTH_SMS_COUNTRY_CODES = "+52"
+# }
+
+# Keycloak is dormant by default. When a server exists, add these non-secret
+# values to extra_env and create the two API-only secret containers below.
+# No application code change is required.
+# extra_env = {
+#   KEYCLOAK_ENABLED             = "true"
+#   KEYCLOAK_ISSUER_URL          = "https://identity.example/realms/care"
+#   KEYCLOAK_WORKFORCE_CLIENT_ID = "care-workforce"
+#   KEYCLOAK_PATIENT_CLIENT_ID   = "care-patient"
+#   KEYCLOAK_PUBLIC_BASE_URL     = "https://care-dev.example.org"
+# }
+# optional_secrets = {
+#   KEYCLOAK_WORKFORCE_CLIENT_SECRET = ["api"]
+#   KEYCLOAK_PATIENT_CLIENT_SECRET   = ["api"]
+# }
+
 # Development data. Creates a Job that seeds synthetic accounts and clinical
 # records; you execute it by hand, and it is destructive to what is already
 # there. Dev only — the module rejects it elsewhere. See README section 7.8.

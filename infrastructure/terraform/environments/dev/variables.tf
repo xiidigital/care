@@ -42,6 +42,12 @@ variable "optional_secrets" {
   default     = {}
 }
 
+variable "extra_env" {
+  description = "Additional non-secret environment variables for every role. Use this for optional integration flags and public identifiers; never credentials."
+  type        = map(string)
+  default     = {}
+}
+
 variable "labels" {
   type    = map(string)
   default = {}
