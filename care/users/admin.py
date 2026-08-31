@@ -22,6 +22,7 @@ class UserAdmin(auth_admin.UserAdmin):
                 "fields": (
                     "phone_number",
                     "alt_phone_number",
+                    "keycloak_subject",
                     "gender",
                     "verified",
                 )

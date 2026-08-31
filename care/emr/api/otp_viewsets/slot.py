@@ -11,7 +11,6 @@ from care.emr.api.viewsets.scheduling import (
     SlotViewSet,
 )
 from care.emr.api.viewsets.scheduling.booking import TokenBookingViewSet
-from care.emr.models.patient import Patient
 from care.emr.models.scheduling import TokenBooking, TokenSlot
 from care.emr.resources.scheduling.slot.spec import (
     BookingStatusChoices,
@@ -22,6 +21,7 @@ from care.utils.shortcuts import get_object_or_404
 from config.patient_otp_authentication import (
     JWTTokenPatientAuthentication,
     OTPAuthenticatedPermission,
+    patient_access_queryset,
 )
 
 
@@ -61,9 +61,11 @@ class OTPSlotViewSet(EMRRetrieveMixin, EMRBaseViewSet):
     @action(detail=True, methods=["POST"])
     def create_appointment(self, request, *args, **kwargs):
         request_data = AppointmentBookingSpec(**request.data)
-        if not Patient.objects.filter(
-            external_id=request_data.patient, phone_number=request.user.phone_number
-        ).exists():
+        if (
+            not patient_access_queryset(request.user)
+            .filter(external_id=request_data.patient)
+            .exists()
+        ):
             raise ValidationError("Patient not allowed")
         appointment = SlotViewSet.create_appointment_handler(
             self.get_object(), request.data, None
@@ -77,9 +79,7 @@ class OTPSlotViewSet(EMRRetrieveMixin, EMRBaseViewSet):
     def cancel_appointment(self, request, *args, **kwargs):
         request_data = CancelAppointmentSpec(**request.data)
         patient = get_object_or_404(
-            Patient,
-            external_id=request_data.patient,
-            phone_number=request.user.phone_number,
+            patient_access_queryset(request.user), external_id=request_data.patient
         )
         token_booking = get_object_or_404(
             TokenBooking, external_id=request_data.appointment, patient=patient
@@ -92,7 +92,7 @@ class OTPSlotViewSet(EMRRetrieveMixin, EMRBaseViewSet):
     @action(detail=False, methods=["GET"])
     def get_appointments(self, request, *args, **kwargs):
         appointments = TokenBooking.objects.filter(
-            patient__phone_number=request.user.phone_number
+            patient__in=patient_access_queryset(request.user)
         )
         return Response(
             {

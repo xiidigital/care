@@ -8,6 +8,8 @@ from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.http import HttpRequest, HttpResponse
 
+from config.patient_otp_authentication import patient_principal_label
+
 
 class RequestInformation(NamedTuple):
     request_id: str
@@ -86,7 +88,7 @@ class AuditLogMiddleware:
         self.save(request, response)
 
         if getattr(request.user, "is_alternative_login", False):
-            current_user_str = f"patient|{request.user.phone_number[-4:]}"
+            current_user_str = patient_principal_label(request.user)
         else:
             current_user_str = (
                 f"{request.user.id}|{request.user}" if request.user else None

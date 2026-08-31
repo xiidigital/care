@@ -94,6 +94,9 @@ class UserSkill(BaseModel):
 
 class User(AbstractUser):
     external_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True)
+    keycloak_subject = models.CharField(
+        max_length=255, unique=True, null=True, blank=True
+    )
     username_validator = UsernameValidator()
     username = models.CharField(
         _("username"),

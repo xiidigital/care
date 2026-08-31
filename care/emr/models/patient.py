@@ -17,6 +17,11 @@ class Patient(EMRBaseModel):
     name = models.CharField(max_length=200, default="")
     gender = models.CharField(max_length=35, default="")
 
+    email = models.EmailField(null=True, blank=True, db_index=True)
+    keycloak_subject = models.CharField(
+        max_length=255, unique=True, null=True, blank=True
+    )
+
     phone_number = models.CharField(
         max_length=14, validators=[mobile_or_landline_number_validator], default=""
     )
@@ -134,6 +139,8 @@ class Patient(EMRBaseModel):
         ]
 
     def save(self, *args, **kwargs) -> None:
+        if self.email:
+            self.email = self.email.strip().lower()
         if self.date_of_birth and not self.year_of_birth:
             self.year_of_birth = self.date_of_birth.year
         super().save(*args, **kwargs)
