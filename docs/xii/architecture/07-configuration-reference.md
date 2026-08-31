@@ -3410,6 +3410,125 @@ configuration rather than connectivity, and `createcachetable` walks `CACHES`
 touching only `DatabaseCache` aliases. **The `init` role needs no reachable
 Redis**, verified with an unreachable host and a `0` exit status.
 
+## 62.1 Optional patient and Keycloak authentication
+
+ADR-0010 adds two independent, disabled-by-default authentication adapters.
+Neither adapter changes the legacy staff login or patient OTP flow while its
+flag is false.
+
+`FIREBASE_AUTH_ENABLED=false` requires no Firebase setting and mounts no
+Firebase exchange route. When true on the API role,
+`FIREBASE_AUTH_PROJECT_ID` is required. The browser performs Firebase phone or
+passwordless email-link authentication; CARE validates the Firebase ID token
+and exchanges verified phone/email evidence for a `PatientToken`.
+
+`FIREBASE_AUTH_SMS_COUNTRY_CODES` carries the SMS delivery policy as a list of
+E.164 calling codes, defaulting to `+52`. ADR-0010 limits the first rollout to
+Mexico. The policy is expressed in three places that must agree — the frontend
+country selector, the Firebase project's own SMS region settings, and this
+variable — and only this one is authoritative at the CARE boundary: the
+verified phone number in the ID token is re-checked against it before any
+`PatientToken` is issued. Widening the policy is a configuration change, not a
+code change. An empty list with the flag enabled aborts startup.
+
+Firebase server-side verification uses Google's public signing certificates and
+the configured project ID. **No administrative Firebase credential, service
+account or private key is required or accepted**; there is no Firebase secret
+on the backend.
+
+Google publishes those certificates as PEM **X.509 certificates**, not as bare
+public keys, so the verifier extracts the public key before validating a
+signature. Passing the certificate straight to the JWT library raises
+`InvalidKeyError` on every real token — a failure that no mocked verifier can
+observe, which is why `care/emr/tests/test_firebase_patient_auth.py` asserts
+against a genuine certificate.
+
+### Dev Firebase project
+
+Authentication is configured on the dev GCP project (the one named in
+`infrastructure/terraform/environments/dev/terraform.tfvars`). Phone and
+passwordless email sign-in are enabled, SMS delivery is restricted to `MX`, and
+`localhost` is an authorized domain for local development. The public web
+configuration is retrievable at any time and belongs in the frontend build, not
+in a secret store:
+
+```text
+gcloud services list --enabled --project <dev-project>   # confirm identitytoolkit
+curl -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+     "https://firebase.googleapis.com/v1beta1/projects/<dev-project>/webApps"
+```
+
+Production Firebase Authentication is **not** configured and remains out of
+scope under ADR-0009 and ES-09.
+
+`KEYCLOAK_ENABLED=false` requires no Keycloak service or settings and mounts no
+Keycloak route. When true on the API role, all of the following are required:
+
+```text
+KEYCLOAK_ISSUER_URL
+KEYCLOAK_WORKFORCE_CLIENT_ID
+KEYCLOAK_WORKFORCE_CLIENT_SECRET
+KEYCLOAK_PATIENT_CLIENT_ID
+KEYCLOAK_PATIENT_CLIENT_SECRET
+KEYCLOAK_PUBLIC_BASE_URL
+```
+
+The two clients use fixed callbacks derived from the public base URL:
+
+```text
+<base>/auth/keycloak/workforce/callback
+<base>/auth/keycloak/patient/callback
+```
+
+In managed environments, put flags, issuer, project/client IDs and the public
+URL in `extra_env`. Declare the two Keycloak client secrets in
+`optional_secrets` for the `api` role only, then add their values directly to
+Secret Manager. Worker, scheduler and init do not validate or consume external
+login credentials.
+
+Enabling Keycloak later is a configuration and deployment change only. The
+realm, the two clients, the callbacks, subject enrolment, rotation and the
+operator's backup/restore/upgrade responsibilities are specified in
+`docs/xii/operations/keycloak-activation-guide.md`.
+
+### Frontend counterpart
+
+The frontend carries its own public build-time configuration, described in
+`care_fe/.example.env`. Only public identifiers appear there:
+
+```text
+REACT_FIREBASE_AUTH_ENABLED
+REACT_FIREBASE_API_KEY
+REACT_FIREBASE_AUTH_DOMAIN
+REACT_FIREBASE_PROJECT_ID
+REACT_FIREBASE_APP_ID
+REACT_FIREBASE_SMS_COUNTRY_CODES
+REACT_FIREBASE_EMAIL_LINK_CALLBACK_URL
+
+REACT_KEYCLOAK_ENABLED
+REACT_KEYCLOAK_ISSUER_URL
+REACT_KEYCLOAK_WORKFORCE_CLIENT_ID
+REACT_KEYCLOAK_PATIENT_CLIENT_ID
+REACT_KEYCLOAK_WORKFORCE_REDIRECT_URI
+REACT_KEYCLOAK_PATIENT_REDIRECT_URI
+```
+
+Firebase web configuration values and OIDC client IDs are public identifiers by
+design and are safe in a bundle. **Keycloak client secrets are backend-only and
+must never appear in any of these variables**, in `.env.production.local` or in
+any tracked environment file.
+
+The two sides must be enabled together. A frontend that renders a login choice
+whose backend route is intentionally absent is a misconfiguration, not a
+supported state; the frontend fails safe by hiding any method whose
+configuration is incomplete, but it cannot detect a backend that disabled the
+provider independently.
+
+Backend `FIREBASE_AUTH_SMS_COUNTRY_CODES` and frontend
+`REACT_FIREBASE_SMS_COUNTRY_CODES` express the same policy and must be kept in
+step. The frontend value only restricts what a person can enter; the backend
+value is what actually blocks an out-of-policy identity.
+
 ---
 
 # 63. Definition of Configuration Completion
