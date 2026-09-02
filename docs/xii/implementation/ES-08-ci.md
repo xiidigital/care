@@ -2942,3 +2942,34 @@ ES-09 and does not retroactively count as a GitHub production deployment.
 **ES-08 verdict: IMPLEMENTED.** Automated production deployment remains
 unexercised because the protected environment's production variables have not
 been configured. Clinical activation is explicitly outside ES-08.
+
+## 206. ES-08 closure (2026-09-02)
+
+The one blocker that survived section 205 was D12: `care-infra` could
+authenticate through WIF but held no project roles, so an infrastructure plan in
+CI failed on 403 before reading any resource. That is now done.
+
+| check | evidence | result |
+|---|---|---|
+| bootstrap state reconciles with reality | `tofu plan -detailed-exitcode` | exit 0, `No changes` |
+| IAM activation is additive only | plan with `grant_infrastructure_roles=true` | 12 to add, 0 to change, 0 to destroy |
+| roles granted, scope | live project IAM policy | 12 enumerated roles; no Owner, no Editor |
+| OpenTofu plans through WIF as `care-infra` | run [33585439698](https://github.com/xiidigital/care/actions/runs/33585439698) | success |
+| staging infrastructure drift | staging plan with the real image | exit 0, `No changes` |
+| production deployed | — | no; `Apply staging` skipped, production untouched |
+| Redis required by the GCP runtime | section 89 acceptance | no; unchanged |
+
+No resource was created, replaced or destroyed to reach this state. The state
+was never lost: it existed locally and reconciled exactly, so nothing was
+imported and nothing was reconstructed.
+
+The bootstrap state now lives in
+`gs://care-tfstate-project-990c4414-a33c-47f2-9f4/bootstrap/`, one object per
+workspace, so the single operator apply this root still needs no longer depends
+on one workstation's disk.
+
+**ES-08 verdict: CLOSED.**
+
+Two things stay open and neither belongs to ES-08: automated production
+promotion needs the protected environment's variables (ES-09 section 5), and
+clinical activation is an operator milestone under ADR-0009.

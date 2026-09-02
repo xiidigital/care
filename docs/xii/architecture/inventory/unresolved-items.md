@@ -2591,7 +2591,7 @@ asserting it fails when violated.
 Verified against the real production image locally (6/6) and on the runner
 (run [32340865564](https://github.com/xiidigital/care/actions/runs/32340865564)).
 
-### D12. One operator bootstrap apply remains
+### D12. One operator bootstrap apply remains — RESOLVED
 
 **Status:** Open, narrowed to a single action. **Recorded 2026-08-20, updated
 2026-08-20.** **Severity:** blocks the post-deployment drift check (ES-08 Part
@@ -2633,6 +2633,19 @@ Every one of those is covered by the enumerated `infrastructure_roles` —
 `roles/browser`, added in `da7b563b4` because `data "google_project"` needs
 `resourcemanager.projects.get` and no admin role carries it. The declaration is
 correct and complete; it is the grant that has not been made.
+
+**Resolved 2026-09-02.** The apply was made from the workstation that holds the
+bootstrap state, and `care-infra` now carries its twelve enumerated project
+roles and nothing else — no Owner, no Editor. `Delivery — infrastructure` run
+[33585439698](https://github.com/xiidigital/care/actions/runs/33585439698)
+then reached a real authenticated staging plan through WIF and succeeded, which
+is the same workflow that failed in 32414817565.
+
+The bootstrap state is no longer local-only: it was migrated into
+`gs://care-tfstate-project-990c4414-a33c-47f2-9f4/bootstrap/`, so the one apply
+this root still needs from an operator no longer depends on one disk.
+
+The record of what was required is kept below.
 
 **The remaining action, precisely.** One authenticated operator apply:
 
@@ -2846,6 +2859,33 @@ resource. They are provenance, not configuration.
 **Fix.** Both fields joined `containers[0].image` under `ignore_changes` on the
 services and the Jobs. `tofu plan` against staging after a deployment and an
 apply now reports **No changes**.
+
+### D14. Staging's worker self-URL check does not hold
+
+**Status:** Open, accepted. **Recorded 2026-09-02** during the ES-08/09/10
+continuity review. **Severity:** cosmetic; no functional impact.
+
+`check "worker_self_url_matches"` in `modules/care-environment/run.tf` fails on
+every staging plan:
+
+```
+local.worker_self_url is "https://care-staging-worker-272331402273.us-central1.run.app"
+module.worker.uri  is "https://care-staging-worker-bgfldom65a-uc.a.run.app"
+```
+
+Cloud Run issues both URL forms for the same service. The environment builds the
+worker's own `GCP_WORKER_URL` from the project-number form; the service was
+created with the hash form.
+
+**Why it is accepted rather than fixed.** Nothing dispatches with that value —
+the API and the init Job read the service URL directly — so staging is
+functional, and the check block says so in its own failure message. Correcting
+it means setting `worker_url_override` and applying, which is a functional
+change to staging. The continuity review deliberately made no functional change
+to a deployed environment, so it is recorded rather than applied.
+
+**To close it:** set `worker_url_override` in the staging root to the deployed
+URL and apply in a change window. Dev does not exhibit this; its plan is clean.
 
 ### D7. Staging still shares dev's GCP project
 

@@ -1,6 +1,6 @@
 # ES-10: Multichannel Authentication Completion and Dormant Keycloak Readiness
 
-- **Status:** Ready for implementation; backend foundation present locally
+- **Status:** CLOSED — implemented and verified 2026-09-01; revalidated against the ES-08/09 baseline 2026-09-02
 - **Related ADR:** ADR-0010: Multichannel Authentication with Keycloak and Firebase
 - **Depends on:** ES-09 technical closeout and the current local ADR-0010 backend work
 - **Implementation repositories:** `care` and `care_fe`

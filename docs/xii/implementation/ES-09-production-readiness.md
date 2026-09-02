@@ -1,6 +1,6 @@
 # ES-09: Production Readiness, Frontend Delivery and Controlled Clinical Activation
 
-- **Status:** Technical closeout implemented; clinical activation deferred
+- **Status:** Technical closeout CLOSED (verified 2026-09-02); clinical activation deferred
 - **Related ADR:** ADR-0009: Controlled Production Activation and Frontend Delivery
 - **Depends on:** ES-08 delivery chain and accepted staging evidence
 - **Working environment after closeout:** dev
@@ -103,9 +103,11 @@ These items may be completed independently of clinical activation:
    production root.
 3. Exercise the gated GitHub promotion with an already accepted digest and
    retain the smoke evidence.
-4. Apply the reviewed bootstrap option that grants `care-infra` its enumerated
-   project roles, then rerun the CI infrastructure plan. This is D12 and remains
-   an explicit operator bootstrap action.
+4. ~~Apply the reviewed bootstrap option that grants `care-infra` its enumerated
+   project roles, then rerun the CI infrastructure plan.~~ **Done 2026-09-02.**
+   Twelve enumerated roles granted, no Owner or Editor; the CI infrastructure
+   plan then succeeded through WIF (run `33585439698`). D12 is resolved and the
+   bootstrap state now lives in the state bucket under `bootstrap/`.
 
 No GitHub repository secret or service-account key is required for these steps.
 
@@ -127,6 +129,29 @@ The ES-09 technical closeout is complete when:
 
 Clinical activation is a later operator milestone. It is intentionally not
 claimed by this technical completion status.
+
+### Verification, 2026-09-02
+
+The continuity review re-checked every criterion against the code rather than
+trusting the boxes:
+
+| criterion | how it was checked | result |
+|---|---|---|
+| hosting rules versioned | `git ls-files firebase.json` | tracked |
+| production build inputs reproducible | `.env.production.example` present | yes |
+| Sentry opt-in, no hardcoded DSN | grep for a literal `sentry.io` DSN | 0 occurrences |
+| patient login disabled in the production example | `REACT_DISABLE_PATIENT_LOGIN=true` | set, with both providers `false` |
+| fixtures forbidden outside dev | prod root has no fixture reference | none |
+| configuration validation passes | `tofu validate`, `tofu fmt` on tracked sources | clean |
+
+`.firebaserc` is deliberately absent: the project is supplied at deploy time, so
+no production instance is hardcoded in the repository.
+
+**ES-09 technical closeout verdict: CLOSED.**
+
+Section 4 (clinical activation) and section 5 items 1-3 remain open by design.
+They are operator milestones, not implementation debt, and they do not block
+ES-11.
 
 ## 7. Next work
 
