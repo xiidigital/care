@@ -70,20 +70,42 @@ Note the `state_bucket` output — each environment's `backend.tf` names it.
 
 ## Where this root's own state lives
 
-Locally, in `terraform.tfstate`, ignored by git. That is the honest resolution
-of the circular dependency, and it is safe: this root manages one bucket and two
-API enablements, all of which are trivially re-importable.
-
-If you would rather keep it in the bucket it just created, migrate it after the
-first apply:
+**In the bucket it created**, under the `bootstrap/` prefix, one object per
+workspace. `versions.tf` declares a partial `backend "gcs" {}` — no bucket, no
+prefix — because this root is generic per project and the bucket name is derived
+from the project id. Supply both at init:
 
 ```bash
-tofu init -migrate-state -backend-config=bucket=<state_bucket> -backend-config=prefix=bootstrap
+tofu init \
+  -backend-config=bucket=care-tfstate-<project_id> \
+  -backend-config=prefix=bootstrap
 ```
 
-You will need a `backend "gcs" {}` block in `versions.tf` for that. It is not
-there by default because a fresh clone would then fail `tofu init` against a
-bucket that does not exist yet — which is the bootstrap problem again.
+It did not start there. State has to exist before it can be kept remotely, so
+the first apply of a project runs on local state and is migrated afterwards:
+
+```bash
+tofu init -migrate-state \
+  -backend-config=bucket=<state_bucket output> \
+  -backend-config=prefix=bootstrap
+```
+
+**On a greenfield project, comment out the `backend "gcs" {}` block for the
+first apply**, then restore it and migrate. `tofu init` cannot reach a bucket
+that does not exist yet — that is the bootstrap circularity, and this is the one
+manual step it leaves. It happens once per project and it is not hidden.
+
+After migrating, the local `terraform.tfstate` is left behind as a backup. It is
+git-ignored and no longer authoritative; the bucket is. Do not resurrect it by
+commenting the backend back out on an already-migrated project — you would plan
+against a stale snapshot.
+
+### Why remote matters here
+
+Local state means one workstation is a single point of failure for the record of
+the identity infrastructure. It also means the one apply this root still needs
+from an operator — `grant_infrastructure_roles` — can only be run from that
+machine. Keeping it in the bucket removes both.
 
 ## Tearing down
 
