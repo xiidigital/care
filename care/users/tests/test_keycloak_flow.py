@@ -16,6 +16,7 @@ from functools import partial
 from unittest.mock import patch
 
 from authlib.jose import JsonWebKey, jwt
+from django.core.cache import cache
 from django.test import override_settings
 from django.urls import reverse
 
@@ -120,6 +121,15 @@ class _OidcProviderDouble:
 class KeycloakFlowTests(CareAPITestBase):
     workforce_url = "/api/v1/auth/keycloak/workforce/exchange/"
     patient_url = "/api/v1/auth/keycloak/patient/exchange/"
+
+    def setUp(self):
+        super().setUp()
+        # Discovery and JWKS are cached per issuer. Several of these tests
+        # tamper with the discovery document and expect CARE to notice, which
+        # it can only do on a cold cache -- a real deployment re-reads the
+        # document when the TTL expires, not on every login.
+        cache.clear()
+        self.addCleanup(cache.clear)
 
     def payload(self, redirect_uri, **overrides):
         return {
