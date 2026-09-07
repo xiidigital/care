@@ -693,6 +693,13 @@ validate_oidc_providers(
 # For a clinic with no identity provider it is the only method that works.
 CARE_PATIENT_OTP_ENABLED = env.bool("CARE_PATIENT_OTP_ENABLED", default=True)
 
+# Only an installation that actually enrolled subjects under ADR-0010 needs
+# these: the old `keycloak_subject` column stored a subject and no issuer, and
+# the migration into ADR-0011's triple refuses to invent one. No known
+# environment enrolled any, so the migration is expected to move zero rows.
+OIDC_LEGACY_PROVIDER_ID = env("OIDC_LEGACY_PROVIDER_ID", default="keycloak")
+OIDC_LEGACY_ISSUER = env("OIDC_LEGACY_ISSUER", default="")
+
 # The one login configuration CARE refuses: a deployment where no patient can
 # get in. Cheap to catch here, expensive to discover from an empty login screen.
 validate_login_methods(

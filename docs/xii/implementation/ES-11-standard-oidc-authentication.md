@@ -364,28 +364,48 @@ the callback's provider matches the one the transaction started with.
 ### 7.1 Models
 
 ```python
-class UserExternalIdentity(EMRBaseModel):
-    user         = FK(User, on_delete=CASCADE, related_name="external_identities")
-    provider_id  = CharField(max_length=32)
-    issuer       = CharField(max_length=512)
-    subject      = CharField(max_length=255)
-    linked_at    = DateTimeField(auto_now_add=True)
-    linked_by    = FK(User, null=True, on_delete=SET_NULL, related_name="+")
+class UserExternalIdentity(BaseModel):          # care.utils.models.base
+    user          = FK(User, on_delete=CASCADE, related_name="external_identities")
+    provider_id   = CharField(max_length=32, db_index=True)
+    issuer        = CharField(max_length=512)
+    subject       = CharField(max_length=255)
+    linked_by     = FK(User, null=True, on_delete=SET_NULL, related_name="+")
     last_login_at = DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [UniqueConstraint(fields=["provider_id", "issuer", "subject"],
-                                        name="uniq_user_external_identity")]
-        indexes = [Index(fields=["provider_id", "issuer", "subject"])]
+                                        condition=Q(deleted=False),
+                                        name="unique_user_external_identity")]
 ```
 
-`PatientExternalIdentity` is identical with `patient = FK(Patient, …)` and its
-own constraint name. `linked_by` records the administrator on the
+`PatientExternalIdentity` is identical with `patient = FK("emr.Patient", …)` and
+its own constraint name. `linked_by` records the administrator on the
 administrative path and is null for a self-service link.
 
-The unique constraint is **not** scoped to the principal: a triple is globally
-unique across both tables' semantics, which is what makes rule §5.4 (first
-writer wins) enforceable by the database rather than by application code.
+Three details settled on contact with the codebase.
+
+**`BaseModel`, not `EMRBaseModel`.** `BaseModel` carries `external_id`,
+timestamps and the soft delete this repository uses everywhere; `EMRBaseModel`
+adds `history`/`meta` resource machinery these rows have no use for, and lives
+in `care.emr` where a `care.users` model should not reach. `BaseModel` also
+supplies `created_date`, so a separate `linked_at` would be a second name for
+the same fact.
+
+**The constraint is partial, on `deleted=False`.** That matches every other
+unique constraint here (`unique_user_flag`, `unique_user_skill`) and it is
+exactly what rules §5.5 and §5.6 need together: an unlinked identity stops
+resolving, and its triple becomes available for a deliberate re-enrolment
+rather than staying poisoned forever. A separate index on the triple would be
+redundant — the partial unique index already serves the lookup, which always
+filters `deleted=False` through the default manager.
+
+**Cross-table uniqueness is a configuration invariant, not a database one.**
+Two tables cannot share a constraint, so the database enforces the triple
+within each table only. The same triple cannot legitimately appear in both,
+because `provider_id` is part of it and a provider record declares exactly one
+`principal_type` — so a provider is either workforce or patient, never both.
+The guarantee is real but it is held by `config/oidc.py`, and an earlier draft
+of this section credited it to the schema.
 
 ### 7.2 Migration sequence
 
@@ -396,14 +416,26 @@ writer wins) enforceable by the database rather than by application code.
 | 3 | `emr/0087`, `users/0031` | Remove `Patient.keycloak_subject` and `User.keycloak_subject` | yes |
 
 Step 2 is expected to move **zero rows** in every existing environment, because
-no subject has ever been enrolled. The migration is written, tested against a
-seeded fixture, and required to fail loudly rather than guess if it finds rows
-and `OIDC_LEGACY_ISSUER` is unset — a subject with no issuer cannot be migrated
-correctly, and silently inventing one would be exactly the defect ES-11 exists
-to remove.
+no subject has ever been enrolled. It is required to fail loudly rather than
+guess if it finds rows and `OIDC_LEGACY_ISSUER` is unset — a subject with no
+issuer cannot be migrated correctly, and silently inventing one would be
+exactly the defect ES-11 exists to remove. Worse than inventing an issuer would
+be dropping the rows and reporting success, so neither is permitted.
 
-Steps 1 and 3 ship in the same release; running step 1 alone is safe, and the
-release can be rolled back to the ES-10 schema by reversing 3 → 2 → 1.
+**Step 3 ships with phase 3, not phase 2.** The exchange views, the admin and
+several test modules still resolve on `keycloak_subject`; dropping the column
+before the resolution switch leaves the tree unbuildable between two phases
+that are each supposed to end green. Steps 1 and 3 still reach the same
+release, and the release still rolls back to the ES-10 schema by reversing
+3 → 2 → 1.
+
+**How step 2 is verified.** Its rule — refuse without an issuer, never drop a
+row, reject a duplicate subject — lives in a pure function
+(`care/utils/external_identity.py`) with unit tests. The schema round trip is
+proved separately by running the migrations forward, backward and forward again
+against a disposable database seeded with a `keycloak_subject` on both principal
+types, because a `MigrationExecutor` test would have to migrate the shared
+`--keepdb` database backwards across two apps and would poison it on failure.
 
 `Patient.email` stays. It belongs to Firebase's email path, not to OIDC.
 
@@ -654,8 +686,8 @@ Local and dev only. Each phase ends green before the next starts.
 |---|---|---|
 | 0 | Approve ADR-0011 and ES-11 | Operator approval, recorded |
 | 1 | Provider record, loader, validation, startup checks | Matrix rows 1 and 9 pass; no behaviour change yet |
-| 2 | Identity tables + migrations (steps 1–3) | Migration tests pass both directions |
-| 3 | Triple resolution, JWKS cache, alg allowlist, `azp` | T1, T4, T5, T6, T17 pass |
+| 2 | Identity tables + backfill (steps 1–2) | Backfill rule tested; forward/backward proved on a disposable database |
+| 3 | Triple resolution, admin, then drop the columns (step 3) | T1, T4, T5, T6, T17 pass; full backend suite green |
 | 4 | Module/route/settings renames | Full backend suite green |
 | 5 | Linking, unlinking, audit | T14 passes; audit records verified |
 | 6 | Frontend renames, provider list, panels | Frontend suite and build green |
