@@ -4,6 +4,8 @@ from urllib.parse import urlparse
 
 from django.core.exceptions import ImproperlyConfigured
 
+from config.oidc import is_safe_oidc_url
+
 KEYCLOAK_REQUIRED_SETTINGS = (
     "KEYCLOAK_ISSUER_URL",
     "KEYCLOAK_WORKFORCE_CLIENT_ID",
@@ -35,20 +37,3 @@ def validate_keycloak_settings(*, enabled: bool, values: dict[str, str | None]) 
     if invalid_urls:
         msg = f"Invalid Keycloak URL setting: {', '.join(sorted(set(invalid_urls)))}."
         raise ImproperlyConfigured(msg)
-
-
-def is_safe_oidc_url(url: str) -> bool:
-    parsed = urlparse(url)
-    is_local_http = parsed.scheme == "http" and parsed.hostname in {
-        "localhost",
-        "127.0.0.1",
-        "::1",
-    }
-    return bool(
-        parsed.hostname
-        and (parsed.scheme == "https" or is_local_http)
-        and not parsed.username
-        and not parsed.password
-        and not parsed.query
-        and not parsed.fragment
-    )

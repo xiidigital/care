@@ -7,7 +7,7 @@ import requests
 from authlib.jose import JoseError, JsonWebKey, jwt
 from django.conf import settings
 
-from config.keycloak import is_safe_oidc_url
+from config.oidc import is_safe_oidc_url
 
 OIDC_TIMEOUT_SECONDS = 5
 

@@ -7,6 +7,7 @@ environment is the only honest instrument -- the same reasoning as
 `care/utils/tests/test_ratelimit_modes.py`.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -31,7 +32,9 @@ COMPLETE_KEYCLOAK_ENV = {
 }
 
 
-class ExternalAuthStartupTests(SimpleTestCase):
+class StartupProbeMixin:
+    """Ask a freshly started process, because settings are read at import."""
+
     def run_check(self, **extra_env):
         env = {
             **os.environ,
@@ -49,6 +52,42 @@ class ExternalAuthStartupTests(SimpleTestCase):
         )
         return result, result.stdout + result.stderr
 
+    def run_route_probe(self, *paths, **extra_env):
+        """Resolve paths inside a freshly started process.
+
+        The URLConf is built once, at import, from the flags the process was
+        started with. `override_settings` cannot move a route in or out of it,
+        so the question can only be asked of a real process.
+        """
+        script = (
+            "import django;django.setup()\n"
+            "from django.urls import Resolver404, resolve\n"
+            f"for path in {list(paths)!r}:\n"
+            "    try:\n"
+            "        resolve(path)\n"
+            "        print('MOUNTED', path)\n"
+            "    except Resolver404:\n"
+            "        print('ABSENT', path)\n"
+        )
+        env = {
+            **os.environ,
+            "DJANGO_SETTINGS_MODULE": "config.settings.local",
+            **extra_env,
+        }
+        result = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", script],
+            cwd=str(settings.BASE_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
+
+
+class ExternalAuthStartupTests(StartupProbeMixin, SimpleTestCase):
     # -- disabled -----------------------------------------------------------
 
     def test_startup_needs_no_provider_configuration_at_all(self):
@@ -133,40 +172,6 @@ class ExternalAuthStartupTests(SimpleTestCase):
         self.assertEqual(result.returncode, 0, output)
 
     # -- route gating -------------------------------------------------------
-
-    def run_route_probe(self, *paths, **extra_env):
-        """Resolve paths inside a freshly started process.
-
-        The URLConf is built once, at import, from the flags the process was
-        started with. `override_settings` cannot move a route in or out of it,
-        so the question can only be asked of a real process.
-        """
-        script = (
-            "import django;django.setup()\n"
-            "from django.urls import Resolver404, resolve\n"
-            f"for path in {list(paths)!r}:\n"
-            "    try:\n"
-            "        resolve(path)\n"
-            "        print('MOUNTED', path)\n"
-            "    except Resolver404:\n"
-            "        print('ABSENT', path)\n"
-        )
-        env = {
-            **os.environ,
-            "DJANGO_SETTINGS_MODULE": "config.settings.local",
-            **extra_env,
-        }
-        result = subprocess.run(  # noqa: S603
-            [sys.executable, "-c", script],
-            cwd=str(settings.BASE_DIR),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return result.stdout
 
     def test_disabled_providers_mount_no_exchange_routes(self):
         output = self.run_route_probe(
@@ -254,6 +259,182 @@ class ExternalAuthStartupTests(SimpleTestCase):
             CARE_PROCESS_ROLE="task_worker",
             KEYCLOAK_ENABLED="true",
             FIREBASE_AUTH_ENABLED="true",
+        )
+
+        self.assertEqual(result.returncode, 0, output)
+
+
+COMPLETE_OIDC_PROVIDER = json.dumps(
+    [
+        {
+            "id": "clinic-sso",
+            "display_name": "Clinic SSO",
+            "issuer": "https://identity.example/realms/care",
+            "principal_type": "workforce",
+            "client_id": "care-workforce",
+            "client_secret": "workforce-secret",
+        }
+    ]
+)
+
+
+class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
+    """ADR-0011 startup behaviour, asked of a real process.
+
+    `config/settings/base.py` reads and validates the provider set while it is
+    being imported, so `override_settings` cannot reach any of this. The unit
+    tests in `test_oidc_provider_config.py` pin down the rules; these prove the
+    process actually applies them.
+    """
+
+    # -- matrix row 1: OTP alone --------------------------------------------
+
+    def test_row_1_no_oidc_configuration_at_all_starts(self):
+        """CARE's default. No provider, no issuer, no outbound call."""
+        result, output = self.run_check(
+            OIDC_PROVIDERS="",
+            OIDC_PROVIDERS_FILE="",
+            OIDC_PUBLIC_BASE_URL="",
+            KEYCLOAK_ENABLED="false",
+            FIREBASE_AUTH_ENABLED="false",
+        )
+
+        self.assertEqual(result.returncode, 0, output)
+
+    def test_row_1_an_empty_provider_list_starts(self):
+        result, output = self.run_check(
+            OIDC_PROVIDERS="[]", FIREBASE_AUTH_ENABLED="false"
+        )
+
+        self.assertEqual(result.returncode, 0, output)
+
+    def test_row_1_leaves_the_care_phone_otp_in_place(self):
+        output = self.run_route_probe(
+            "/api/v1/otp/send/",
+            "/api/v1/otp/login/",
+            "/api/v1/auth/login/",
+            OIDC_PROVIDERS="",
+            KEYCLOAK_ENABLED="false",
+            FIREBASE_AUTH_ENABLED="false",
+        )
+
+        self.assertNotIn("ABSENT", output)
+
+    # -- matrix row 9: nobody can log in ------------------------------------
+
+    def test_row_9_no_patient_method_at_all_refuses_to_start(self):
+        result, output = self.run_check(
+            CARE_PATIENT_OTP_ENABLED="false",
+            FIREBASE_AUTH_ENABLED="false",
+            OIDC_PROVIDERS="",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CARE_PATIENT_OTP_ENABLED", output)
+
+    def test_row_9_a_workforce_provider_does_not_rescue_patients(self):
+        """The near miss: something is enabled, but not for this principal."""
+        result, output = self.run_check(
+            CARE_PATIENT_OTP_ENABLED="false",
+            FIREBASE_AUTH_ENABLED="false",
+            OIDC_PROVIDERS=COMPLETE_OIDC_PROVIDER,
+            OIDC_PUBLIC_BASE_URL="https://care.example",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("patient", output)
+
+    def test_retiring_otp_is_allowed_once_a_replacement_exists(self):
+        result, output = self.run_check(
+            CARE_PATIENT_OTP_ENABLED="false",
+            FIREBASE_AUTH_ENABLED="true",
+            FIREBASE_AUTH_PROJECT_ID="care-dev",
+            OIDC_PROVIDERS="",
+        )
+
+        self.assertEqual(result.returncode, 0, output)
+
+    # -- enabled but incomplete ---------------------------------------------
+
+    def test_a_complete_provider_starts_without_contacting_the_issuer(self):
+        result, output = self.run_check(
+            OIDC_PROVIDERS=COMPLETE_OIDC_PROVIDER,
+            OIDC_PUBLIC_BASE_URL="https://care.example",
+        )
+
+        self.assertEqual(result.returncode, 0, output)
+
+    def test_an_unreachable_issuer_is_inert_at_startup(self):
+        """Validation is a contract check, not a connectivity check."""
+        providers = json.dumps(
+            [
+                {
+                    **json.loads(COMPLETE_OIDC_PROVIDER)[0],
+                    "issuer": "https://127.0.0.1:1/realms/unreachable",
+                }
+            ]
+        )
+        result, output = self.run_check(
+            OIDC_PROVIDERS=providers, OIDC_PUBLIC_BASE_URL="https://care.example"
+        )
+
+        self.assertEqual(result.returncode, 0, output)
+
+    def test_an_enabled_provider_without_a_public_base_url_refuses_to_start(self):
+        result, output = self.run_check(
+            OIDC_PROVIDERS=COMPLETE_OIDC_PROVIDER, OIDC_PUBLIC_BASE_URL=""
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("OIDC_PUBLIC_BASE_URL", output)
+
+    def test_an_insecure_issuer_refuses_to_start(self):
+        providers = json.dumps(
+            [
+                {
+                    **json.loads(COMPLETE_OIDC_PROVIDER)[0],
+                    "issuer": "http://identity.example/realms/care",
+                }
+            ]
+        )
+        result, output = self.run_check(
+            OIDC_PROVIDERS=providers, OIDC_PUBLIC_BASE_URL="https://care.example"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("issuer", output)
+
+    def test_malformed_provider_json_refuses_to_start(self):
+        result, output = self.run_check(OIDC_PROVIDERS="{not json")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("OIDC_PROVIDERS", output)
+
+    def test_startup_failure_never_prints_a_provider_secret(self):
+        """T15: startup output reaches logs and CI."""
+        providers = json.dumps(
+            [
+                {
+                    **json.loads(COMPLETE_OIDC_PROVIDER)[0],
+                    "issuer": "http://identity.example/realms/care",
+                }
+            ]
+        )
+        result, output = self.run_check(
+            OIDC_PROVIDERS=providers, OIDC_PUBLIC_BASE_URL="https://care.example"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("workforce-secret", output)
+
+    # -- non-API roles ------------------------------------------------------
+
+    def test_a_worker_role_is_not_held_to_the_provider_contract(self):
+        result, output = self.run_check(
+            CARE_PROCESS_ROLE="task_worker",
+            CARE_PATIENT_OTP_ENABLED="false",
+            FIREBASE_AUTH_ENABLED="false",
+            OIDC_PROVIDERS="",
         )
 
         self.assertEqual(result.returncode, 0, output)

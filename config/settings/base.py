@@ -37,6 +37,8 @@ from config.firebase_auth import (
 )
 from config.health import build_health_checks
 from config.keycloak import KEYCLOAK_REQUIRED_SETTINGS, validate_keycloak_settings
+from config.login_methods import validate_login_methods
+from config.oidc import load_oidc_providers, validate_oidc_providers
 from config.runtime import (
     API_ROLE,
     DEFAULT_PROCESS_ROLE,
@@ -651,6 +653,53 @@ validate_firebase_auth_settings(
     enabled=FIREBASE_AUTH_ENABLED and CARE_PROCESS_ROLE == API_ROLE,
     project_id=FIREBASE_AUTH_PROJECT_ID,
     sms_country_codes=FIREBASE_AUTH_SMS_COUNTRY_CODES,
+)
+
+# Standard OIDC providers (ADR-0011)
+# ------------------------------------------------------------------------------
+# CARE speaks OpenID Connect, not a vendor. A provider is a configuration
+# record; zero of them is the default and a fully supported production state,
+# in which no OIDC route is mounted and no issuer is ever contacted.
+#
+# The set arrives as JSON, inline for Compose and Kubernetes or as a file for a
+# secret-manager volume -- one source or the other, never both. Client secrets
+# live in whichever secret mechanism the deployment already uses; CARE reads a
+# value and never a vault.
+OIDC_PROVIDERS_FILE = env("OIDC_PROVIDERS_FILE", default="")
+OIDC_PROVIDERS = load_oidc_providers(
+    raw=env("OIDC_PROVIDERS", default=""),
+    path=OIDC_PROVIDERS_FILE,
+)
+
+# The public CARE origin. Callback URLs are derived from it and matched
+# byte-for-byte at the exchange, so it is required once any provider is enabled.
+OIDC_PUBLIC_BASE_URL = env("OIDC_PUBLIC_BASE_URL", default="")
+
+# Discovery and JWKS are cached through CARE's configured cache backend, which
+# may be locmem, PostgreSQL or Redis. None of them becomes a requirement here.
+OIDC_DISCOVERY_CACHE_SECONDS = env.int("OIDC_DISCOVERY_CACHE_SECONDS", default=3600)
+OIDC_JWKS_CACHE_SECONDS = env.int("OIDC_JWKS_CACHE_SECONDS", default=3600)
+
+validate_oidc_providers(
+    OIDC_PROVIDERS,
+    public_base_url=OIDC_PUBLIC_BASE_URL,
+    enforce=CARE_PROCESS_ROLE == API_ROLE,
+)
+
+# CARE's own phone OTP (ADR-0011 §6)
+# ------------------------------------------------------------------------------
+# On by default, and removed only by an explicit operator decision once its
+# replacement is proven -- never as a side effect of enabling another provider.
+# For a clinic with no identity provider it is the only method that works.
+CARE_PATIENT_OTP_ENABLED = env.bool("CARE_PATIENT_OTP_ENABLED", default=True)
+
+# The one login configuration CARE refuses: a deployment where no patient can
+# get in. Cheap to catch here, expensive to discover from an empty login screen.
+validate_login_methods(
+    enforce=CARE_PROCESS_ROLE == API_ROLE,
+    patient_otp_enabled=CARE_PATIENT_OTP_ENABLED,
+    firebase_enabled=FIREBASE_AUTH_ENABLED,
+    providers=OIDC_PROVIDERS,
 )
 
 # The private task-execution route is served only by the worker role, so the
