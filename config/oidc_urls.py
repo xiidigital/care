@@ -16,6 +16,8 @@ def build_oidc_urlpatterns(providers):
         return []
 
     from config.oidc_views import (
+        OidcLinkedIdentityListView,
+        OidcLinkView,
         OidcProviderListView,
         PatientOidcExchangeView,
         WorkforceOidcExchangeView,
@@ -29,13 +31,30 @@ def build_oidc_urlpatterns(providers):
         )
     ]
     if providers_for(providers, WORKFORCE):
-        routes.append(
+        routes += [
             path(
                 "api/v1/auth/oidc/workforce/exchange/",
                 WorkforceOidcExchangeView.as_view(),
                 name="oidc_workforce_exchange",
-            )
-        )
+            ),
+            # Linking is workforce-only (rule §5.3): a patient link reaches a
+            # clinical record and stays on the administrative path.
+            path(
+                "api/v1/auth/oidc/link/",
+                OidcLinkView.as_view(),
+                name="oidc_link",
+            ),
+            path(
+                "api/v1/auth/oidc/link/<uuid:identity_id>/",
+                OidcLinkView.as_view(),
+                name="oidc_unlink",
+            ),
+            path(
+                "api/v1/auth/oidc/identities/",
+                OidcLinkedIdentityListView.as_view(),
+                name="oidc_linked_identities",
+            ),
+        ]
     if providers_for(providers, PATIENT):
         routes.append(
             path(

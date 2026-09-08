@@ -4,14 +4,35 @@ from django.contrib.auth import admin as auth_admin
 from django.contrib.auth import get_user_model
 
 from care.users.forms import UserChangeForm, UserCreationForm
-from care.users.models import UserFlag
+from care.users.models import UserExternalIdentity, UserFlag
 from care.utils.registries.feature_flag import FlagRegistry, FlagType
 
 User = get_user_model()
 
 
+class UserExternalIdentityInline(admin.TabularInline):
+    """Administrative linking (ADR-0011 §5.2a).
+
+    Read-mostly on purpose. A subject is immutable (rule §5.5), so correcting
+    one is unlink-then-link rather than an edit -- an edit is
+    indistinguishable from moving someone else's identity onto this account.
+    """
+
+    model = UserExternalIdentity
+    fk_name = "user"
+    extra = 0
+    fields = ("provider_id", "issuer", "subject", "linked_by", "last_login_at")
+    readonly_fields = ("last_login_at",)
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj is None:
+            return self.readonly_fields
+        return (*self.readonly_fields, "provider_id", "issuer", "subject")
+
+
 @admin.register(User)
 class UserAdmin(auth_admin.UserAdmin):
+    inlines = [UserExternalIdentityInline]
     form = UserChangeForm
     add_form = UserCreationForm
     actions = ["export_as_csv"]

@@ -280,10 +280,15 @@ identity lookup filters on `subject` without `issuer` and `provider_id`.
 
 ### 5.7 Linking
 
-- **Administrative** — Django admin inlines on `User` and `Patient`, plus a
-  management command `link_external_identity` for scripted enrolment. Both
-  require the existing permission for the target model; patient linking is
-  administrative-only (ADR-0011 §5.3).
+- **Administrative** — a Django admin inline on `User`, plus management
+  commands for scripted enrolment. Patient linking is administrative-only
+  (ADR-0011 §5.3).
+
+  CARE registers **no `Patient` admin**, so there is no admin screen to hang a
+  patient inline on. The administrative path for patients is therefore
+  `link_patient_external_identity`, which requires `--linked-by`: a patient
+  link with no recorded actor is a link nobody is accountable for. An earlier
+  draft of this section assumed an admin surface that does not exist.
 - **Self-service (workforce only)** — a CARE-authenticated user starts a normal
   OIDC round trip flagged as a link, and the callback posts to
   `/api/v1/auth/oidc/link/`. The triple is linked to *the authenticated user*,

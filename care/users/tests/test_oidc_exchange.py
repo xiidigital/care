@@ -78,7 +78,16 @@ class OidcRouteMountingTests(SimpleTestCase):
 
         names = {pattern.name for pattern in workforce_only}
 
-        self.assertEqual(names, {"oidc_provider_list", "oidc_workforce_exchange"})
+        self.assertEqual(
+            names,
+            {
+                "oidc_provider_list",
+                "oidc_workforce_exchange",
+                "oidc_link",
+                "oidc_unlink",
+                "oidc_linked_identities",
+            },
+        )
 
     def test_both_principal_routes_appear_when_both_are_served(self):
         patterns = build_oidc_urlpatterns((WORKFORCE_PROVIDER, PATIENT_PROVIDER))
@@ -88,6 +97,9 @@ class OidcRouteMountingTests(SimpleTestCase):
             {
                 "oidc_provider_list",
                 "oidc_workforce_exchange",
+                "oidc_link",
+                "oidc_unlink",
+                "oidc_linked_identities",
                 "oidc_patient_exchange",
             },
         )

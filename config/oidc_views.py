@@ -17,7 +17,7 @@ from django.contrib.auth import get_user_model
 from django.utils.timezone import localtime, now
 from rest_framework import serializers
 from rest_framework.authentication import BaseAuthentication
-from rest_framework.exceptions import AuthenticationFailed, Throttled
+from rest_framework.exceptions import AuthenticationFailed, NotFound, Throttled
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -26,6 +26,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from care.emr.models import PatientExternalIdentity
 from care.users.models import UserExternalIdentity
 from config.oidc import PATIENT, WORKFORCE, callback_url, providers_for
+from config.oidc_identity import (
+    IdentityAlreadyLinkedError,
+    link_workforce_identity,
+    unlink_workforce_identity,
+)
 from config.oidc_service import OidcExchangeError, exchange_oidc_code
 from config.patient_otp_token import PatientToken
 from config.ratelimit import ratelimit
@@ -185,3 +190,95 @@ class OidcProviderListView(APIView):
                 if provider.enabled
             ]
         )
+
+
+class OidcLinkSerializer(OidcExchangeSerializer):
+    """Same round trip as a login. What differs is what it is allowed to do."""
+
+
+class OidcLinkView(APIView):
+    """Self-service linking for a principal that is already authenticated.
+
+    Rule §5.2(b). The principal proves it holds the external identity by
+    completing a full OIDC round trip, and CARE links that subject to
+    `request.user` -- never to a user named in the request, which is the
+    difference between linking an identity and taking over an account.
+
+    Workforce only. A patient link reaches a clinical record, and rule §5.3
+    keeps that on the administrative path where CARE's custody rules apply.
+    """
+
+    def post(self, request, *args, **kwargs):
+        serializer = OidcLinkSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = dict(serializer.validated_data)
+
+        provider = _workforce_provider(payload.pop("provider_id"))
+        if provider is None:
+            raise AuthenticationFailed(GENERIC_FAILURE)
+
+        if ratelimit(request, "oidc-link", ["ip"], "10/m"):
+            raise Throttled
+
+        try:
+            claims = exchange_oidc_code(provider=provider, **payload)
+        except (OidcExchangeError, KeyError):
+            raise AuthenticationFailed(GENERIC_FAILURE) from None
+
+        try:
+            identity = link_workforce_identity(
+                user=request.user, provider=provider, subject=claims["sub"]
+            )
+        except IdentityAlreadyLinkedError:
+            # Deliberately not "already linked to someone else": that answer
+            # would turn this endpoint into an enrolment oracle (T13).
+            raise AuthenticationFailed(GENERIC_FAILURE) from None
+
+        return Response(
+            {
+                "id": str(identity.external_id),
+                "provider_id": provider.id,
+                "display_name": provider.display_name,
+            },
+            status=201,
+        )
+
+    def delete(self, request, identity_id=None, *args, **kwargs):
+        if not unlink_workforce_identity(user=request.user, external_id=identity_id):
+            raise NotFound
+        return Response(status=204)
+
+
+class OidcLinkedIdentityListView(APIView):
+    """What the account settings page shows: this principal's own links."""
+
+    def get(self, request, *args, **kwargs):
+        return Response(
+            [
+                {
+                    "id": str(identity.external_id),
+                    "provider_id": identity.provider_id,
+                    "display_name": _display_name_for(identity.provider_id),
+                    "linked_at": identity.created_date,
+                    "last_login_at": identity.last_login_at,
+                }
+                for identity in request.user.external_identities.order_by(
+                    "created_date"
+                )
+            ]
+        )
+
+
+def _workforce_provider(provider_id: str):
+    for provider in providers_for(settings.OIDC_PROVIDERS, WORKFORCE):
+        if provider.id == provider_id:
+            return provider
+    return None
+
+
+def _display_name_for(provider_id: str) -> str:
+    """An identity may outlive its provider record (rule §5.7)."""
+    for provider in settings.OIDC_PROVIDERS:
+        if provider.id == provider_id:
+            return provider.display_name
+    return provider_id
