@@ -38,7 +38,7 @@ from care.users.reset_password_views import (
 from care.utils.tasks.views import execute_task
 from config import api_router
 from config.firebase_auth_urls import build_firebase_auth_urlpatterns
-from config.keycloak_urls import build_keycloak_urlpatterns
+from config.oidc_urls import build_oidc_urlpatterns
 from config.runtime import API_ROLE, TASK_WORKER_ROLE
 
 from .auth_views import (
@@ -93,7 +93,7 @@ PUBLIC_API_URLS = [
     path("api/v1/", include(api_router.urlpatterns)),
     *static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT),
     *build_firebase_auth_urlpatterns(enabled=settings.FIREBASE_AUTH_ENABLED),
-    *build_keycloak_urlpatterns(enabled=settings.KEYCLOAK_ENABLED),
+    *build_oidc_urlpatterns(settings.OIDC_PROVIDERS),
 ]
 
 #: Private. Registered only by the task-worker role; see §14 of ES-06 for why it

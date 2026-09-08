@@ -18,9 +18,6 @@ class Patient(EMRBaseModel):
     gender = models.CharField(max_length=35, default="")
 
     email = models.EmailField(null=True, blank=True, db_index=True)
-    keycloak_subject = models.CharField(
-        max_length=255, unique=True, null=True, blank=True
-    )
 
     phone_number = models.CharField(
         max_length=14, validators=[mobile_or_landline_number_validator], default=""

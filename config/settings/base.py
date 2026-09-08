@@ -36,7 +36,6 @@ from config.firebase_auth import (
     validate_firebase_auth_settings,
 )
 from config.health import build_health_checks
-from config.keycloak import KEYCLOAK_REQUIRED_SETTINGS, validate_keycloak_settings
 from config.login_methods import validate_login_methods
 from config.oidc import load_oidc_providers, validate_oidc_providers
 from config.runtime import (
@@ -624,24 +623,11 @@ CARE_PROCESS_ROLE = validate_process_role(
     env("CARE_PROCESS_ROLE", default=DEFAULT_PROCESS_ROLE).strip().lower()
 )
 
-# Optional external authentication adapters (ADR-0010)
+# Optional external authentication adapters (ADR-0010, ADR-0011)
 # ------------------------------------------------------------------------------
 # Flags are available to every role because the deployment environment is
 # assembled once, but only the API serves authentication routes or needs the
 # provider configuration and secrets.
-KEYCLOAK_ENABLED = env.bool("KEYCLOAK_ENABLED", default=False)
-KEYCLOAK_ISSUER_URL = env("KEYCLOAK_ISSUER_URL", default="")
-KEYCLOAK_WORKFORCE_CLIENT_ID = env("KEYCLOAK_WORKFORCE_CLIENT_ID", default="")
-KEYCLOAK_WORKFORCE_CLIENT_SECRET = env("KEYCLOAK_WORKFORCE_CLIENT_SECRET", default="")
-KEYCLOAK_PATIENT_CLIENT_ID = env("KEYCLOAK_PATIENT_CLIENT_ID", default="")
-KEYCLOAK_PATIENT_CLIENT_SECRET = env("KEYCLOAK_PATIENT_CLIENT_SECRET", default="")
-KEYCLOAK_PUBLIC_BASE_URL = env("KEYCLOAK_PUBLIC_BASE_URL", default="")
-
-validate_keycloak_settings(
-    enabled=KEYCLOAK_ENABLED and CARE_PROCESS_ROLE == API_ROLE,
-    values={name: globals()[name] for name in KEYCLOAK_REQUIRED_SETTINGS},
-)
-
 FIREBASE_AUTH_ENABLED = env.bool("FIREBASE_AUTH_ENABLED", default=False)
 FIREBASE_AUTH_PROJECT_ID = env("FIREBASE_AUTH_PROJECT_ID", default="")
 # ADR-0010 §6 restricts the first SMS rollout to Mexico. Widening it is an

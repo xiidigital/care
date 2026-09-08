@@ -1,4 +1,4 @@
-"""Startup behaviour of the two optional authentication adapters (ADR-0010).
+"""Startup behaviour of the optional authentication providers (ADR-0010, ADR-0011).
 
 `override_settings` cannot answer these questions. Both adapters are validated
 while `config/settings/base.py` is being imported, and the routes they mount are
@@ -17,18 +17,34 @@ from django.test import SimpleTestCase
 
 EXCHANGE_PATHS = (
     "/api/v1/auth/firebase/patient/exchange/",
-    "/api/v1/auth/keycloak/workforce/exchange/",
-    "/api/v1/auth/keycloak/patient/exchange/",
+    "/api/v1/auth/oidc/workforce/exchange/",
+    "/api/v1/auth/oidc/patient/exchange/",
 )
 
-COMPLETE_KEYCLOAK_ENV = {
-    "KEYCLOAK_ENABLED": "true",
-    "KEYCLOAK_ISSUER_URL": "https://identity.example/realms/care",
-    "KEYCLOAK_WORKFORCE_CLIENT_ID": "care-workforce",
-    "KEYCLOAK_WORKFORCE_CLIENT_SECRET": "workforce-secret",
-    "KEYCLOAK_PATIENT_CLIENT_ID": "care-patient",
-    "KEYCLOAK_PATIENT_CLIENT_SECRET": "patient-secret",
-    "KEYCLOAK_PUBLIC_BASE_URL": "https://care.example",
+BOTH_PRINCIPAL_PROVIDERS = json.dumps(
+    [
+        {
+            "id": "clinic-sso",
+            "display_name": "Clinic SSO",
+            "issuer": "https://identity.example/realms/care",
+            "principal_type": "workforce",
+            "client_id": "care-workforce",
+            "client_secret": "workforce-secret",
+        },
+        {
+            "id": "patient-sso",
+            "display_name": "Patient SSO",
+            "issuer": "https://identity.example/realms/care",
+            "principal_type": "patient",
+            "client_id": "care-patient",
+            "client_secret": "patient-secret",
+        },
+    ]
+)
+
+COMPLETE_OIDC_ENV = {
+    "OIDC_PROVIDERS": BOTH_PRINCIPAL_PROVIDERS,
+    "OIDC_PUBLIC_BASE_URL": "https://care.example",
 }
 
 
@@ -92,7 +108,7 @@ class ExternalAuthStartupTests(StartupProbeMixin, SimpleTestCase):
 
     def test_startup_needs_no_provider_configuration_at_all(self):
         result, output = self.run_check(
-            KEYCLOAK_ENABLED="false", FIREBASE_AUTH_ENABLED="false"
+            OIDC_PROVIDERS="", FIREBASE_AUTH_ENABLED="false"
         )
 
         self.assertEqual(result.returncode, 0, output)
@@ -100,45 +116,13 @@ class ExternalAuthStartupTests(StartupProbeMixin, SimpleTestCase):
     def test_disabled_startup_contacts_no_provider(self):
         """A hostile issuer URL is inert while the flag is off."""
         result, output = self.run_check(
-            KEYCLOAK_ENABLED="false",
-            KEYCLOAK_ISSUER_URL="https://127.0.0.1:1/realms/unreachable",
+            OIDC_PROVIDERS="",
             FIREBASE_AUTH_ENABLED="false",
         )
 
         self.assertEqual(result.returncode, 0, output)
 
     # -- enabled but incomplete ---------------------------------------------
-
-    def test_enabled_keycloak_without_configuration_refuses_to_start(self):
-        result, output = self.run_check(KEYCLOAK_ENABLED="true")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("KEYCLOAK_ISSUER_URL", output)
-
-    def test_enabled_keycloak_missing_one_secret_refuses_to_start(self):
-        env = dict(COMPLETE_KEYCLOAK_ENV, KEYCLOAK_PATIENT_CLIENT_SECRET="")
-        result, output = self.run_check(**env)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("KEYCLOAK_PATIENT_CLIENT_SECRET", output)
-
-    def test_startup_failure_never_prints_a_configured_secret(self):
-        env = dict(COMPLETE_KEYCLOAK_ENV, KEYCLOAK_ISSUER_URL="")
-        result, output = self.run_check(**env)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("workforce-secret", output)
-        self.assertNotIn("patient-secret", output)
-
-    def test_enabled_keycloak_rejects_an_insecure_issuer(self):
-        env = dict(
-            COMPLETE_KEYCLOAK_ENV,
-            KEYCLOAK_ISSUER_URL="http://identity.example/realms/care",
-        )
-        result, output = self.run_check(**env)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("KEYCLOAK_ISSUER_URL", output)
 
     def test_enabled_firebase_without_a_project_refuses_to_start(self):
         result, output = self.run_check(FIREBASE_AUTH_ENABLED="true")
@@ -158,12 +142,6 @@ class ExternalAuthStartupTests(StartupProbeMixin, SimpleTestCase):
 
     # -- enabled and complete -----------------------------------------------
 
-    def test_complete_keycloak_configuration_starts_without_a_runtime(self):
-        """Dormant-to-active is configuration only; no server is contacted."""
-        result, output = self.run_check(**COMPLETE_KEYCLOAK_ENV)
-
-        self.assertEqual(result.returncode, 0, output)
-
     def test_complete_firebase_configuration_starts(self):
         result, output = self.run_check(
             FIREBASE_AUTH_ENABLED="true", FIREBASE_AUTH_PROJECT_ID="care-dev"
@@ -175,7 +153,7 @@ class ExternalAuthStartupTests(StartupProbeMixin, SimpleTestCase):
 
     def test_disabled_providers_mount_no_exchange_routes(self):
         output = self.run_route_probe(
-            *EXCHANGE_PATHS, KEYCLOAK_ENABLED="false", FIREBASE_AUTH_ENABLED="false"
+            *EXCHANGE_PATHS, OIDC_PROVIDERS="", FIREBASE_AUTH_ENABLED="false"
         )
 
         self.assertNotIn("MOUNTED", output)
@@ -184,7 +162,7 @@ class ExternalAuthStartupTests(StartupProbeMixin, SimpleTestCase):
     def test_enabled_providers_mount_exactly_their_own_routes(self):
         output = self.run_route_probe(
             *EXCHANGE_PATHS,
-            **COMPLETE_KEYCLOAK_ENV,
+            **COMPLETE_OIDC_ENV,
             FIREBASE_AUTH_ENABLED="true",
             FIREBASE_AUTH_PROJECT_ID="care-dev",
         )
@@ -192,23 +170,23 @@ class ExternalAuthStartupTests(StartupProbeMixin, SimpleTestCase):
         for path in EXCHANGE_PATHS:
             self.assertIn(f"MOUNTED {path}", output)
 
-    def test_enabling_firebase_alone_leaves_keycloak_absent(self):
+    def test_enabling_firebase_alone_leaves_the_oidc_routes_absent(self):
         output = self.run_route_probe(
             *EXCHANGE_PATHS,
-            KEYCLOAK_ENABLED="false",
+            OIDC_PROVIDERS="",
             FIREBASE_AUTH_ENABLED="true",
             FIREBASE_AUTH_PROJECT_ID="care-dev",
         )
 
         self.assertIn("MOUNTED /api/v1/auth/firebase/patient/exchange/", output)
-        self.assertIn("ABSENT /api/v1/auth/keycloak/workforce/exchange/", output)
-        self.assertIn("ABSENT /api/v1/auth/keycloak/patient/exchange/", output)
+        self.assertIn("ABSENT /api/v1/auth/oidc/workforce/exchange/", output)
+        self.assertIn("ABSENT /api/v1/auth/oidc/patient/exchange/", output)
 
     def test_legacy_patient_otp_login_survives_both_adapters_being_off(self):
         output = self.run_route_probe(
             "/api/v1/otp/login/",
             "/api/v1/otp/send/",
-            KEYCLOAK_ENABLED="false",
+            OIDC_PROVIDERS="",
             FIREBASE_AUTH_ENABLED="false",
         )
 
@@ -231,7 +209,7 @@ class ExternalAuthStartupTests(StartupProbeMixin, SimpleTestCase):
         output = self.run_route_probe(
             *legacy_paths,
             *EXCHANGE_PATHS,
-            **COMPLETE_KEYCLOAK_ENV,
+            **COMPLETE_OIDC_ENV,
             FIREBASE_AUTH_ENABLED="true",
             FIREBASE_AUTH_PROJECT_ID="care-dev",
         )
@@ -245,7 +223,7 @@ class ExternalAuthStartupTests(StartupProbeMixin, SimpleTestCase):
             "/api/v1/otp/send/",
             "/api/v1/otp/login/",
             "/api/v1/auth/login/",
-            KEYCLOAK_ENABLED="false",
+            OIDC_PROVIDERS="",
             FIREBASE_AUTH_ENABLED="true",
             FIREBASE_AUTH_PROJECT_ID="care-dev",
         )
@@ -257,25 +235,14 @@ class ExternalAuthStartupTests(StartupProbeMixin, SimpleTestCase):
     def test_a_worker_role_needs_no_provider_configuration(self):
         result, output = self.run_check(
             CARE_PROCESS_ROLE="task_worker",
-            KEYCLOAK_ENABLED="true",
+            **COMPLETE_OIDC_ENV,
             FIREBASE_AUTH_ENABLED="true",
         )
 
         self.assertEqual(result.returncode, 0, output)
 
 
-COMPLETE_OIDC_PROVIDER = json.dumps(
-    [
-        {
-            "id": "clinic-sso",
-            "display_name": "Clinic SSO",
-            "issuer": "https://identity.example/realms/care",
-            "principal_type": "workforce",
-            "client_id": "care-workforce",
-            "client_secret": "workforce-secret",
-        }
-    ]
-)
+SINGLE_WORKFORCE_PROVIDER = json.dumps([json.loads(BOTH_PRINCIPAL_PROVIDERS)[0]])
 
 
 class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
@@ -295,7 +262,6 @@ class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
             OIDC_PROVIDERS="",
             OIDC_PROVIDERS_FILE="",
             OIDC_PUBLIC_BASE_URL="",
-            KEYCLOAK_ENABLED="false",
             FIREBASE_AUTH_ENABLED="false",
         )
 
@@ -314,7 +280,6 @@ class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
             "/api/v1/otp/login/",
             "/api/v1/auth/login/",
             OIDC_PROVIDERS="",
-            KEYCLOAK_ENABLED="false",
             FIREBASE_AUTH_ENABLED="false",
         )
 
@@ -337,7 +302,7 @@ class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
         result, output = self.run_check(
             CARE_PATIENT_OTP_ENABLED="false",
             FIREBASE_AUTH_ENABLED="false",
-            OIDC_PROVIDERS=COMPLETE_OIDC_PROVIDER,
+            OIDC_PROVIDERS=SINGLE_WORKFORCE_PROVIDER,
             OIDC_PUBLIC_BASE_URL="https://care.example",
         )
 
@@ -358,7 +323,7 @@ class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
 
     def test_a_complete_provider_starts_without_contacting_the_issuer(self):
         result, output = self.run_check(
-            OIDC_PROVIDERS=COMPLETE_OIDC_PROVIDER,
+            OIDC_PROVIDERS=SINGLE_WORKFORCE_PROVIDER,
             OIDC_PUBLIC_BASE_URL="https://care.example",
         )
 
@@ -369,7 +334,7 @@ class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
         providers = json.dumps(
             [
                 {
-                    **json.loads(COMPLETE_OIDC_PROVIDER)[0],
+                    **json.loads(SINGLE_WORKFORCE_PROVIDER)[0],
                     "issuer": "https://127.0.0.1:1/realms/unreachable",
                 }
             ]
@@ -382,7 +347,7 @@ class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
 
     def test_an_enabled_provider_without_a_public_base_url_refuses_to_start(self):
         result, output = self.run_check(
-            OIDC_PROVIDERS=COMPLETE_OIDC_PROVIDER, OIDC_PUBLIC_BASE_URL=""
+            OIDC_PROVIDERS=SINGLE_WORKFORCE_PROVIDER, OIDC_PUBLIC_BASE_URL=""
         )
 
         self.assertNotEqual(result.returncode, 0)
@@ -392,7 +357,7 @@ class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
         providers = json.dumps(
             [
                 {
-                    **json.loads(COMPLETE_OIDC_PROVIDER)[0],
+                    **json.loads(SINGLE_WORKFORCE_PROVIDER)[0],
                     "issuer": "http://identity.example/realms/care",
                 }
             ]
@@ -415,7 +380,7 @@ class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
         providers = json.dumps(
             [
                 {
-                    **json.loads(COMPLETE_OIDC_PROVIDER)[0],
+                    **json.loads(SINGLE_WORKFORCE_PROVIDER)[0],
                     "issuer": "http://identity.example/realms/care",
                 }
             ]

@@ -7,7 +7,6 @@ isolation; these tests drive the public OTP endpoints so the authorization
 boundary itself is exercised, not just the queryset helper.
 """
 
-from django.test import override_settings
 from django.urls import reverse
 
 from care.emr.models import Patient
@@ -21,7 +20,7 @@ class PatientIdentityApiTests(CareAPITestBase):
         super().setUp()
         self.phone_patient = self.create_patient(phone_number="+5215555555555")
         self.email_patient = self.create_patient(email="patient@example.com")
-        self.keycloak_patient = self.create_patient(keycloak_subject="patient-subject")
+        self.oidc_patient = self.create_patient()
         self.url = reverse("otp-patient-list")
 
         self.staff_user = self.create_user()
@@ -69,11 +68,11 @@ class PatientIdentityApiTests(CareAPITestBase):
 
     def test_resolved_patient_id_lists_only_that_patient(self):
         self._authenticate(
-            patient_id=str(self.keycloak_patient.external_id),
-            auth_provider="keycloak",
+            patient_id=str(self.oidc_patient.external_id),
+            auth_provider="oidc",
         )
 
-        self.assertEqual(self._listed_ids(), {str(self.keycloak_patient.external_id)})
+        self.assertEqual(self._listed_ids(), {str(self.oidc_patient.external_id)})
 
     def test_an_identity_without_any_contact_is_refused(self):
         self._authenticate()
@@ -107,8 +106,8 @@ class PatientIdentityApiTests(CareAPITestBase):
 
     def test_a_resolved_patient_cannot_enrol_a_second_record(self):
         self._authenticate(
-            patient_id=str(self.keycloak_patient.external_id),
-            auth_provider="keycloak",
+            patient_id=str(self.oidc_patient.external_id),
+            auth_provider="oidc",
         )
 
         response = self.client.post(
@@ -116,7 +115,7 @@ class PatientIdentityApiTests(CareAPITestBase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(self._listed_ids(), {str(self.keycloak_patient.external_id)})
+        self.assertEqual(self._listed_ids(), {str(self.oidc_patient.external_id)})
 
 
 class RawProviderTokenRejectionTests(CareAPITestBase):
@@ -125,12 +124,12 @@ class RawProviderTokenRejectionTests(CareAPITestBase):
     def setUp(self):
         super().setUp()
         self.user = self.create_user()
-        self.patient = self.create_patient(keycloak_subject="patient-subject")
+        self.patient = self.create_patient()
 
     def test_a_patient_token_cannot_reach_a_staff_api(self):
         token = PatientToken()
         token["patient_id"] = str(self.patient.external_id)
-        token["auth_provider"] = "keycloak"
+        token["auth_provider"] = "oidc"
 
         response = self.client.get(
             reverse("patient-list"),
@@ -139,15 +138,20 @@ class RawProviderTokenRejectionTests(CareAPITestBase):
 
         self.assertIn(response.status_code, {401, 403})
 
-    @override_settings(KEYCLOAK_ENABLED=True)
     def test_a_raw_provider_token_is_not_a_care_credential(self):
+        """ADR-0011 §4: application APIs accept CARE credentials, full stop.
+
+        The provider set is irrelevant here, which is the point -- there is no
+        configuration under which an external token becomes usable at an
+        application endpoint.
+        """
         response = self.client.get(
             reverse("patient-list"),
             headers={
-                "authorization": "Bearer raw.keycloak.id-token",
+                "authorization": "Bearer raw.oidc.id-token",
                 "accept": "application/json",
             },
         )
 
         self.assertIn(response.status_code, {401, 403})
-        self.assertNotIn("raw.keycloak.id-token", str(response.content))
+        self.assertNotIn("raw.oidc.id-token", str(response.content))

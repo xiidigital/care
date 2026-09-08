@@ -3,25 +3,37 @@ import hashlib
 import hmac
 import json
 import time
+from dataclasses import replace
 
 import requests
 from authlib.jose import JsonWebKey, jwt
 from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
 
-from config.keycloak_service import KeycloakExchangeError, exchange_keycloak_code
+from config.oidc import OidcProvider
+from config.oidc_service import OidcExchangeError, exchange_oidc_code
 
-KEYCLOAK_SETTINGS = {
-    "KEYCLOAK_ISSUER_URL": "https://identity.example/realms/care",
-    "KEYCLOAK_WORKFORCE_CLIENT_ID": "care-workforce",
-    "KEYCLOAK_WORKFORCE_CLIENT_SECRET": "workforce-secret",
-    "KEYCLOAK_PATIENT_CLIENT_ID": "care-patient",
-    "KEYCLOAK_PATIENT_CLIENT_SECRET": "patient-secret",
-    "KEYCLOAK_PUBLIC_BASE_URL": "https://care.example",
-}
+WORKFORCE_PROVIDER = OidcProvider(
+    id="clinic-sso",
+    display_name="Clinic SSO",
+    issuer="https://identity.example/realms/care",
+    principal_type="workforce",
+    client_id="care-workforce",
+    client_secret="workforce-secret",
+)
+PATIENT_PROVIDER = OidcProvider(
+    id="patient-sso",
+    display_name="Patient SSO",
+    issuer="https://identity.example/realms/care",
+    principal_type="patient",
+    client_id="care-patient",
+    client_secret="patient-secret",
+)
+
+OIDC_SETTINGS = {"OIDC_PUBLIC_BASE_URL": "https://care.example"}
 
 
-@override_settings(**KEYCLOAK_SETTINGS)
+@override_settings(**OIDC_SETTINGS)
 class KeycloakServiceTests(SimpleTestCase):
     def setUp(self):
         # Discovery and JWKS are cached per issuer now, and these tests drive
@@ -33,12 +45,12 @@ class KeycloakServiceTests(SimpleTestCase):
     def test_pkce_code_is_exchanged_and_strict_claims_are_validated(self):
         session = _valid_session(client_id="care-patient", subject="patient-subject")
 
-        claims = exchange_keycloak_code(
-            principal_type="patient",
+        claims = exchange_oidc_code(
+            provider=PATIENT_PROVIDER,
             code="single-use-code",
             code_verifier="v" * 43,
             nonce="browser-nonce-value",
-            redirect_uri="https://care.example/auth/keycloak/patient/callback",
+            redirect_uri="https://care.example/auth/oidc/patient/callback",
             session=session,
         )
 
@@ -51,9 +63,9 @@ class KeycloakServiceTests(SimpleTestCase):
     def test_redirect_uri_must_match_the_configured_principal_callback(self):
         session = _valid_session(client_id="care-patient", subject="patient-subject")
 
-        with self.assertRaises(KeycloakExchangeError):
-            exchange_keycloak_code(
-                principal_type="patient",
+        with self.assertRaises(OidcExchangeError):
+            exchange_oidc_code(
+                provider=PATIENT_PROVIDER,
                 code="single-use-code",
                 code_verifier="v" * 43,
                 nonce="browser-nonce-value",
@@ -69,52 +81,52 @@ class KeycloakServiceTests(SimpleTestCase):
             "https://identity.example/realms/other"
         )
 
-        with self.assertRaises(KeycloakExchangeError):
-            exchange_keycloak_code(
-                principal_type="workforce",
+        with self.assertRaises(OidcExchangeError):
+            exchange_oidc_code(
+                provider=WORKFORCE_PROVIDER,
                 code="single-use-code",
                 code_verifier="v" * 43,
                 nonce="browser-nonce-value",
-                redirect_uri="https://care.example/auth/keycloak/workforce/callback",
+                redirect_uri="https://care.example/auth/oidc/workforce/callback",
                 session=session,
             )
 
     def test_id_token_nonce_must_match_browser_nonce(self):
         session = _valid_session(client_id="care-patient", subject="patient-subject")
 
-        with self.assertRaises(KeycloakExchangeError):
-            exchange_keycloak_code(
-                principal_type="patient",
+        with self.assertRaises(OidcExchangeError):
+            exchange_oidc_code(
+                provider=PATIENT_PROVIDER,
                 code="single-use-code",
                 code_verifier="v" * 43,
                 nonce="different-browser-nonce",
-                redirect_uri="https://care.example/auth/keycloak/patient/callback",
+                redirect_uri="https://care.example/auth/oidc/patient/callback",
                 session=session,
             )
 
     def test_a_patient_audience_token_is_refused_by_the_workforce_exchange(self):
         session = _valid_session(client_id="care-patient", subject="shared-subject")
 
-        with self.assertRaises(KeycloakExchangeError):
-            exchange_keycloak_code(
-                principal_type="workforce",
+        with self.assertRaises(OidcExchangeError):
+            exchange_oidc_code(
+                provider=WORKFORCE_PROVIDER,
                 code="single-use-code",
                 code_verifier="v" * 43,
                 nonce="browser-nonce-value",
-                redirect_uri="https://care.example/auth/keycloak/workforce/callback",
+                redirect_uri="https://care.example/auth/oidc/workforce/callback",
                 session=session,
             )
 
     def test_a_workforce_audience_token_is_refused_by_the_patient_exchange(self):
         session = _valid_session(client_id="care-workforce", subject="shared-subject")
 
-        with self.assertRaises(KeycloakExchangeError):
-            exchange_keycloak_code(
-                principal_type="patient",
+        with self.assertRaises(OidcExchangeError):
+            exchange_oidc_code(
+                provider=PATIENT_PROVIDER,
                 code="single-use-code",
                 code_verifier="v" * 43,
                 nonce="browser-nonce-value",
-                redirect_uri="https://care.example/auth/keycloak/patient/callback",
+                redirect_uri="https://care.example/auth/oidc/patient/callback",
                 session=session,
             )
 
@@ -123,13 +135,13 @@ class KeycloakServiceTests(SimpleTestCase):
             client_id="care-patient", subject="patient-subject", lifetime=-300
         )
 
-        with self.assertRaises(KeycloakExchangeError):
-            exchange_keycloak_code(
-                principal_type="patient",
+        with self.assertRaises(OidcExchangeError):
+            exchange_oidc_code(
+                provider=PATIENT_PROVIDER,
                 code="single-use-code",
                 code_verifier="v" * 43,
                 nonce="browser-nonce-value",
-                redirect_uri="https://care.example/auth/keycloak/patient/callback",
+                redirect_uri="https://care.example/auth/oidc/patient/callback",
                 session=session,
             )
 
@@ -142,44 +154,43 @@ class KeycloakServiceTests(SimpleTestCase):
             "keys": [foreign_key.as_dict(is_private=False)]
         }
 
-        with self.assertRaises(KeycloakExchangeError):
-            exchange_keycloak_code(
-                principal_type="patient",
+        with self.assertRaises(OidcExchangeError):
+            exchange_oidc_code(
+                provider=PATIENT_PROVIDER,
                 code="single-use-code",
                 code_verifier="v" * 43,
                 nonce="browser-nonce-value",
-                redirect_uri="https://care.example/auth/keycloak/patient/callback",
+                redirect_uri="https://care.example/auth/oidc/patient/callback",
                 session=session,
             )
 
     def test_an_unreachable_issuer_fails_closed(self):
         session = _FailingSession()
 
-        with self.assertRaises(KeycloakExchangeError):
-            exchange_keycloak_code(
-                principal_type="patient",
+        with self.assertRaises(OidcExchangeError):
+            exchange_oidc_code(
+                provider=PATIENT_PROVIDER,
                 code="single-use-code",
                 code_verifier="v" * 43,
                 nonce="browser-nonce-value",
-                redirect_uri="https://care.example/auth/keycloak/patient/callback",
+                redirect_uri="https://care.example/auth/oidc/patient/callback",
                 session=session,
             )
 
     def test_an_insecure_issuer_is_never_contacted(self):
         session = _valid_session(client_id="care-patient", subject="patient-subject")
 
-        with (
-            override_settings(
-                KEYCLOAK_ISSUER_URL="http://identity.example/realms/care"
-            ),
-            self.assertRaises(KeycloakExchangeError),
-        ):
-            exchange_keycloak_code(
-                principal_type="patient",
+        insecure = replace(
+            PATIENT_PROVIDER, issuer="http://identity.example/realms/care"
+        )
+
+        with self.assertRaises(OidcExchangeError):
+            exchange_oidc_code(
+                provider=insecure,
                 code="single-use-code",
                 code_verifier="v" * 43,
                 nonce="browser-nonce-value",
-                redirect_uri="https://care.example/auth/keycloak/patient/callback",
+                redirect_uri="https://care.example/auth/oidc/patient/callback",
                 session=session,
             )
 
@@ -191,13 +202,13 @@ class KeycloakServiceTests(SimpleTestCase):
             "https://attacker.example/token"
         )
 
-        with self.assertRaises(KeycloakExchangeError):
-            exchange_keycloak_code(
-                principal_type="patient",
+        with self.assertRaises(OidcExchangeError):
+            exchange_oidc_code(
+                provider=PATIENT_PROVIDER,
                 code="single-use-code",
                 code_verifier="v" * 43,
                 nonce="browser-nonce-value",
-                redirect_uri="https://care.example/auth/keycloak/patient/callback",
+                redirect_uri="https://care.example/auth/oidc/patient/callback",
                 session=session,
             )
 
@@ -392,7 +403,7 @@ def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
-@override_settings(**KEYCLOAK_SETTINGS)
+@override_settings(**OIDC_SETTINGS)
 class OidcDiscoveryCacheTests(SimpleTestCase):
     """T17: an issuer must not be re-fetched twice on every single login.
 
@@ -405,13 +416,13 @@ class OidcDiscoveryCacheTests(SimpleTestCase):
         self.addCleanup(cache.clear)
 
     def exchange(self, session, **overrides):
-        return exchange_keycloak_code(
+        return exchange_oidc_code(
             **{
-                "principal_type": "patient",
+                "provider": PATIENT_PROVIDER,
                 "code": "single-use-code",
                 "code_verifier": "v" * 43,
                 "nonce": "browser-nonce-value",
-                "redirect_uri": "https://care.example/auth/keycloak/patient/callback",
+                "redirect_uri": "https://care.example/auth/oidc/patient/callback",
                 "session": session,
                 **overrides,
             }
@@ -453,19 +464,19 @@ class OidcDiscoveryCacheTests(SimpleTestCase):
         unknown = _rotated_key_session(
             client_id="care-patient", subject="patient-subject", publish_new_key=False
         )
-        with self.assertRaises(KeycloakExchangeError):
+        with self.assertRaises(OidcExchangeError):
             self.exchange(unknown)
 
         again = _rotated_key_session(
             client_id="care-patient", subject="patient-subject", publish_new_key=False
         )
-        with self.assertRaises(KeycloakExchangeError):
+        with self.assertRaises(OidcExchangeError):
             self.exchange(again)
 
         self.assertEqual(again.get_calls, [], "second unknown kid refetched anyway")
 
 
-@override_settings(**KEYCLOAK_SETTINGS)
+@override_settings(**OIDC_SETTINGS)
 class OidcTokenHardeningTests(SimpleTestCase):
     """T4 and T5: what the token itself is allowed to claim about its own proof."""
 
@@ -474,12 +485,12 @@ class OidcTokenHardeningTests(SimpleTestCase):
         self.addCleanup(cache.clear)
 
     def exchange(self, session):
-        return exchange_keycloak_code(
-            principal_type="patient",
+        return exchange_oidc_code(
+            provider=PATIENT_PROVIDER,
             code="single-use-code",
             code_verifier="v" * 43,
             nonce="browser-nonce-value",
-            redirect_uri="https://care.example/auth/keycloak/patient/callback",
+            redirect_uri="https://care.example/auth/oidc/patient/callback",
             session=session,
         )
 
@@ -487,14 +498,14 @@ class OidcTokenHardeningTests(SimpleTestCase):
         """`alg: none` is the oldest JWT attack and must never reach validation."""
         session = _unsigned_token_session(client_id="care-patient")
 
-        with self.assertRaises(KeycloakExchangeError):
+        with self.assertRaises(OidcExchangeError):
             self.exchange(session)
 
     def test_a_token_signed_with_the_published_key_as_an_hmac_secret_is_refused(self):
         """Algorithm confusion: the verifier must not accept a symmetric alg."""
         session = _hmac_token_session(client_id="care-patient")
 
-        with self.assertRaises(KeycloakExchangeError):
+        with self.assertRaises(OidcExchangeError):
             self.exchange(session)
 
     def test_a_multi_valued_audience_without_azp_is_refused(self):
@@ -505,7 +516,7 @@ class OidcTokenHardeningTests(SimpleTestCase):
             audience=["care-patient", "another-client"],
         )
 
-        with self.assertRaises(KeycloakExchangeError):
+        with self.assertRaises(OidcExchangeError):
             self.exchange(session)
 
     def test_a_multi_valued_audience_with_a_foreign_azp_is_refused(self):
@@ -516,7 +527,7 @@ class OidcTokenHardeningTests(SimpleTestCase):
             azp="another-client",
         )
 
-        with self.assertRaises(KeycloakExchangeError):
+        with self.assertRaises(OidcExchangeError):
             self.exchange(session)
 
     def test_a_multi_valued_audience_naming_care_in_azp_is_accepted(self):

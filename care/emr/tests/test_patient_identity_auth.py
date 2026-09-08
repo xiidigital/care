@@ -25,15 +25,15 @@ class PatientIdentityTokenTests(SimpleTestCase):
             OTPAuthenticatedPermission().has_permission(_request(principal), None)
         )
 
-    def test_keycloak_patient_token_uses_exact_patient_identity(self):
+    def test_an_oidc_patient_token_uses_the_exact_patient_identity(self):
         token = PatientToken()
         token["patient_id"] = "550e8400-e29b-41d4-a716-446655440000"
-        token["auth_provider"] = "keycloak"
+        token["auth_provider"] = "oidc"
 
         principal = JWTTokenPatientAuthentication().get_user(token)
 
         self.assertEqual(principal.patient_id, "550e8400-e29b-41d4-a716-446655440000")
-        self.assertEqual(principal.auth_provider, "keycloak")
+        self.assertEqual(principal.auth_provider, "oidc")
         self.assertTrue(
             OTPAuthenticatedPermission().has_permission(_request(principal), None)
         )
@@ -69,11 +69,11 @@ class PatientPrincipalAuditLabelTests(SimpleTestCase):
 
     def test_a_resolved_patient_is_recorded_by_its_care_identifier(self):
         principal = _principal(patient_id="550e8400-e29b-41d4-a716-446655440000")
-        principal.auth_provider = "keycloak"
+        principal.auth_provider = "oidc"
 
         self.assertEqual(
             patient_principal_label(principal),
-            "patient|keycloak|id:550e8400-e29b-41d4-a716-446655440000",
+            "patient|oidc|id:550e8400-e29b-41d4-a716-446655440000",
         )
 
     def test_an_identity_without_any_contact_does_not_raise(self):

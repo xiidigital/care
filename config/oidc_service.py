@@ -1,4 +1,14 @@
-"""Narrow OIDC code-exchange boundary for the optional Keycloak adapter."""
+"""The one place CARE accepts an external token (ADR-0011 §4).
+
+Everything here is standard OpenID Connect. The function takes a configured
+provider record and knows nothing about who implements it: Keycloak, Entra ID,
+Authentik, Zitadel and the test double all reach this code identically, and a
+branch on which one is answering would mean the abstraction had leaked.
+
+Its only output is a set of validated claims. Deciding which CARE principal
+those claims belong to -- and whether that principal may do anything -- happens
+in `config/oidc_views.py`, against an enrolled identity row.
+"""
 
 import base64
 import binascii
@@ -12,7 +22,7 @@ from authlib.jose import JoseError, JsonWebKey, JsonWebToken
 from django.conf import settings
 from django.core.cache import cache
 
-from config.oidc import is_safe_oidc_url
+from config.oidc import OidcProvider, callback_url, is_safe_oidc_url
 
 OIDC_TIMEOUT_SECONDS = 5
 
@@ -53,7 +63,7 @@ def _fetch_discovery(client, session) -> dict:
     discovery = response.json()
 
     if discovery.get("issuer", "").rstrip("/") != client.issuer:
-        raise KeycloakExchangeError
+        raise OidcExchangeError
 
     return {
         "token_endpoint": _require_issuer_origin(
@@ -134,44 +144,37 @@ def _require_authorized_party(claims: dict, client_id: str) -> None:
     audience = claims.get("aud")
     is_multi_valued = isinstance(audience, list | tuple) and len(audience) > 1
     if is_multi_valued and claims.get("azp") != client_id:
-        raise KeycloakExchangeError
+        raise OidcExchangeError
 
 
-class KeycloakExchangeError(Exception):
+class OidcExchangeError(Exception):
     """A deliberately detail-free external authentication failure."""
 
 
 @dataclass(frozen=True)
-class KeycloakClient:
+class OidcClient:
+    """A provider record joined to the callback this deployment registered."""
+
     issuer: str
     client_id: str
     client_secret: str
     redirect_uri: str
 
 
-def _client_for(principal_type: str) -> KeycloakClient:
-    base_url = settings.KEYCLOAK_PUBLIC_BASE_URL.rstrip("/")
-    if principal_type == "workforce":
-        return KeycloakClient(
-            issuer=settings.KEYCLOAK_ISSUER_URL.rstrip("/"),
-            client_id=settings.KEYCLOAK_WORKFORCE_CLIENT_ID,
-            client_secret=settings.KEYCLOAK_WORKFORCE_CLIENT_SECRET,
-            redirect_uri=f"{base_url}/auth/keycloak/workforce/callback",
-        )
-    if principal_type == "patient":
-        return KeycloakClient(
-            issuer=settings.KEYCLOAK_ISSUER_URL.rstrip("/"),
-            client_id=settings.KEYCLOAK_PATIENT_CLIENT_ID,
-            client_secret=settings.KEYCLOAK_PATIENT_CLIENT_SECRET,
-            redirect_uri=f"{base_url}/auth/keycloak/patient/callback",
-        )
-    msg = "Unsupported Keycloak principal type"
-    raise ValueError(msg)
+def client_for(provider: OidcProvider) -> OidcClient:
+    return OidcClient(
+        issuer=provider.issuer,
+        client_id=provider.client_id,
+        client_secret=provider.client_secret,
+        redirect_uri=callback_url(
+            settings.OIDC_PUBLIC_BASE_URL, provider.principal_type
+        ),
+    )
 
 
 def _require_safe_oidc_url(url: str) -> str:
     if not is_safe_oidc_url(url):
-        raise KeycloakExchangeError
+        raise OidcExchangeError
     return url
 
 
@@ -180,13 +183,13 @@ def _require_issuer_origin(url: str, issuer: str) -> str:
     parsed = urlparse(safe_url)
     issuer_parsed = urlparse(issuer)
     if (parsed.scheme, parsed.netloc) != (issuer_parsed.scheme, issuer_parsed.netloc):
-        raise KeycloakExchangeError
+        raise OidcExchangeError
     return safe_url
 
 
-def exchange_keycloak_code(
+def exchange_oidc_code(
     *,
-    principal_type: str,
+    provider: OidcProvider,
     code: str,
     code_verifier: str,
     nonce: str,
@@ -194,9 +197,11 @@ def exchange_keycloak_code(
     session=requests,
 ) -> dict:
     """Exchange one PKCE code and validate the returned OIDC identity token."""
-    client = _client_for(principal_type)
+    client = client_for(provider)
+    # Byte-for-byte. A redirect URI that merely looks equivalent is the seam an
+    # authorization-code injection needs (T8).
     if redirect_uri != client.redirect_uri:
-        raise KeycloakExchangeError
+        raise OidcExchangeError
 
     try:
         discovery = _discovery_for(client, session)
@@ -229,7 +234,7 @@ def exchange_keycloak_code(
         )
         claims.validate(leeway=30)
         if claims.get("nonce") != nonce:
-            raise KeycloakExchangeError
+            raise OidcExchangeError
         _require_authorized_party(claims, client.client_id)
     except (
         JoseError,
@@ -238,6 +243,6 @@ def exchange_keycloak_code(
         ValueError,
         requests.RequestException,
     ) as exc:
-        raise KeycloakExchangeError from exc
+        raise OidcExchangeError from exc
 
     return dict(claims)
