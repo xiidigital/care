@@ -31,7 +31,11 @@ from config.oidc_identity import (
     link_workforce_identity,
     unlink_workforce_identity,
 )
-from config.oidc_service import OidcExchangeError, exchange_oidc_code
+from config.oidc_service import (
+    OidcExchangeError,
+    discovery_for_provider,
+    exchange_oidc_code,
+)
 from config.patient_otp_token import PatientToken
 from config.ratelimit import ratelimit
 
@@ -174,22 +178,44 @@ class OidcProviderListView(APIView):
             raise Throttled
 
         return Response(
-            [
-                {
-                    "id": provider.id,
-                    "display_name": provider.display_name,
-                    "principal_type": provider.principal_type,
-                    "issuer": provider.issuer,
-                    "client_id": provider.client_id,
-                    "scopes": list(provider.scopes),
-                    "redirect_uri": callback_url(
-                        settings.OIDC_PUBLIC_BASE_URL, provider.principal_type
-                    ),
-                }
-                for provider in settings.OIDC_PROVIDERS
-                if provider.enabled
-            ]
+            [entry for entry in map(self._describe, settings.OIDC_PROVIDERS) if entry]
         )
+
+    @staticmethod
+    def _describe(provider):
+        """One provider as the login screen needs it, or None to hide it.
+
+        The authorization endpoint comes from the issuer's discovery document,
+        which is why it is resolved here rather than composed in the browser.
+        Hardcoding a path would work for exactly one product -- Keycloak's
+        `/protocol/openid-connect/auth` is not Entra ID's `/oauth2/v2.0/authorize`
+        -- and that is the coupling ADR-0011 §2 forbids.
+
+        Discovery is cached, so this is normally free. When the issuer cannot
+        be reached the provider is omitted, because a button that cannot work
+        is worse than no button.
+        """
+        if not provider.enabled:
+            return None
+
+        discovery = discovery_for_provider(provider)
+        # A provider with no authorization endpoint cannot start a login, so
+        # there is nothing to offer -- even though its exchange would work.
+        if discovery is None or not discovery.get("authorization_endpoint"):
+            return None
+
+        return {
+            "id": provider.id,
+            "display_name": provider.display_name,
+            "principal_type": provider.principal_type,
+            "issuer": provider.issuer,
+            "client_id": provider.client_id,
+            "scopes": list(provider.scopes),
+            "authorization_endpoint": discovery["authorization_endpoint"],
+            "redirect_uri": callback_url(
+                settings.OIDC_PUBLIC_BASE_URL, provider.principal_type
+            ),
+        }
 
 
 class OidcLinkSerializer(OidcExchangeSerializer):

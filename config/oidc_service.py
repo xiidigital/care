@@ -65,12 +65,38 @@ def _fetch_discovery(client, session) -> dict:
     if discovery.get("issuer", "").rstrip("/") != client.issuer:
         raise OidcExchangeError
 
-    return {
+    resolved = {
         "token_endpoint": _require_issuer_origin(
             discovery["token_endpoint"], client.issuer
         ),
         "jwks_uri": _require_issuer_origin(discovery["jwks_uri"], client.issuer),
     }
+    # The exchange never uses these two, so their absence must not fail a login
+    # that is otherwise valid. The provider list requires the authorization
+    # endpoint and hides a provider without one; logout is optional entirely.
+    for optional in ("authorization_endpoint", "end_session_endpoint"):
+        if value := discovery.get(optional):
+            resolved[optional] = _require_issuer_origin(value, client.issuer)
+    return resolved
+
+
+def discovery_for_provider(provider: OidcProvider, session=requests) -> dict | None:
+    """The issuer's endpoints, or None if it cannot be reached or trusted.
+
+    The browser cannot read a discovery document itself -- it is cross-origin,
+    and CARE would be trusting whatever the browser reported back. So the
+    authorization endpoint reaches the login screen through CARE, which is also
+    the only way the endpoint stays vendor-neutral: hardcoding a path would
+    work for exactly one product.
+
+    Failing to None rather than raising is deliberate: a provider whose issuer
+    is unreachable is hidden from the login screen, which is better than
+    offering a button that cannot work.
+    """
+    try:
+        return _discovery_for(client_for(provider), session)
+    except (OidcExchangeError, requests.RequestException, KeyError, ValueError):
+        return None
 
 
 def _discovery_for(client, session) -> dict:

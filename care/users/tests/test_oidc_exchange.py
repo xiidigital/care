@@ -13,6 +13,7 @@ forged signature.
 
 from unittest.mock import patch
 
+from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import NoReverseMatch, reverse
 from model_bakery import baker
@@ -24,7 +25,11 @@ from care.users.admin import UserAdmin
 from care.users.models import User, UserExternalIdentity
 from config.oidc import OidcProvider
 from config.oidc_urls import build_oidc_urlpatterns
-from config.oidc_views import PatientOidcExchangeView, WorkforceOidcExchangeView
+from config.oidc_views import (
+    OidcProviderListView,
+    PatientOidcExchangeView,
+    WorkforceOidcExchangeView,
+)
 from config.patient_otp_token import PatientToken
 
 ISSUER = "https://identity.example/realms/care"
@@ -354,3 +359,102 @@ class OidcExchangeTests(TestCase):
 
         self.assertEqual(deactivated.status_code, unknown.status_code)
         self.assertEqual(deactivated.data, unknown.data)
+
+
+@override_settings(**ENABLED_OIDC_SETTINGS)
+class OidcProviderListTests(TestCase):
+    """What the login screen may offer, answered by the backend that serves it."""
+
+    def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        self.factory = APIRequestFactory()
+
+    def get(self):
+        return OidcProviderListView.as_view()(self.factory.get("/providers/"))
+
+    @patch("config.oidc_views.discovery_for_provider")
+    def test_the_authorization_endpoint_comes_from_discovery(self, discovery):
+        """ADR-0011 §2: composing it in the browser would pick a vendor.
+
+        Keycloak's `/protocol/openid-connect/auth` is not Entra ID's
+        `/oauth2/v2.0/authorize`, and only the issuer knows which it is.
+        """
+        discovery.return_value = {
+            "authorization_endpoint": f"{ISSUER}/protocol/openid-connect/auth"
+        }
+
+        response = self.get()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data[0]["authorization_endpoint"],
+            f"{ISSUER}/protocol/openid-connect/auth",
+        )
+
+    @patch("config.oidc_views.discovery_for_provider")
+    def test_no_secret_reaches_the_response(self, discovery):
+        """T15. The serialisation is explicit rather than a dump of the record."""
+        discovery.return_value = {"authorization_endpoint": f"{ISSUER}/authorize"}
+
+        response = self.get()
+
+        body = str(response.data)
+        self.assertNotIn("workforce-secret", body)
+        self.assertNotIn("patient-secret", body)
+        self.assertNotIn("client_secret", body)
+
+    @patch("config.oidc_views.discovery_for_provider", return_value=None)
+    def test_an_unreachable_issuer_is_hidden_rather_than_offered(self, discovery):
+        """A button that cannot work is worse than no button."""
+        response = self.get()
+
+        self.assertEqual(response.data, [])
+
+    @patch("config.oidc_views.discovery_for_provider")
+    def test_a_disabled_provider_is_never_described(self, discovery):
+        discovery.return_value = {"authorization_endpoint": f"{ISSUER}/authorize"}
+        disabled = OidcProvider(
+            id="retired-sso",
+            display_name="Retired SSO",
+            issuer=ISSUER,
+            principal_type="workforce",
+            client_id="care-workforce",
+            client_secret="workforce-secret",
+            enabled=False,
+        )
+
+        with override_settings(OIDC_PROVIDERS=(disabled,)):
+            response = self.get()
+
+        self.assertEqual(response.data, [])
+        discovery.assert_not_called()
+
+    @patch("config.oidc_views.discovery_for_provider")
+    def test_each_provider_carries_its_own_callback(self, discovery):
+        discovery.return_value = {"authorization_endpoint": f"{ISSUER}/authorize"}
+
+        response = self.get()
+
+        by_id = {entry["id"]: entry for entry in response.data}
+        self.assertEqual(
+            by_id["clinic-sso"]["redirect_uri"],
+            "https://care.example/auth/oidc/workforce/callback",
+        )
+        self.assertEqual(
+            by_id["patient-sso"]["redirect_uri"],
+            "https://care.example/auth/oidc/patient/callback",
+        )
+
+    @patch("config.oidc_views.discovery_for_provider")
+    def test_a_provider_with_no_authorization_endpoint_is_hidden(self, discovery):
+        """It could still complete an exchange, but nothing could start one.
+
+        The exchange does not read this endpoint, so a login already in flight
+        is unaffected. Offering a button that cannot begin a flow is not.
+        """
+        discovery.return_value = {"token_endpoint": f"{ISSUER}/token"}
+
+        response = self.get()
+
+        self.assertEqual(response.data, [])

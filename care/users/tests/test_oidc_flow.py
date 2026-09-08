@@ -124,6 +124,7 @@ class _OidcProviderDouble:
         self.token_requests = []
         self.discovery = {
             "issuer": issuer,
+            "authorization_endpoint": f"{issuer}/protocol/openid-connect/auth",
             "token_endpoint": f"{issuer}/protocol/openid-connect/token",
             "jwks_uri": f"{issuer}/protocol/openid-connect/certs",
         }

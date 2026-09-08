@@ -253,6 +253,7 @@ ISSUER = "https://identity.example/realms/care"
 
 DISCOVERY = {
     "issuer": ISSUER,
+    "authorization_endpoint": f"{ISSUER}/protocol/openid-connect/auth",
     "token_endpoint": f"{ISSUER}/protocol/openid-connect/token",
     "jwks_uri": f"{ISSUER}/protocol/openid-connect/certs",
 }
