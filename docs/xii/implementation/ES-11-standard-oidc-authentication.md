@@ -737,7 +737,7 @@ configuration.
 | `docs/xii/adr/ADR-0011-standard-oidc-authentication.md` | New (this change's ADR) |
 | `docs/xii/implementation/ES-11-standard-oidc-authentication.md` | This document |
 | `docs/xii/operations/oidc-provider-guide.md` | New. Replaces the Keycloak guide. Provider-agnostic requirements, the provider JSON, callback registration, enrolment, rotation, rollback, the T19 limitation, and a full Keycloak worked example plus short notes for Entra ID, Authentik and Zitadel |
-| `docs/xii/operations/keycloak-activation-guide.md` | Removed; replaced by the above, with a pointer left in ES-10 |
+| `docs/xii/operations/keycloak-activation-guide.md` | Removed; replaced by the above, with pointers left in ADR-0010 and ES-10 |
 | `docs/xii/architecture/07-configuration-reference.md` | `OIDC_*` added, `KEYCLOAK_*` removed |
 | `docs/xii/adr/ADR-0010-multichannel-authentication-with-keycloak.md` | Header note: §2, §4 and §5 amended by ADR-0011 |
 | `docs/xii/implementation/ES-10-multichannel-authentication.md` | Header note: superseded in part by ES-11; remains the record of what was delivered |

@@ -6,6 +6,16 @@
 - **Implementation repositories:** `care` and `care_fe`
 - **Working environment:** dev
 - **Production activation:** explicitly out of scope
+- **Superseded in part by:** ES-11 (the Keycloak-specific implementation)
+
+> ES-10 remains the record of what was delivered and verified on 2026-09-01.
+> The Keycloak-shaped parts of it — the `KEYCLOAK_*` settings, the
+> `/api/v1/auth/keycloak/…` routes, the `keycloak_subject` columns and the
+> `REACT_KEYCLOAK_*` build variables — were replaced by ES-11 under ADR-0011.
+> The Firebase work in §6.1 and §7.2–7.3 is unchanged and still current.
+>
+> The activation guide this document points at has been replaced by
+> `docs/xii/operations/oidc-provider-guide.md`.
 
 ## 1. Objective
 

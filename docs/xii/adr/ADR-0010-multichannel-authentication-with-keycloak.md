@@ -5,6 +5,21 @@
 - **Decision Makers:** CARE Fork Maintainers
 - **Supersedes:** None
 - **Superseded by:** None
+- **Amended by:** ADR-0011 (§2, §4 and §5)
+
+> **Read §2, §4 and §5 with ADR-0011 open.** This ADR designed around Keycloak
+> rather than around OIDC, and the implementation followed. ADR-0011 replaced
+> the single-issuer adapter with a provider-agnostic OIDC layer, and replaced
+> the `keycloak_subject` columns with external-identity tables keyed on
+> `(provider_id, issuer, subject)`.
+>
+> The reason is not naming. An OIDC `sub` is unique only within an issuer, and
+> §4's single unique column stored no issuer — safe only for as long as exactly
+> one issuer could be configured, which made that restriction load-bearing
+> security rather than a limitation.
+>
+> §1 (two principal types), §3 (Firebase), §6 and §7 stand unchanged, and this
+> ADR remains the record of what was delivered under ES-10.
 
 ## Context
 
@@ -315,7 +330,7 @@ evidence and issue the existing `PatientToken` directly.
 - [x] Disabled-by-default Keycloak configuration and gating implemented.
 - [x] Keycloak workforce and patient exchanges implemented and contract-tested.
 - [x] Realm and two-client operator configuration documented
-      (`docs/xii/operations/keycloak-activation-guide.md`).
+      (replaced by `docs/xii/operations/oidc-provider-guide.md` under ADR-0011).
 - [ ] External Keycloak runtime available (deferred; not required now).
 - [ ] Workforce and patient OIDC clients configured (deferred until runtime).
 - [x] Firebase patient token exchange implemented.

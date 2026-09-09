@@ -3410,11 +3410,12 @@ configuration rather than connectivity, and `createcachetable` walks `CACHES`
 touching only `DatabaseCache` aliases. **The `init` role needs no reachable
 Redis**, verified with an unreachable host and a `0` exit status.
 
-## 62.1 Optional patient and Keycloak authentication
+## 62.1 Optional patient and OIDC authentication
 
-ADR-0010 adds two independent, disabled-by-default authentication adapters.
-Neither adapter changes the legacy staff login or patient OTP flow while its
-flag is false.
+ADR-0010 added two independent, disabled-by-default authentication adapters;
+ADR-0011 replaced the Keycloak-shaped one with a provider-agnostic OIDC layer.
+Neither changes the staff login or the patient OTP flow while it is off, and
+CARE's own phone OTP is never removed as a side effect of enabling either.
 
 `FIREBASE_AUTH_ENABLED=false` requires no Firebase setting and mounts no
 Firebase exchange route. When true on the API role,
@@ -3461,35 +3462,94 @@ curl -H "Authorization: Bearer $(gcloud auth print-access-token)" \
 Production Firebase Authentication is **not** configured and remains out of
 scope under ADR-0009 and ES-09.
 
-`KEYCLOAK_ENABLED=false` requires no Keycloak service or settings and mounts no
-Keycloak route. When true on the API role, all of the following are required:
+### OIDC providers (ADR-0011)
+
+CARE speaks standard OpenID Connect, not a vendor. A provider is a
+configuration record, and **zero providers is the default and a fully
+supported production state**: no OIDC route is mounted, no issuer is contacted,
+and startup requires no OIDC setting at all.
+
+The set arrives as JSON through exactly one of two variables — never both,
+because two sources of provider truth cannot be reconciled at startup:
 
 ```text
-KEYCLOAK_ISSUER_URL
-KEYCLOAK_WORKFORCE_CLIENT_ID
-KEYCLOAK_WORKFORCE_CLIENT_SECRET
-KEYCLOAK_PATIENT_CLIENT_ID
-KEYCLOAK_PATIENT_CLIENT_SECRET
-KEYCLOAK_PUBLIC_BASE_URL
+OIDC_PROVIDERS        inline JSON array, for Compose, Kubernetes and .env
+OIDC_PROVIDERS_FILE   path to the same JSON, for a secret-manager volume
 ```
 
-The two clients use fixed callbacks derived from the public base URL:
+Each entry requires `id`, `display_name`, `issuer`, `principal_type`
+(`workforce` or `patient`), `client_id` and `client_secret`. Optional:
+`enabled` (default true), `scopes` (default `openid profile email`) and
+`allow_rp_logout` (default false).
+
+```json
+[
+  {
+    "id": "clinic-sso",
+    "display_name": "Clinic SSO",
+    "issuer": "https://sso.example.org/realms/care",
+    "principal_type": "workforce",
+    "client_id": "care-workforce",
+    "client_secret": "from-your-secret-store",
+    "enabled": true
+  }
+]
+```
+
+The remaining settings:
 
 ```text
-<base>/auth/keycloak/workforce/callback
-<base>/auth/keycloak/patient/callback
+OIDC_PUBLIC_BASE_URL           required once any provider is enabled
+OIDC_DISCOVERY_CACHE_SECONDS   default 3600
+OIDC_JWKS_CACHE_SECONDS        default 3600
+CARE_PATIENT_OTP_ENABLED       default true
 ```
 
-In managed environments, put flags, issuer, project/client IDs and the public
-URL in `extra_env`. Declare the two Keycloak client secrets in
-`optional_secrets` for the `api` role only, then add their values directly to
-Secret Manager. Worker, scheduler and init do not validate or consume external
-login credentials.
+Callback URLs are derived from the public base URL and matched **byte for
+byte** at the exchange, so they must be registered with the provider exactly
+as written:
 
-Enabling Keycloak later is a configuration and deployment change only. The
-realm, the two clients, the callbacks, subject enrolment, rotation and the
-operator's backup/restore/upgrade responsibilities are specified in
-`docs/xii/operations/keycloak-activation-guide.md`.
+```text
+<OIDC_PUBLIC_BASE_URL>/auth/oidc/workforce/callback
+<OIDC_PUBLIC_BASE_URL>/auth/oidc/patient/callback
+```
+
+Everything else — the authorization, token and JWKS endpoints — is read from
+the issuer's discovery document and pinned to the issuer's own origin. CARE
+never accepts a hand-configured endpoint, because a path belongs to one product:
+Keycloak's `/protocol/openid-connect/auth` is not Entra ID's
+`/oauth2/v2.0/authorize`.
+
+A provider record declares exactly one `principal_type`. That is what keeps a
+patient token out of the workforce exchange, and it is also why the same
+external identity can never appear on both principal types.
+
+`CARE_PATIENT_OTP_ENABLED` retires CARE's own phone OTP. It is an operator
+decision, never a side effect of enabling a provider, and **startup refuses a
+configuration in which no patient can log in at all** — OTP off, Firebase off
+and no enabled patient provider.
+
+In managed environments, put `OIDC_PROVIDERS_FILE`, `OIDC_PUBLIC_BASE_URL` and
+the cache TTLs in `extra_env`, and mount the provider JSON from the existing
+secret mechanism for the `api` role only. Worker, scheduler and init validate
+and consume no external login configuration.
+
+The realm or tenant, the clients, the callbacks, subject enrolment, rotation
+and the operator's backup/restore/upgrade responsibilities are specified in
+`docs/xii/operations/oidc-provider-guide.md`.
+
+### Migrating from the ADR-0010 settings
+
+`KEYCLOAK_ENABLED` and its five companions no longer exist, and neither do
+`Patient.keycloak_subject` and `User.keycloak_subject`. There is no
+compatibility shim: no environment ever enabled the adapter and no subject was
+ever enrolled, so there was no deployed configuration to preserve.
+
+An installation that *did* enrol subjects sets `OIDC_LEGACY_PROVIDER_ID`
+(default `keycloak`) and `OIDC_LEGACY_ISSUER` before migrating. The data
+migration refuses to run without the issuer rather than invent one — the old
+column stored a subject and no issuer, and ADR-0011 resolves a principal from
+`(provider_id, issuer, subject)`.
 
 ### Frontend counterpart
 
@@ -3505,24 +3565,23 @@ REACT_FIREBASE_APP_ID
 REACT_FIREBASE_SMS_COUNTRY_CODES
 REACT_FIREBASE_EMAIL_LINK_CALLBACK_URL
 
-REACT_KEYCLOAK_ENABLED
-REACT_KEYCLOAK_ISSUER_URL
-REACT_KEYCLOAK_WORKFORCE_CLIENT_ID
-REACT_KEYCLOAK_PATIENT_CLIENT_ID
-REACT_KEYCLOAK_WORKFORCE_REDIRECT_URI
-REACT_KEYCLOAK_PATIENT_REDIRECT_URI
 ```
 
-Firebase web configuration values and OIDC client IDs are public identifiers by
-design and are safe in a bundle. **Keycloak client secrets are backend-only and
-must never appear in any of these variables**, in `.env.production.local` or in
-any tracked environment file.
+There are no `REACT_KEYCLOAK_*` variables. OIDC providers are **not** frontend
+build configuration: the login screen asks the backend through
+`GET /api/v1/auth/providers/`, so a build cannot advertise a provider the
+backend does not have. That endpoint returns only public identifiers — id,
+display name, principal type, issuer, client id, scopes, authorization
+endpoint and callback — serialised field by field rather than dumped, so a
+client secret has no path into it.
 
-The two sides must be enabled together. A frontend that renders a login choice
-whose backend route is intentionally absent is a misconfiguration, not a
-supported state; the frontend fails safe by hiding any method whose
-configuration is incomplete, but it cannot detect a backend that disabled the
-provider independently.
+Firebase web configuration values are public identifiers by design and are safe
+in a bundle. **Provider client secrets are backend-only** and must never appear
+in any frontend variable, in `.env.production.local` or in any tracked
+environment file.
+
+Firebase is the one method whose two sides must still be enabled together, and
+the frontend fails safe by hiding any method whose configuration is incomplete.
 
 Backend `FIREBASE_AUTH_SMS_COUNTRY_CODES` and frontend
 `REACT_FIREBASE_SMS_COUNTRY_CODES` express the same policy and must be kept in

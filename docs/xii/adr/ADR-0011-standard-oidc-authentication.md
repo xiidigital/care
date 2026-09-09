@@ -1,6 +1,6 @@
 # ADR-0011: Standard OIDC Authentication with Keycloak as a Reference Implementation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-07
 - **Decision Makers:** CARE Fork Maintainers
 - **Supersedes:** None
@@ -520,20 +520,26 @@ Execution is specified in ES-11. The intended order:
 
 ## Implementation status
 
-- [ ] Architectural decision accepted.
-- [ ] Provider configuration record and startup validation.
-- [ ] `UserExternalIdentity` and `PatientExternalIdentity` with the triple
+- [x] Architectural decision accepted.
+- [x] Provider configuration record and startup validation.
+- [x] `UserExternalIdentity` and `PatientExternalIdentity` with the triple
       constraint.
-- [ ] Data migration from `keycloak_subject`; vendor columns removed.
-- [ ] Triple-based resolution; no subject-only lookup remains.
-- [ ] JWKS caching, algorithm allowlist, `azp` handling.
-- [ ] Vendor-agnostic backend modules, settings and routes.
-- [ ] Administrative and self-service linking, with audit records.
-- [ ] Vendor-agnostic frontend configuration, callback and components.
-- [ ] Local Keycloak fixture and generic OIDC double; conformance suite passes
-      against both.
-- [ ] Provider-agnostic operator guide with a Keycloak worked example.
-- [ ] OTP × Firebase × OIDC matrix proven, including all-disabled.
+- [x] Data migration from `keycloak_subject`; vendor columns removed. Forward,
+      backward and forward again proved against a disposable database seeded on
+      both principal types.
+- [x] Triple-based resolution; no subject-only lookup remains.
+- [x] JWKS caching with bounded refresh, RS/ES allowlist, `azp` handling.
+- [x] Vendor-agnostic backend modules, settings and routes.
+- [x] Administrative and self-service linking, with audit records that never
+      carry the subject.
+- [x] Vendor-agnostic frontend: providers come from the backend, and the
+      authorization endpoint comes from the issuer's discovery document.
+- [x] Local Keycloak fixture and generic OIDC double; the same 20 conformance
+      assertions pass against both.
+- [x] Provider-agnostic operator guide with a Keycloak worked example
+      (`docs/xii/operations/oidc-provider-guide.md`).
+- [ ] OTP × Firebase × OIDC matrix proven end to end in dev. *(Rows 1 and 9 are
+      covered by startup tests; the remainder is ES-11 phase 9.)*
 - [ ] Production authentication approved and enabled. *(Governed by ADR-0009
       and ES-09; out of scope here.)*
 
@@ -545,7 +551,7 @@ Execution is specified in ES-11. The intended order:
 - `docs/xii/implementation/ES-09-production-readiness.md`
 - `docs/xii/implementation/ES-10-multichannel-authentication.md`
 - `docs/xii/implementation/ES-11-standard-oidc-authentication.md`
-- `docs/xii/operations/keycloak-activation-guide.md` *(to be replaced)*
+- `docs/xii/operations/oidc-provider-guide.md`
 - `config/keycloak.py`, `config/keycloak_service.py`, `config/keycloak_views.py`,
   `config/keycloak_urls.py`
 - `config/firebase_auth*.py`

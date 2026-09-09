@@ -110,3 +110,22 @@ When working autonomously:
 2. **After changes:** Run `ruff check --fix .` and `ruff format .` to lint and format
 3. **Verify:** Run related tests: `pipenv run python manage.py test care.module_name --keepdb`
 4. **Migrations:** Run `makemigrations` after model changes, then `migrate`
+
+## Authentication invariants (ADR-0011)
+
+Two rules that a plausible-looking change can quietly break:
+
+1. **A principal is resolved from `(provider_id, issuer, subject)` and nothing
+   else.** Never look up an external identity by `subject` alone, and never by
+   `email` or any other claim. A `sub` is unique only within an issuer, so a
+   subject-only lookup lets any configured issuer authenticate as an account
+   enrolled against another.
+
+2. **No claim grants authorization.** CARE reads no `roles`, `groups`,
+   `realm_access`, `scope` or equivalent, and nothing may be added that maps
+   one to a CARE role. External authentication answers *which subject*; CARE's
+   existing roles and permissions answer *what they may do*.
+
+Enrolment and linking are deliberate, recorded acts — see
+`config/oidc_identity.py`. Adding auto-provisioning, or a claim-to-role map,
+means superseding ADR-0011 rather than editing code.
