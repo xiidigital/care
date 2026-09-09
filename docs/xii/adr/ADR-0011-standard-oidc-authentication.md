@@ -538,8 +538,9 @@ Execution is specified in ES-11. The intended order:
       assertions pass against both.
 - [x] Provider-agnostic operator guide with a Keycloak worked example
       (`docs/xii/operations/oidc-provider-guide.md`).
-- [ ] OTP × Firebase × OIDC matrix proven end to end in dev. *(Rows 1 and 9 are
-      covered by startup tests; the remainder is ES-11 phase 9.)*
+- [x] OTP × Firebase × OIDC matrix proven in dev, and a real end-to-end login
+      against a real issuer (`docs/xii/operations/oidc-dev-acceptance.md`).
+      Firebase remains verified in half, for the reason ES-10 §13 records.
 - [ ] Production authentication approved and enabled. *(Governed by ADR-0009
       and ES-09; out of scope here.)*
 

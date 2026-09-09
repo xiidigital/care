@@ -403,3 +403,45 @@ class OidcProviderStartupTests(StartupProbeMixin, SimpleTestCase):
         )
 
         self.assertEqual(result.returncode, 0, output)
+
+    # -- retiring CARE's own OTP ---------------------------------------------
+
+    def test_retiring_otp_unmounts_its_login_route(self):
+        """A retired login that still answers is not retired.
+
+        Hiding the button is a frontend concern; a client that knows the URL
+        does not read buttons.
+        """
+        output = self.run_route_probe(
+            "/api/v1/otp/login/",
+            "/api/v1/otp/send/",
+            CARE_PATIENT_OTP_ENABLED="false",
+            FIREBASE_AUTH_ENABLED="true",
+            FIREBASE_AUTH_PROJECT_ID="care-dev",
+            OIDC_PROVIDERS="",
+        )
+
+        self.assertNotIn("MOUNTED", output)
+
+    def test_retiring_otp_leaves_the_authenticated_patient_apis_alone(self):
+        """`otp/patient` is the patient's own API, not a way of logging in.
+
+        Its name is historical: it is reached with a `PatientToken` whoever
+        issued it, so a Firebase or OIDC patient needs it exactly as much.
+        """
+        output = self.run_route_probe(
+            "/api/v1/otp/patient/",
+            CARE_PATIENT_OTP_ENABLED="false",
+            FIREBASE_AUTH_ENABLED="true",
+            FIREBASE_AUTH_PROJECT_ID="care-dev",
+            OIDC_PROVIDERS="",
+        )
+
+        self.assertIn("MOUNTED", output)
+
+    def test_otp_is_mounted_by_default(self):
+        output = self.run_route_probe(
+            "/api/v1/otp/login/", "/api/v1/otp/send/", OIDC_PROVIDERS=""
+        )
+
+        self.assertNotIn("ABSENT", output)

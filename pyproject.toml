@@ -136,6 +136,12 @@ ignore = [
 # not turn into reformatting a documentation tool that nothing imports.
 "docs/xii/access-control/render_roles_diagram.py" = ["INP001", "I001"]
 
+# The ES-11 matrix acceptance probe, run by hand to produce the evidence table
+# in `docs/xii/operations/oidc-dev-acceptance.md`. Its whole output is that
+# table: routing it through logging would put a level and a logger name in
+# front of every row a human reads.
+"scripts/oidc/matrix_acceptance.py" = ["T201", "INP001"]
+
 [tool.ruff.lint.flake8-builtins]
 builtins-ignorelist = ["id", "list", "filter"]
 

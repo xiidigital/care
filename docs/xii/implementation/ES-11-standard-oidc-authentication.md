@@ -1,6 +1,7 @@
 # ES-11: Standard OIDC Authentication and External Identity Linking
 
-- **Status:** PROPOSED — not approved, not started
+- **Status:** IMPLEMENTED — dev acceptance recorded 2026-09-09 in
+  `docs/xii/operations/oidc-dev-acceptance.md`; staging and production untouched
 - **Related ADR:** ADR-0011: Standard OIDC Authentication with Keycloak as a
   Reference Implementation
 - **Amends the implementation of:** ADR-0010 / ES-10
@@ -698,7 +699,7 @@ Local and dev only. Each phase ends green before the next starts.
 | 6 | Frontend renames, provider list, panels | Frontend suite and build green |
 | 7 | Local Keycloak fixture; conformance suite against both | Both runs identical |
 | 8 | Documentation rewrite | Section 16 complete |
-| 9 | Dev acceptance against the local container, synthetic identities only | Matrix proven; evidence recorded |
+| 9 | Dev acceptance against the local container, synthetic identities only | **Done.** Matrix proven, end-to-end login proven, evidence in `docs/xii/operations/oidc-dev-acceptance.md` |
 
 Staging follows only if dev is stable **and** separately authorised. Production
 remains governed by ADR-0009 and ES-09 and is not touched by ES-11.

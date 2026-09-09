@@ -127,7 +127,16 @@ user_nested_router = NestedSimpleRouter(router, r"users", lookup="users")
 router.register("files", FileUploadViewSet, basename="files")
 router.register("meta_artifacts", MetaArtifactViewSet, basename="meta_artifacts")
 
-router.register("otp", OTPLoginView, basename="otp-login")
+# CARE's own phone OTP login (ADR-0011 §6). On by default; an operator retires
+# it only once a replacement is proven, and startup refuses to leave patients
+# with no way in at all. Unmounting the route rather than only hiding the button
+# is the point: a retired login that still answers is not retired.
+#
+# `otp/patient` and `otp/slots` below stay mounted regardless. They are the
+# authenticated patient's own APIs, reached with a `PatientToken` whoever issued
+# it -- OTP, Firebase or an OIDC provider -- and their name is historical.
+if settings.CARE_PATIENT_OTP_ENABLED:
+    router.register("otp", OTPLoginView, basename="otp-login")
 router.register(
     "otp/password_reset", OTPResetPasswordView, basename="otp-password-reset"
 )
