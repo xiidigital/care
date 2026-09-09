@@ -59,6 +59,23 @@ test:
 test-no-keep:
 	docker compose exec backend bash -c "python manage.py test $(path) --parallel --shuffle"
 
+# A disposable OIDC issuer for the conformance suite (ES-11 §9). Nothing in
+# CARE requires it: `make up` and `make test` are unchanged, and the suite
+# skips itself when the container is absent.
+oidc-up:
+	docker compose -f docker-compose.oidc.yaml up -d --wait
+
+oidc-down:
+	docker compose -f docker-compose.oidc.yaml down -v
+
+# The same conformance contract the generic double satisfies, run against a
+# real server. A test that passes here and fails against the double has found
+# vendor coupling -- which is the whole reason both exist.
+test-oidc:
+	CARE_OIDC_LIVE_ISSUER=http://localhost:$(or $(CARE_OIDC_PORT),8081)/realms/care-test \
+	  docker compose exec -T backend bash -c \
+	  "python manage.py test care.users.tests.test_oidc_conformance --keepdb"
+
 
 test-coverage:
 	docker compose exec backend bash -c "coverage run manage.py test --settings=config.settings.test --keepdb --parallel --shuffle"

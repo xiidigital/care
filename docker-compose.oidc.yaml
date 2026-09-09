@@ -1,0 +1,51 @@
+# A disposable OIDC issuer for tests (ES-11 §9).
+#
+# Deliberately a separate compose file: `make up` must stay exactly as it was,
+# because nothing in CARE requires an identity provider and the day this
+# container becomes load-bearing is the day ADR-0011 has been violated.
+#
+# Keycloak is here as the *reference implementation*: a real, free,
+# self-hostable server anyone can reproduce, so "standards-compliant" stops
+# being a claim and starts being evidence. CARE never learns it is Keycloak.
+#
+# Every credential below is a local-only literal. Nothing here is a secret and
+# nothing here may be reused anywhere else.
+# Its own compose project. Without this the fixture shares CARE's project name,
+# `docker compose -f docker-compose.oidc.yaml down` reports the db and redis as
+# orphans, and the obvious next step -- adding --remove-orphans -- would delete
+# a developer's database.
+name: care-oidc
+
+services:
+  oidc-test-issuer:
+    image: quay.io/keycloak/keycloak:26.4
+    container_name: care-oidc-test-issuer
+    command: ["start-dev", "--import-realm", "--http-port=8081"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+      # A test issuer should not demand a gigabyte. Keycloak sizes its heap
+      # from the container's memory by default, which on a small Docker VM
+      # shared with other stacks leaves nothing for its embedded database --
+      # it fails as "Acquisition timeout while waiting for new connection",
+      # which reads like a database fault rather than memory pressure.
+      JAVA_OPTS_KC_HEAP: "-Xms192m -Xmx512m"
+    volumes:
+      - ./scripts/oidc/care-test-realm.json:/opt/keycloak/data/import/care-test-realm.json:ro
+    # The host port is overridable because 8081 is a popular choice and a
+    # developer may already be running something there. Keycloak in start-dev
+    # derives its issuer from the request host, so the port CARE is configured
+    # with and the port published here simply have to agree.
+    ports:
+      - "${CARE_OIDC_PORT:-8081}:8081"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /realms/care-test/.well-known/openid-configuration HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q 'issuer' <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 180s

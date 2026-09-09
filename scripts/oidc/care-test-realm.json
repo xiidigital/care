@@ -1,0 +1,72 @@
+{
+  "realm": "care-test",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "accessTokenLifespan": 300,
+  "clients": [
+    {
+      "clientId": "care-workforce",
+      "name": "CARE workforce",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "secret": "local-only-workforce-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:9000/auth/oidc/workforce/callback"],
+      "webOrigins": ["http://localhost:9000"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:9000/*"
+      }
+    },
+    {
+      "clientId": "care-patient",
+      "name": "CARE patient",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "secret": "local-only-patient-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:9000/auth/oidc/patient/callback"],
+      "webOrigins": ["http://localhost:9000"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:9000/*"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "synthetic-clinician",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "synthetic-clinician@example.invalid",
+      "firstName": "Synthetic",
+      "lastName": "Clinician",
+      "credentials": [
+        { "type": "password", "value": "local-only-password", "temporary": false }
+      ]
+    },
+    {
+      "username": "synthetic-patient",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "synthetic-patient@example.invalid",
+      "firstName": "Synthetic",
+      "lastName": "Patient",
+      "credentials": [
+        { "type": "password", "value": "local-only-password", "temporary": false }
+      ]
+    }
+  ]
+}
