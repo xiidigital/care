@@ -78,9 +78,7 @@ class PatientViewSet(EMRModelViewSet):
         # turned every one of those into a 500.
         registration_facility = getattr(request_obj, "registration_facility", None)
         if registration_facility:
-            facility = get_object_or_404(
-                Facility, external_id=registration_facility
-            )
+            facility = get_object_or_404(Facility, external_id=registration_facility)
             if self.request.user.is_superuser:
                 return
             has_facility_access = FacilityOrganizationUser.objects.filter(

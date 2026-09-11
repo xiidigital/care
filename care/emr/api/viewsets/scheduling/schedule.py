@@ -332,7 +332,10 @@ class AvailabilityViewSet(EMRCreateMixin, EMRDestroyMixin, EMRBaseViewSet):
         super().perform_create(instance)
 
     def perform_destroy(self, instance):
-        with transaction.atomic(), Lock(f"booking:resource:{instance.schedule.resource.id}"):
+        with (
+            transaction.atomic(),
+            Lock(f"booking:resource:{instance.schedule.resource.id}"),
+        ):
             has_future_bookings = TokenSlot.objects.filter(
                 availability_id=instance.id,
                 start_datetime__gt=timezone.now(),

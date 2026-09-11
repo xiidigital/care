@@ -29,9 +29,7 @@ def advisory_lock_key(name: str) -> int:
     separates this mapping from any future advisory-lock users; names are never
     logged by this module.
     """
-    digest = blake2b(
-        f"care.lock.v1:{name}".encode(), digest_size=8
-    ).digest()
+    digest = blake2b(f"care.lock.v1:{name}".encode(), digest_size=8).digest()
     return int.from_bytes(digest, byteorder="big", signed=True)
 
 

@@ -16,15 +16,42 @@ roles = [
 ]
 
 domains = [
-    ("Pacientes y\nformularios", ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"]),
-    ("Encuentros y\ndatos clínicos", ["Super", "Staff", "Doctor", "Nurse", "Facility Admin"]),
-    ("Horarios, citas\ny tokens", ["Super", "Staff", "Doctor", "Nurse", "Facility Admin"]),
-    ("Institución,\nubicaciones y\ndispositivos", ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"]),
-    ("Organizaciones\ny usuarios", ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"]),
-    ("Cuentas, cargos,\nfacturas y pagos", ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"]),
-    ("Medicamentos\ny laboratorio", ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"]),
-    ("Inventario y\nsuministros", ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"]),
-    ("Cuestionarios\ny plantillas", ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"]),
+    (
+        "Pacientes y\nformularios",
+        ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"],
+    ),
+    (
+        "Encuentros y\ndatos clínicos",
+        ["Super", "Staff", "Doctor", "Nurse", "Facility Admin"],
+    ),
+    (
+        "Horarios, citas\ny tokens",
+        ["Super", "Staff", "Doctor", "Nurse", "Facility Admin"],
+    ),
+    (
+        "Institución,\nubicaciones y\ndispositivos",
+        ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"],
+    ),
+    (
+        "Organizaciones\ny usuarios",
+        ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"],
+    ),
+    (
+        "Cuentas, cargos,\nfacturas y pagos",
+        ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"],
+    ),
+    (
+        "Medicamentos\ny laboratorio",
+        ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"],
+    ),
+    (
+        "Inventario y\nsuministros",
+        ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"],
+    ),
+    (
+        "Cuestionarios\ny plantillas",
+        ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"],
+    ),
     ("Reportes", ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility Admin"]),
     ("Configuración y\nadministración", ["Super", "Facility Admin"]),
 ]
@@ -32,12 +59,17 @@ domains = [
 role_keys = ["Super", "Volunteer", "Staff", "Doctor", "Nurse", "Facility"]
 
 
-def fit_text(c, text, x, y, max_width, size=13, leading=15, color=colors.white, bold=False):
+def fit_text(
+    c, text, x, y, max_width, size=13, leading=15, color=colors.white, bold=False
+):
     c.setFillColor(color)
     c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
     lines = text.split("\n")
     for i, line in enumerate(lines):
-        if stringWidth(line, "Helvetica-Bold" if bold else "Helvetica", size) > max_width:
+        if (
+            stringWidth(line, "Helvetica-Bold" if bold else "Helvetica", size)
+            > max_width
+        ):
             size = max(8, size - 1)
             c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
         c.drawCentredString(x, y - i * leading, line)
@@ -65,7 +97,11 @@ def main():
     c.drawString(42, H - 50, "CARE - Mapa de accesos por perfil")
     c.setFillColor(colors.HexColor("#64748b"))
     c.setFont("Helvetica", 12)
-    c.drawString(43, H - 72, "Resumen funcional. El acceso efectivo también depende del ámbito asignado.")
+    c.drawString(
+        43,
+        H - 72,
+        "Resumen funcional. El acceso efectivo también depende del ámbito asignado.",
+    )
 
     role_x, role_w = 45, 185
     role_top = H - 120
@@ -82,9 +118,22 @@ def main():
         y = role_top - i * (role_h + role_gap) - role_h
         c.setFillColor(colors.HexColor(fill))
         c.roundRect(role_x, y, role_w, role_h, 12, fill=1, stroke=0)
-        fit_text(c, username, role_x + role_w / 2, y + 43, role_w - 16, size=13, bold=True)
-        fit_text(c, label, role_x + role_w / 2, y + 23, role_w - 16, size=12, color=colors.HexColor("#d1fae5"))
-        role_centers["Super" if label == "Superusuario" else label] = (role_x + role_w, y + role_h / 2)
+        fit_text(
+            c, username, role_x + role_w / 2, y + 43, role_w - 16, size=13, bold=True
+        )
+        fit_text(
+            c,
+            label,
+            role_x + role_w / 2,
+            y + 23,
+            role_w - 16,
+            size=12,
+            color=colors.HexColor("#d1fae5"),
+        )
+        role_centers["Super" if label == "Superusuario" else label] = (
+            role_x + role_w,
+            y + role_h / 2,
+        )
 
     domain_centers = {}
     for i, (label, access) in enumerate(domains):
@@ -96,7 +145,17 @@ def main():
         c.setStrokeColor(colors.HexColor("#cbd5e1"))
         c.setLineWidth(1.1)
         c.roundRect(x, y, domain_w, domain_h, 10, fill=1, stroke=1)
-        fit_text(c, label, x + domain_w / 2, y + 34, domain_w - 18, size=12, leading=14, color=colors.HexColor("#1e293b"), bold=True)
+        fit_text(
+            c,
+            label,
+            x + domain_w / 2,
+            y + 34,
+            domain_w - 18,
+            size=12,
+            leading=14,
+            color=colors.HexColor("#1e293b"),
+            bold=True,
+        )
         domain_centers[i] = (x, y + domain_h / 2)
         for key in access:
             sx, sy = role_centers[key]
@@ -105,7 +164,11 @@ def main():
     legend_y = 35
     c.setFillColor(colors.HexColor("#475569"))
     c.setFont("Helvetica", 10)
-    c.drawString(45, legend_y, "Lectura: permiso declarado, sujeto a institución/organización/paciente/encuentro asociado.")
+    c.drawString(
+        45,
+        legend_y,
+        "Lectura: permiso declarado, sujeto a institución/organización/paciente/encuentro asociado.",
+    )
     c.drawRightString(W - 45, legend_y, "Línea base - 12 ago 2026")
     c.save()
 

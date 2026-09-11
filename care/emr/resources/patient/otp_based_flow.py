@@ -46,7 +46,8 @@ class PatientOTPReadSpec(PatientOTPBaseSpec):
 
 
 class PatientOTPWriteSpec(ExtensionValidator, PatientOTPBaseSpec):
-    __exclude__ = [*PatientOTPBaseSpec.__exclude__,
+    __exclude__ = [
+        *PatientOTPBaseSpec.__exclude__,
         "registration_facility",
         "region_id",
         "subregion_id",

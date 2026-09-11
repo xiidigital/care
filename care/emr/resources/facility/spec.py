@@ -146,9 +146,13 @@ class FacilityCreateSpec(FacilityBaseSpec):
         valid_feature_ids = {feature.value for feature in FacilityFeature}
         invalid_feature_ids = sorted(set(features) - valid_feature_ids)
         if invalid_feature_ids:
-            valid = ", ".join(str(feature_id) for feature_id in sorted(valid_feature_ids))
+            valid = ", ".join(
+                str(feature_id) for feature_id in sorted(valid_feature_ids)
+            )
             invalid = ", ".join(str(feature_id) for feature_id in invalid_feature_ids)
-            message = f"Invalid facility feature ID(s): {invalid}. Valid IDs are: {valid}"
+            message = (
+                f"Invalid facility feature ID(s): {invalid}. Valid IDs are: {valid}"
+            )
             raise ValueError(message)
         return features
 
@@ -171,7 +175,9 @@ class FacilityCreateSpec(FacilityBaseSpec):
                 "Region and subregion are required when the jurisdiction has a country"
             )
 
-        region = Region.objects.filter(id=self.region_id).first() if self.region_id else None
+        region = (
+            Region.objects.filter(id=self.region_id).first() if self.region_id else None
+        )
         subregion = (
             SubRegion.objects.filter(id=self.subregion_id).first()
             if self.subregion_id

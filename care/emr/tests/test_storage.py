@@ -131,9 +131,7 @@ class FilesManagerDelegationTests(SimpleTestCase):
         self.file_obj = file_stub("patient", unique_name())
 
     def test_uses_the_backend_configured_for_its_alias(self):
-        self.assertEqual(
-            type(self.manager.storage), type(storages["patient"])
-        )
+        self.assertEqual(type(self.manager.storage), type(storages["patient"]))
 
     def test_save_uses_the_storage_name_convention(self):
         name = self.manager.put_object(self.file_obj, ContentFile(b"data"))

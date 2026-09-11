@@ -44,10 +44,8 @@ class CloudTasksRequestTests(SimpleTestCase):
         self.client.queue_path.return_value = (
             f"projects/{PROJECT}/locations/{LOCATION}/queues/{QUEUE}"
         )
-        self.client.task_path.side_effect = (
-            lambda project, region, queue, task: (
-                f"projects/{project}/locations/{region}/queues/{queue}/tasks/{task}"
-            )
+        self.client.task_path.side_effect = lambda project, region, queue, task: (
+            f"projects/{project}/locations/{region}/queues/{queue}/tasks/{task}"
         )
         self.client.create_task.return_value.name = "projects/care-test/.../tasks/abc"
         self.get_client.return_value = self.client

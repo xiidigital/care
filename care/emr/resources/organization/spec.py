@@ -43,7 +43,9 @@ class OrganizationUpdateSpec(OrganizationBaseSpec):
             raise ValueError("Only government organizations can reference geography")
         obj = info.context["object"]
         if obj.has_children:
-            raise ValueError("A geographic organization with children cannot change node")
+            raise ValueError(
+                "A geographic organization with children cannot change node"
+            )
         selected = [
             (level, node_id)
             for level, node_id in (
@@ -55,7 +57,9 @@ class OrganizationUpdateSpec(OrganizationBaseSpec):
             if node_id
         ]
         if len(selected) > 1:
-            raise ValueError("An organization can reference only one direct geographic node")
+            raise ValueError(
+                "An organization can reference only one direct geographic node"
+            )
         if selected:
             from cities_light.models import City, Country, Region, SubRegion
 
@@ -85,7 +89,9 @@ class OrganizationUpdateSpec(OrganizationBaseSpec):
                 "city": "subregion",
             }.get(level)
             if expected_parent is None:
-                raise ValueError("A country organization cannot have a geographic parent")
+                raise ValueError(
+                    "A country organization cannot have a geographic parent"
+                )
             if parent_level != expected_parent:
                 message = (
                     f"A {level} organization must be created under a "
@@ -93,7 +99,9 @@ class OrganizationUpdateSpec(OrganizationBaseSpec):
                 )
                 raise ValueError(message)
             if parent_node.id != getattr(node, f"{expected_parent}_id"):
-                raise ValueError("Geographic node does not belong to the selected parent")
+                raise ValueError(
+                    "Geographic node does not belong to the selected parent"
+                )
         return self
 
     def perform_extra_deserialization(self, is_update, obj):
@@ -121,9 +129,13 @@ class OrganizationWriteSpec(OrganizationBaseSpec):
             "subregion": self.subregion_id,
             "city": self.city_id,
         }
-        selected = [(level, node_id) for level, node_id in direct_nodes.items() if node_id]
+        selected = [
+            (level, node_id) for level, node_id in direct_nodes.items() if node_id
+        ]
         if len(selected) > 1:
-            raise ValueError("An organization can reference only one direct geographic node")
+            raise ValueError(
+                "An organization can reference only one direct geographic node"
+            )
         if selected and self.org_type != OrganizationTypeChoices.govt:
             raise ValueError("Only government organizations can reference geography")
         if not selected:
@@ -145,7 +157,9 @@ class OrganizationWriteSpec(OrganizationBaseSpec):
 
         if not self.parent:
             if level != "country":
-                raise ValueError("A root government organization must reference a country")
+                raise ValueError(
+                    "A root government organization must reference a country"
+                )
             return self
 
         parent = Organization.objects.get(external_id=self.parent)
@@ -194,7 +208,9 @@ class OrganizationReadSpec(OrganizationBaseSpec):
         country = obj.get_country()
         mapping["geography"] = {
             "direct": serialize_catalog_node(node, level=level) if node else None,
-            "country": serialize_catalog_node(country, level="country") if country else None,
+            "country": serialize_catalog_node(country, level="country")
+            if country
+            else None,
         }
 
 
@@ -203,7 +219,9 @@ def _assign_geography(spec, obj):
     if not any(field in spec.model_fields_set for field in geography_fields):
         return
     for field in geography_fields:
-        setattr(obj, field, getattr(spec, field) if field in spec.model_fields_set else None)
+        setattr(
+            obj, field, getattr(spec, field) if field in spec.model_fields_set else None
+        )
 
 
 class OrganizationRetrieveSpec(OrganizationReadSpec):

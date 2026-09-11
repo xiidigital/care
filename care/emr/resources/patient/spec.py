@@ -32,9 +32,11 @@ from care.utils.time_util import care_now
 def _get_registration_facility(facility_id):
     from care.facility.models import Facility
 
-    facility = Facility.objects.filter(external_id=facility_id).select_related(
-        "geo_organization"
-    ).first()
+    facility = (
+        Facility.objects.filter(external_id=facility_id)
+        .select_related("geo_organization")
+        .first()
+    )
     if facility is None:
         raise ValueError("Registration facility does not exist")
     if facility.geo_organization is None:
@@ -93,12 +95,16 @@ def _validate_location(country, region_id, subregion_id, city_id):
         raise ValueError("Region does not belong to the registration facility country")
     if subregion:
         if subregion.country_id != country.id:
-            raise ValueError("Subregion does not belong to the registration facility country")
+            raise ValueError(
+                "Subregion does not belong to the registration facility country"
+            )
         if region and subregion.region_id != region.id:
             raise ValueError("Subregion does not belong to the selected region")
     if city:
         if city.country_id != country.id:
-            raise ValueError("City does not belong to the registration facility country")
+            raise ValueError(
+                "City does not belong to the registration facility country"
+            )
         if subregion and city.subregion_id != subregion.id:
             raise ValueError("City does not belong to the selected subregion")
     return region, subregion, city
@@ -182,7 +188,8 @@ class PatientIdentifierConfigRequest(BaseModel):
 
 
 class PatientCreateSpec(ExtensionValidator, PatientBaseSpec):
-    __exclude__ = [*PatientBaseSpec.__exclude__,
+    __exclude__ = [
+        *PatientBaseSpec.__exclude__,
         "registration_facility",
         "region_id",
         "subregion_id",
@@ -266,7 +273,8 @@ class PatientCreateSpec(ExtensionValidator, PatientBaseSpec):
 
 
 class PatientUpdateSpec(ExtensionValidator, PatientBaseSpec):
-    __exclude__ = [*PatientBaseSpec.__exclude__,
+    __exclude__ = [
+        *PatientBaseSpec.__exclude__,
         "registration_facility",
         "region_id",
         "subregion_id",
@@ -345,7 +353,13 @@ class PatientUpdateSpec(ExtensionValidator, PatientBaseSpec):
 
     @model_validator(mode="after")
     def validate_postal_code_for_geography(self, info: ValidationInfo):
-        location_fields = {"geo_organization", "registration_facility", "region_id", "subregion_id", "city_id"}
+        location_fields = {
+            "geo_organization",
+            "registration_facility",
+            "region_id",
+            "subregion_id",
+            "city_id",
+        }
         if "pincode" not in self.model_fields_set and not (
             location_fields & self.model_fields_set
         ):
@@ -457,9 +471,7 @@ class PatientRetrieveSpec(
             "subregion": {"id": obj.subregion_id, "name": obj.subregion.name}
             if obj.subregion_id
             else None,
-            "city": {"id": obj.city_id, "name": obj.city.name}
-            if obj.city_id
-            else None,
+            "city": {"id": obj.city_id, "name": obj.city.name} if obj.city_id else None,
         }
         cls.serialize_audit_users(mapping, obj)
         if obj.instance_identifiers:
