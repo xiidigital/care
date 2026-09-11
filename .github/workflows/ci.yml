@@ -108,7 +108,12 @@ jobs:
 
           echo "checking: $files"
           # shellcheck disable=SC2086
-          ruff format --check $files
+          # --force-exclude: files are passed by name, and ruff applies
+          # pyproject's extend-exclude (migrations, care/facility) to named
+          # files only when told to. Without it this step flags excluded files
+          # whenever a change touches them, while pre-commit -- which passes
+          # the flag -- accepts the same files.
+          ruff format --check --force-exclude $files
 
   application-tests:
     name: Application regression suite
