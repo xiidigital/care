@@ -333,7 +333,7 @@ ECS deploy path is currently inactive upstream.
 | --- | --- | --- | --- |
 | `db` | `postgres:17-alpine` | 5433→5432 | `pg_isready` |
 | `redis` | `redis:8-alpine` | 6380→6379 | `redis-cli ping` |
-| `minio` | `minio/minio:latest` | 9100→9000, 9001 | `/minio/health/ready` |
+| `minio` | `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` | 9100→9000, 9001 | `/minio/health/ready` |
 
 **verified** `docker-compose.local.yaml` adds `backend` and `celery`, both from
 the `care_local` image built from `docker/dev.Dockerfile`.

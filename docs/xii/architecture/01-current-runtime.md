@@ -276,7 +276,7 @@ restart: unless-stopped
 The object-storage container uses:
 
 ```text
-minio/minio:latest
+quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
 ```
 
 MinIO provides an S3-compatible API for the current local file-storage

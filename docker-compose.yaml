@@ -36,7 +36,12 @@ services:
       timeout: 10s
 
   minio:
-    image: minio/minio:latest
+    # Docker Hub's minio/minio was withdrawn: the repository 404s and an
+    # anonymous manifest request is refused, so every compose-based CI job
+    # died at `up` before running a test. quay.io is MinIO's own registry.
+    # Pinned rather than :latest -- a floating tag is what let this break
+    # with no change to the repository.
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     restart: unless-stopped
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
